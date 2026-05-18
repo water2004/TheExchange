@@ -107,8 +107,13 @@ public class ExchangeCommand {
             String password = StringArgumentType.getString(ctx, "password");
 
             core.getServerRegistry().addServer(name, address, port, password);
-            ctx.getSource().sendSuccess(() -> Component.literal(
-                    "已添加远程服务器: " + name + " (" + address + ":" + port + ")"), true);
+
+            String msg = "已添加远程服务器: " + name + " (" + address + ":" + port + ")";
+            if (!core.getServerRegistry().isNetworkAvailable()) {
+                msg += " — 注意：本服网络未启用，无法连接远程。请检查 config/theexchange/theexchange.json 中的端口是否被占用";
+            }
+            final String finalMsg = msg;
+            ctx.getSource().sendSuccess(() -> Component.literal(finalMsg), true);
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in addServer", e);
@@ -146,15 +151,20 @@ public class ExchangeCommand {
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
             List<RemoteServer> servers = core.getServerRegistry().getAllServers();
-            NetworkManager nm = core.getNetworkManager();
+            boolean netOk = core.getServerRegistry().isNetworkAvailable();
             String localName = core.getApi().getServerName();
 
             ctx.getSource().sendSuccess(() -> Component.literal("=== 共享空间服务器列表 ==="), false);
             ctx.getSource().sendSuccess(() -> Component.literal(
                     "  [本服] " + localName + " — 使用 /exchange view local 打开"), false);
             for (RemoteServer server : servers) {
-                ServerStatus status = nm.getStatus(server.getName());
-                String statusStr = status == ServerStatus.ONLINE ? "在线" : "离线";
+                String statusStr;
+                if (!netOk) {
+                    statusStr = "离线 (网络未启用)";
+                } else {
+                    ServerStatus status = core.getServerRegistry().getStatus(server.getName());
+                    statusStr = status == ServerStatus.ONLINE ? "在线" : "离线";
+                }
                 ctx.getSource().sendSuccess(() -> Component.literal(
                         "  " + server.getName() + " - " + server.getAddress()
                                 + ":" + server.getPort() + " [" + statusStr + "]"), false);
@@ -197,8 +207,10 @@ public class ExchangeCommand {
             boolean online;
             if (isLocal) {
                 online = true;
+            } else if (!core.getServerRegistry().isNetworkAvailable()) {
+                online = false;
             } else {
-                ServerStatus status = core.getNetworkManager().getStatus(serverName);
+                ServerStatus status = core.getServerRegistry().getStatus(serverName);
                 if (status == ServerStatus.ONLINE) {
                     try {
                         var syncResult = core.getSyncEngine().syncIfNeeded(serverName);

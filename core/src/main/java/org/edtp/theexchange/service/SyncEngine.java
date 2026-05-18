@@ -27,9 +27,9 @@ public class SyncEngine {
      * Incremental sync: check timestamp first, only pull full data if changed.
      */
     public SyncResult syncIfNeeded(String serverName) {
+        if (networkManager == null) return SyncResult.offline(cacheManager.getCache(serverName));
         Connection conn = networkManager.getConnection(serverName);
         if (conn == null) {
-            // Offline: return cached data
             return SyncResult.offline(cacheManager.getCache(serverName));
         }
 
@@ -55,6 +55,7 @@ public class SyncEngine {
      * Force full sync regardless of timestamp.
      */
     public SyncResult fullSync(String serverName) {
+        if (networkManager == null) return SyncResult.offline(cacheManager.getCache(serverName));
         Connection conn = networkManager.getConnection(serverName);
         if (conn == null) {
             return SyncResult.offline(cacheManager.getCache(serverName));

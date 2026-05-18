@@ -22,6 +22,10 @@ public class ServerRegistry {
         this.networkManager = networkManager;
     }
 
+    public boolean isNetworkAvailable() {
+        return networkManager != null;
+    }
+
     public void loadFromDatabase() {
         String sql = "SELECT name, address, port, password_hash, enabled FROM remote_servers";
         try (Statement stmt = db.getConnection().createStatement();
@@ -43,8 +47,7 @@ public class ServerRegistry {
 
     public RemoteServer addServer(String name, String address, int port, String password) {
         RemoteServer existing = servers.get(name);
-        if (existing != null) {
-            // Remove old connection first
+        if (existing != null && networkManager != null) {
             networkManager.disconnect(name);
         }
 
@@ -65,8 +68,9 @@ public class ServerRegistry {
         RemoteServer server = new RemoteServer(name, address, port, passwordHash, true);
         servers.put(name, server);
 
-        // Attempt connection
-        networkManager.connectToRemote(server);
+        if (networkManager != null) {
+            networkManager.connectToRemote(server);
+        }
 
         return server;
     }
@@ -75,7 +79,9 @@ public class ServerRegistry {
         RemoteServer server = servers.remove(name);
         if (server == null) return false;
 
-        networkManager.disconnect(name);
+        if (networkManager != null) {
+            networkManager.disconnect(name);
+        }
 
         String sql = "DELETE FROM remote_servers WHERE name = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -96,6 +102,7 @@ public class ServerRegistry {
     }
 
     public ServerStatus getStatus(String name) {
+        if (networkManager == null) return ServerStatus.OFFLINE;
         return networkManager.getStatus(name);
     }
 

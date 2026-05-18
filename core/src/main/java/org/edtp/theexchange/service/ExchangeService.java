@@ -41,6 +41,7 @@ public class ExchangeService {
 
     public PutResult putItem(String serverName, int slot, String playerUuid,
                               String playerName, Object itemStack) {
+        if (networkManager == null) return PutResult.fail("网络功能未启用，请检查端口配置");
         Connection conn = networkManager.getConnection(serverName);
         if (conn == null) return PutResult.fail("目标服务器离线");
 
@@ -75,6 +76,7 @@ public class ExchangeService {
     public TakeResult takeItem(String serverName, int slot, String expectedItemId,
                                 int expectedVersion, int requestCount,
                                 String playerUuid, String playerName) {
+        if (networkManager == null) return TakeResult.fail("网络功能未启用，请检查端口配置");
         Connection conn = networkManager.getConnection(serverName);
         if (conn == null) return TakeResult.fail("目标服务器离线");
 
