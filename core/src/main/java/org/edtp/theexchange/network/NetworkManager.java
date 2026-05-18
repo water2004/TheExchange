@@ -24,7 +24,12 @@ public class NetworkManager {
     private final CopyOnWriteArrayList<BiConsumer<String, ServerStatus>> statusListeners = new CopyOnWriteArrayList<>();
 
     private String localPassword;
-    private BiConsumer<FrameType, Object> messageRouter;
+    private MessageHandler messageRouter;
+
+    @FunctionalInterface
+    public interface MessageHandler {
+        void handle(Connection conn, FrameType type, Object message);
+    }
 
     public NetworkManager(int localPort, Path keystorePath, String cn, char[] keystorePassword) {
         this.tlsContext = TlsContext.create(keystorePath, cn, keystorePassword);
@@ -38,7 +43,7 @@ public class NetworkManager {
         System.out.println(TAG + "Local password set (len=" + (password != null ? password.length() : 0) + ")");
     }
 
-    public void setMessageRouter(BiConsumer<FrameType, Object> router) {
+    public void setMessageRouter(MessageHandler router) {
         this.messageRouter = router;
     }
 
@@ -52,7 +57,7 @@ public class NetworkManager {
                 if (type == FrameType.AUTH_REQUEST) {
                     handleInboundAuth(conn, (AuthRequest) msg);
                 } else if (messageRouter != null) {
-                    messageRouter.accept(type, msg);
+                    messageRouter.handle(conn, type, msg);
                 }
             });
             conn.setDisconnectHandler((c, graceful) -> {
@@ -86,7 +91,7 @@ public class NetworkManager {
                             System.currentTimeMillis()));
 
             conn.start((type, msg) -> {
-                if (messageRouter != null) messageRouter.accept(type, msg);
+                if (messageRouter != null) messageRouter.handle(conn, type, msg);
             });
 
             notifyStatusChange(request.getServerName(), ServerStatus.ONLINE);
@@ -131,7 +136,7 @@ public class NetworkManager {
                     conn.close();
                 }
             } else if (messageRouter != null) {
-                messageRouter.accept(type, msg);
+                messageRouter.handle(conn, type, msg);
             }
         });
 

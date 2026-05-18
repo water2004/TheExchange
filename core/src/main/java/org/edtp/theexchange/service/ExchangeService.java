@@ -193,17 +193,31 @@ public class ExchangeService {
 
     // ========== Message routing ==========
 
-    public void routeMessage(FrameType type, Object message) {
+    public void routeMessage(org.edtp.theexchange.network.Connection conn,
+                              FrameType type, Object message) {
         switch (type) {
             case QUERY_TIMESTAMP -> {
-                // Handled by the calling connection directly
+                QueryTimestampRequest req = (QueryTimestampRequest) message;
+                long ts = localItemStore.getLastModifiedTimestamp();
+                boolean changed = req.getCachedTimestamp() != ts;
+                conn.send(FrameType.TIMESTAMP_RESPONSE,
+                        new QueryTimestampResponse(ts, changed));
             }
             case QUERY_ITEMS -> {
-                // Handled by the calling connection directly
+                var items = localItemStore.getAllItems();
+                conn.send(FrameType.ITEMS_RESPONSE,
+                        new QueryItemsResponse(items, 54,
+                                localItemStore.getLastModifiedTimestamp(), "26.1.2"));
             }
-            case PUT_ITEM -> handleRemotePut((PutItemRequest) message);
-            case TAKE_ITEM -> handleRemoteTake((TakeItemRequest) message);
-            case PUSH_UPDATE -> { /* optional: trigger cache refresh */ }
+            case PUT_ITEM -> {
+                PutItemResponse resp = handleRemotePut((PutItemRequest) message);
+                conn.send(FrameType.PUT_ITEM_RESPONSE, resp);
+            }
+            case TAKE_ITEM -> {
+                TakeItemResponse resp = handleRemoteTake((TakeItemRequest) message);
+                conn.send(FrameType.TAKE_ITEM_RESPONSE, resp);
+            }
+            case PUSH_UPDATE -> { /* optional */ }
             default -> {}
         }
     }

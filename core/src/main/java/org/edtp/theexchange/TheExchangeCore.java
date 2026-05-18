@@ -119,8 +119,8 @@ public class TheExchangeCore {
         if (networkManager != null) {
             heartbeatManager = new HeartbeatManager(networkManager, serverRegistry);
             heartbeatManager.start();
-            networkManager.setMessageRouter((type, msg) ->
-                    exchangeService.routeMessage(type, msg));
+            networkManager.setMessageRouter((conn, type, msg) ->
+                    exchangeService.routeMessage(conn, type, msg));
         }
 
         instance = this;
