@@ -119,10 +119,17 @@ public class ExchangeCommand {
     }
 
     private static int listServers(CommandContext<CommandSourceStack> ctx) {
-        List<RemoteServer> servers = TheExchangeCore.getInstance().getServerRegistry().getAllServers();
-        NetworkManager nm = TheExchangeCore.getInstance().getNetworkManager();
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        List<RemoteServer> servers = core.getServerRegistry().getAllServers();
+        NetworkManager nm = core.getNetworkManager();
+        String localName = core.getApi().getServerName();
 
-        ctx.getSource().sendSuccess(() -> Component.literal("=== 已配置的远程服务器 ==="), false);
+        ctx.getSource().sendSuccess(() -> Component.literal("=== 共享空间服务器列表 ==="), false);
+
+        // Always show local server first
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                "  [本服] " + localName + " — 使用 /exchange view local 打开"), false);
+
         for (RemoteServer server : servers) {
             ServerStatus status = nm.getStatus(server.getName());
             String statusStr = status == ServerStatus.ONLINE ? "在线" : "离线";
@@ -131,9 +138,9 @@ public class ExchangeCommand {
                             + " [" + statusStr + "]"), false);
         }
         if (servers.isEmpty()) {
-            ctx.getSource().sendSuccess(() -> Component.literal("  (无)"), false);
+            ctx.getSource().sendSuccess(() -> Component.literal("  (无远程服务器)"), false);
         }
-        return servers.size();
+        return servers.size() + 1;
     }
 
     private static int reloadConfig(CommandContext<CommandSourceStack> ctx) {
@@ -157,23 +164,39 @@ public class ExchangeCommand {
         if (player == null) return 0;
 
         TheExchangeCore core = TheExchangeCore.getInstance();
-        NetworkManager nm = core.getNetworkManager();
-        ServerStatus status = nm.getStatus(serverName);
-        boolean online = status == ServerStatus.ONLINE;
+        String localName = core.getApi().getServerName();
 
-        // Sync if online
-        if (online) {
-            var syncResult = core.getSyncEngine().syncIfNeeded(serverName);
-            online = syncResult.isOnline();
+        boolean isLocal = serverName.equalsIgnoreCase("local")
+                || serverName.equalsIgnoreCase(localName);
+
+        boolean online;
+        if (isLocal) {
+            online = true;
+        } else {
+            ServerStatus status = core.getNetworkManager().getStatus(serverName);
+            if (status == ServerStatus.ONLINE) {
+                var syncResult = core.getSyncEngine().syncIfNeeded(serverName);
+                online = syncResult.isOnline();
+            } else {
+                online = false;
+            }
         }
 
-        final boolean isOnlineFinal = online;
+        String titleServerName = isLocal ? localName : serverName;
+        // Capture for lambda
+        boolean capturedOnline = online;
+        boolean capturedLocal = isLocal;
+        Component title = Component.literal(
+                (capturedLocal ? "[本服] " : (capturedOnline ? "" : "[离线] "))
+                        + titleServerName + " 的共享空间");
+
         MenuProvider provider = new SimpleMenuProvider(
-                (containerId, inventory, p) -> new ExchangeMenu(containerId, inventory, serverName, isOnlineFinal),
-                Component.literal((isOnlineFinal ? "" : "[离线] ") + serverName + " 的共享空间"));
+                (containerId, inventory, p) -> new ExchangeMenu(
+                        containerId, inventory, titleServerName, capturedLocal, capturedOnline),
+                title);
         player.openMenu(provider);
 
-        if (!isOnlineFinal) {
+        if (!online) {
             player.sendSystemMessage(Component.literal("[离线] 仅可查看缓存数据 — 目标服务器离线"));
         }
 

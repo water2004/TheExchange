@@ -49,15 +49,24 @@ public class ExchangeContainer extends SimpleContainer implements Container {
     public void loadFromCache() {
         var cache = TheExchangeCore.getInstance().getCacheManager().getCache(serverName);
         if (cache != null) {
-            List<NeutralItem> items = cache.getItems();
-            var serializer = TheExchangeCore.getInstance().getApi().getItemSerializer();
-            for (int i = 0; i < items.size() && i < getContainerSize(); i++) {
-                NeutralItem item = items.get(i);
-                if (item != null && !item.isEmpty()) {
-                    Object mcStack = serializer.deserialize(item);
-                    if (mcStack instanceof ItemStack stack) {
-                        setItem(i, stack);
-                    }
+            fillFromNeutralItems(cache.getItems());
+        }
+    }
+
+    public void loadFromLocal() {
+        var items = TheExchangeCore.getInstance().getLocalItemStore().getAllItems();
+        fillFromNeutralItems(items);
+    }
+
+    private void fillFromNeutralItems(List<NeutralItem> items) {
+        clearContent();
+        var serializer = TheExchangeCore.getInstance().getApi().getItemSerializer();
+        for (int i = 0; i < items.size() && i < getContainerSize(); i++) {
+            NeutralItem item = items.get(i);
+            if (item != null && !item.isEmpty()) {
+                Object mcStack = serializer.deserialize(item);
+                if (mcStack instanceof ItemStack stack) {
+                    setItem(i, stack);
                 }
             }
         }
