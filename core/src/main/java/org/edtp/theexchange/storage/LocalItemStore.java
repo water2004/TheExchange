@@ -23,9 +23,14 @@ public class LocalItemStore {
         try (Statement stmt = db.getConnection().createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
+                int slot = rs.getInt("slot");
+                // Pad with nulls so list index == slot number
+                while (items.size() <= slot) {
+                    items.add(null);
+                }
                 byte[] blob = rs.getBytes("item_data");
                 NeutralItem item = MessagePackBlobCodec.decode(blob, NeutralItem.class);
-                items.add(item);
+                items.set(slot, item);
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to get all items", e);
