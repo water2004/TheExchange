@@ -31,6 +31,7 @@ public class Connection {
     private final AtomicLong sendSequence = new AtomicLong(0);
     private final SequenceWindow recvWindow = new SequenceWindow();
     private volatile boolean running;
+    private volatile boolean authenticated;
     private volatile long lastRecvTime;
     private Thread readThread;
     private BiConsumer<FrameType, Object> messageHandler;
@@ -47,8 +48,11 @@ public class Connection {
         this.lastRecvTime = System.currentTimeMillis();
     }
 
-    public void start(BiConsumer<FrameType, Object> handler) {
+    public synchronized void start(BiConsumer<FrameType, Object> handler) {
         this.messageHandler = handler;
+        if (this.running) {
+            return;
+        }
         this.running = true;
         this.readThread = new Thread(this::readLoop, "exchange-conn-" + remoteName);
         this.readThread.setDaemon(true);
@@ -65,6 +69,14 @@ public class Connection {
 
     public boolean isRunning() {
         return running;
+    }
+
+    public boolean isAuthenticated() {
+        return authenticated;
+    }
+
+    public void setAuthenticated(boolean authenticated) {
+        this.authenticated = authenticated;
     }
 
     public void setDisconnectHandler(BiConsumer<Connection, Boolean> handler) {
@@ -162,9 +174,15 @@ public class Connection {
                     }
 
                     if (frame.hasPayload() && frame.getType() != FrameType.HEARTBEAT) {
-                        Object message = MessageCodec.decodeMessage(frame.getType(), frame.getPayload());
-                        if (messageHandler != null) {
-                            dispatchMessage(frame.getType(), message);
+                        try {
+                            Object message = MessageCodec.decodeMessage(frame.getType(), frame.getPayload());
+                            if (messageHandler != null) {
+                                dispatchMessage(frame.getType(), message);
+                            }
+                        } catch (RuntimeException e) {
+                            System.out.println("[Exchange|Conn] Protocol decode error from " + remoteName
+                                    + ": " + e.getMessage());
+                            break;
                         }
                     } else if (frame.getType() == FrameType.HEARTBEAT) {
                         if (messageHandler != null) {

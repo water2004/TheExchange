@@ -295,7 +295,7 @@ public final class MessageCodec {
                 case "items" -> {
                     int len = u.unpackArrayHeader();
                     List<NeutralItem> items = new ArrayList<>(len);
-                    for (int j = 0; j < len; j++) items.add(decodeNeutralItem(u));
+                    for (int j = 0; j < len; j++) items.add(decodeNullableNeutralItem(u));
                     m.setItems(items);
                 }
                 case "ts" -> m.setTotalSlots(u.unpackInt());

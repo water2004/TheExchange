@@ -35,7 +35,11 @@ public final class MessagePackBlobCodec {
         try (MessageUnpacker unpacker = MessagePack.newDefaultUnpacker(blob)) {
             int size = unpacker.unpackArrayHeader();
             for (int i = 0; i < size; i++) {
-                result.add((T) decodeObject(unpacker, elementClass));
+                if (unpacker.tryUnpackNil()) {
+                    result.add(null);
+                } else {
+                    result.add((T) decodeObject(unpacker, elementClass));
+                }
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to decode list of " + elementClass.getSimpleName(), e);
@@ -60,7 +64,11 @@ public final class MessagePackBlobCodec {
              MessagePacker packer = MessagePack.newDefaultPacker(bos)) {
             packer.packArrayHeader(items.size());
             for (T item : items) {
-                encodeObject(packer, item);
+                if (item == null) {
+                    packer.packNil();
+                } else {
+                    encodeObject(packer, item);
+                }
             }
             packer.close();
             return bos.toByteArray();

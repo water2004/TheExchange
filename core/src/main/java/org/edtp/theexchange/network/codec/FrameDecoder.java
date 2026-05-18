@@ -15,6 +15,8 @@ import java.nio.ByteOrder;
  */
 public class FrameDecoder {
 
+    public static final int MAX_FRAME_SIZE = 10 * 1024 * 1024;
+
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
     private boolean headerRead;
     private int expectedLength;
@@ -48,6 +50,10 @@ public class FrameDecoder {
             expectedType = FrameType.fromCode(bb.getShort());
             sequence = bb.getLong();
             timestamp = bb.getLong();
+
+            if (expectedLength < 0 || expectedLength > MAX_FRAME_SIZE) {
+                throw new IOException("Frame too large: " + expectedLength);
+            }
 
             headerRead = true;
             // Reset buffer to just the payload portion
@@ -90,6 +96,9 @@ public class FrameDecoder {
         }
         bb.getShort(); // version
         int length = bb.getInt();
+        if (length < 0 || length > MAX_FRAME_SIZE) {
+            throw new IOException("Frame too large: " + length);
+        }
         FrameType type = FrameType.fromCode(bb.getShort());
         long sequence = bb.getLong();
         long timestamp = bb.getLong();

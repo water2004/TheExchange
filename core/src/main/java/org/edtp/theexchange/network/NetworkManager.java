@@ -56,7 +56,7 @@ public class NetworkManager {
                         + (msg != null ? msg.getClass().getSimpleName() : "null"));
                 if (type == FrameType.AUTH_REQUEST) {
                     handleInboundAuth(conn, (AuthRequest) msg);
-                } else if (messageRouter != null) {
+                } else if (conn.isAuthenticated() && messageRouter != null) {
                     messageRouter.handle(conn, type, msg);
                 }
             });
@@ -85,14 +85,11 @@ public class NetworkManager {
             System.out.println(TAG + "AUTH OK from " + request.getServerName());
             serverStatus.put(request.getServerName(), ServerStatus.ONLINE);
             connections.put(request.getServerName(), conn);
+            conn.setAuthenticated(true);
 
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(true, "OK", "local", "26.1.2",
                             System.currentTimeMillis()));
-
-            conn.start((type, msg) -> {
-                if (messageRouter != null) messageRouter.handle(conn, type, msg);
-            });
 
             notifyStatusChange(request.getServerName(), ServerStatus.ONLINE);
         } else {
@@ -130,6 +127,7 @@ public class NetworkManager {
                         + ": success=" + resp.isSuccess()
                         + " msg=" + resp.getMessage());
                 if (resp.isSuccess()) {
+                    conn.setAuthenticated(true);
                     serverStatus.put(server.getName(), ServerStatus.ONLINE);
                     notifyStatusChange(server.getName(), ServerStatus.ONLINE);
                 } else {
@@ -137,7 +135,7 @@ public class NetworkManager {
                     connections.remove(server.getName());
                     conn.close();
                 }
-            } else if (messageRouter != null) {
+            } else if (conn.isAuthenticated() && messageRouter != null) {
                 messageRouter.handle(conn, type, msg);
             }
         });
