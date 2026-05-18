@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "theexchange",
+  "version": "${version}",
+  "name": "TheExchange",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/theexchange/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-datagen": [
+      "org.edtp.theexchange.client.TheexchangeDataGenerator"
+    ],
+    "client": [
+      "org.edtp.theexchange.client.TheexchangeClient"
+    ],
+    "main": [
+      "org.edtp.theexchange.Theexchange"
+    ]
+  },
+  "mixins": [
+    "theexchange.mixins.json",
+    {
+      "config": "theexchange.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
