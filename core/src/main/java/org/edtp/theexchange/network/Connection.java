@@ -134,11 +134,15 @@ public class Connection {
     private void readLoop() {
         FrameDecoder decoder = new FrameDecoder();
         byte[] buf = new byte[8192];
+        System.out.println("[Exchange|Conn] Read loop started for " + remoteName);
 
         while (running) {
             try {
                 int read = in.read(buf);
-                if (read < 0) break;
+                if (read < 0) {
+                    System.out.println("[Exchange|Conn] EOF from " + remoteName);
+                    break;
+                }
 
                 byte[] data = new byte[read];
                 System.arraycopy(buf, 0, data, 0, read);
@@ -147,28 +151,28 @@ public class Connection {
                 while (frame != null) {
                     lastRecvTime = System.currentTimeMillis();
 
-                    // Anti-replay validation
                     if (!recvWindow.validate(frame.getSequence(), frame.getTimestamp())) {
-                        frame = decoder.feed(new byte[0]); // check for more
+                        System.out.println("[Exchange|Conn] Replay rejected seq="
+                                + frame.getSequence() + " from " + remoteName);
+                        frame = decoder.feed(new byte[0]);
                         continue;
                     }
 
-                    // Decode and dispatch
                     if (frame.hasPayload() && frame.getType() != FrameType.HEARTBEAT) {
                         Object message = MessageCodec.decodeMessage(frame.getType(), frame.getPayload());
                         if (messageHandler != null) {
                             dispatchMessage(frame.getType(), message);
                         }
                     } else if (frame.getType() == FrameType.HEARTBEAT) {
-                        // Heartbeat is handled internally
                         if (messageHandler != null) {
                             messageHandler.accept(frame.getType(), null);
                         }
                     }
 
-                    frame = decoder.feed(new byte[0]); // check for buffered next frame
+                    frame = decoder.feed(new byte[0]);
                 }
             } catch (IOException e) {
+                System.out.println("[Exchange|Conn] Read error from " + remoteName + ": " + e.getMessage());
                 break;
             }
         }

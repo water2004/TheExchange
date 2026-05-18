@@ -8,9 +8,6 @@ import java.io.IOException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
-/**
- * Accepts inbound TLS connections from remote Exchange servers.
- */
 public class TcpServer {
 
     private final int port;
@@ -32,8 +29,9 @@ public class TcpServer {
             serverSocket = (SSLServerSocket) tlsContext.getServerSocketFactory()
                     .createServerSocket(port);
             serverSocket.setEnabledProtocols(new String[]{"TLSv1.3"});
-            serverSocket.setNeedClientAuth(false); // Trust via password auth, not client cert
+            serverSocket.setNeedClientAuth(false);
             serverSocket.setReuseAddress(true);
+            System.out.println("[Exchange|Srv] Listening on port " + port);
         } catch (IOException e) {
             throw new RuntimeException("Failed to start Exchange server on port " + port, e);
         }
@@ -49,29 +47,23 @@ public class TcpServer {
             try {
                 SSLSocket socket = (SSLSocket) serverSocket.accept();
                 TlsContext.configureSocket(socket);
-
-                Connection conn = new Connection(socket.getInetAddress().getHostAddress(),
-                        socket);
+                String remote = socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
+                System.out.println("[Exchange|Srv] Accepted TLS from " + remote);
+                Connection conn = new Connection(remote, socket);
                 connections.add(conn);
                 if (connectionHandler != null) {
                     connectionHandler.accept(conn);
                 }
             } catch (IOException e) {
                 if (running) {
-                    // Log but continue
-                    System.err.println("[Exchange] Accept error: " + e.getMessage());
+                    System.err.println("[Exchange|Srv] Accept error: " + e.getMessage());
                 }
             }
         }
     }
 
-    public int getPort() {
-        return port;
-    }
-
-    public int getConnectionCount() {
-        return connections.size();
-    }
+    public int getPort() { return port; }
+    public int getConnectionCount() { return connections.size(); }
 
     public void removeConnection(Connection conn) {
         connections.remove(conn);
@@ -79,12 +71,8 @@ public class TcpServer {
 
     public void shutdown() {
         running = false;
-        try {
-            if (serverSocket != null) serverSocket.close();
-        } catch (IOException ignored) {}
-        for (Connection conn : connections) {
-            conn.close();
-        }
+        try { if (serverSocket != null) serverSocket.close(); } catch (IOException ignored) {}
+        for (Connection conn : connections) conn.close();
         connections.clear();
     }
 }
