@@ -26,7 +26,7 @@ public class NetworkManager {
     private final ConcurrentHashMap<String, ServerStatus> serverStatus = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<BiConsumer<String, ServerStatus>> statusListeners = new CopyOnWriteArrayList<>();
 
-    private String localPassword;
+    private String localPassword; // stored plaintext, compared directly; TLS provides transport security
     private Consumer<Connection> inboundConnectionHandler;
     private BiConsumer<FrameType, Object> messageRouter;
 

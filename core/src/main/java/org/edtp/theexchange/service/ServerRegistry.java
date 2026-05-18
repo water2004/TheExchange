@@ -3,7 +3,6 @@ package org.edtp.theexchange.service;
 import org.edtp.theexchange.model.RemoteServer;
 import org.edtp.theexchange.model.ServerStatus;
 import org.edtp.theexchange.network.NetworkManager;
-import org.edtp.theexchange.security.ConfigSanitizer;
 import org.edtp.theexchange.storage.DatabaseManager;
 
 import java.sql.*;
@@ -51,21 +50,19 @@ public class ServerRegistry {
             networkManager.disconnect(name);
         }
 
-        String passwordHash = ConfigSanitizer.sanitizePassword(password);
-
         String sql = "INSERT OR REPLACE INTO remote_servers (name, address, port, password_hash, enabled) " +
                 "VALUES (?, ?, ?, ?, 1)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, name);
             ps.setString(2, address);
             ps.setInt(3, port);
-            ps.setString(4, passwordHash);
+            ps.setString(4, password);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to add server " + name, e);
         }
 
-        RemoteServer server = new RemoteServer(name, address, port, passwordHash, true);
+        RemoteServer server = new RemoteServer(name, address, port, password, true);
         servers.put(name, server);
 
         if (networkManager != null) {

@@ -76,7 +76,7 @@ public class TheExchangeCore {
         String cn = api.getServerName();
         char[] keystorePass = "theexchange".toCharArray();
 
-        // 4. Network (may fail — don't abort entire init)
+        // 4. Network
         try {
             networkManager = new NetworkManager(localPort, keystorePath, cn, keystorePass);
             networkManager.setLocalPassword(localPassword);

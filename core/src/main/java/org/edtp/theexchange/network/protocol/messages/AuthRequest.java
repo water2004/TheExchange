@@ -2,7 +2,7 @@ package org.edtp.theexchange.network.protocol.messages;
 
 public class AuthRequest {
     private String serverName;
-    private String password;      // plaintext over TLS, receiver uses bcrypt.verify
+    private String password;      // plaintext over TLS, compared directly on receiver side
     private String version;       // protocol version
     private String mcVersion;     // MC version string
 

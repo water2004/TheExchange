@@ -44,7 +44,7 @@ public final class SelfSignedCert {
 
     private static void generateWithKeytool(Path keystorePath, String cn,
                                               char[] password) throws Exception {
-        // Use a fixed safe DN — cert identity is not used for auth (bcrypt handles that)
+        // Use a fixed safe DN — cert identity is not used for auth (password handles that)
         String passStr = new String(password);
 
         List<String> args = new ArrayList<>();
