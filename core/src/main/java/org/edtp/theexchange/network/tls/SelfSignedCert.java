@@ -44,7 +44,7 @@ public final class SelfSignedCert {
 
     private static void generateWithKeytool(Path keystorePath, String cn,
                                               char[] password) throws Exception {
-        String cnSafe = (cn != null && !cn.isEmpty()) ? cn : "TheExchange";
+        // Use a fixed safe DN — cert identity is not used for auth (bcrypt handles that)
         String passStr = new String(password);
 
         List<String> args = new ArrayList<>();
@@ -58,12 +58,11 @@ public final class SelfSignedCert {
         args.add("-keysize"); args.add("2048");
         args.add("-sigalg"); args.add("SHA256withRSA");
         args.add("-validity"); args.add("365");
-        args.add("-dname"); args.add("CN=" + cnSafe + ", OU=TheExchange, O=TheExchange, L=Unknown, ST=Unknown, C=XX");
+        args.add("-dname"); args.add("CN=TheExchange, OU=TheExchange, O=TheExchange, L=Unknown, ST=Unknown, C=XX");
         args.add("-storetype"); args.add("PKCS12");
         args.add("-keystore"); args.add(keystorePath.toAbsolutePath().toString());
         args.add("-storepass"); args.add(passStr);
         args.add("-keypass"); args.add(passStr);
-        args.add("-ext"); args.add("SAN=DNS:" + cnSafe);
         args.add("-noprompt");
 
         ProcessBuilder pb = new ProcessBuilder(args);
