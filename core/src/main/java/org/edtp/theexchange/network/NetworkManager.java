@@ -122,6 +122,8 @@ public class NetworkManager {
             System.out.println(TAG + "Response from " + server.getName()
                     + ": type=" + type + " msg="
                     + (msg != null ? msg.getClass().getSimpleName() : "null"));
+            // Route to any pending sendAndWait future first
+            conn.onResponse(type, msg);
             if (type == FrameType.AUTH_RESPONSE) {
                 AuthResponse resp = (AuthResponse) msg;
                 System.out.println(TAG + "AUTH response from " + server.getName()

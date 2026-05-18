@@ -11,7 +11,10 @@ import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
@@ -27,17 +30,14 @@ public class Connection {
     private final OutputStream out;
     private final AtomicLong sendSequence = new AtomicLong(0);
     private final SequenceWindow recvWindow = new SequenceWindow();
-    private final ConcurrentHashMap<String, Frame> pendingRequests = new ConcurrentHashMap<>();
-    private final AtomicLong pendingId = new AtomicLong(0);
-
     private volatile boolean running;
     private volatile long lastRecvTime;
     private Thread readThread;
     private BiConsumer<FrameType, Object> messageHandler;
     private volatile BiConsumer<Connection, Boolean> disconnectHandler;
 
-    // Result tracking for request-response pattern
-    private final ConcurrentHashMap<String, Object> responseResults = new ConcurrentHashMap<>();
+    // Pending request-response futures, keyed by response type
+    private final ConcurrentHashMap<FrameType, CompletableFuture<Object>> pendingFutures = new ConcurrentHashMap<>();
 
     public Connection(String remoteName, SSLSocket socket) throws IOException {
         this.remoteName = remoteName;
@@ -89,13 +89,11 @@ public class Connection {
         return frame.getSequence();
     }
 
-    /**
-     * Send a request and wait for the response (synchronous request-response).
-     */
     @SuppressWarnings("unchecked")
     public <T> T sendAndWait(FrameType requestType, Object request,
                               FrameType responseType, long timeoutMs) {
-        String responseKey = responseType.name() + "_" + pendingId.incrementAndGet();
+        CompletableFuture<Object> future = new CompletableFuture<>();
+        pendingFutures.put(responseType, future);
 
         Frame frame = new Frame(requestType, sendSequence.incrementAndGet(),
                 System.currentTimeMillis(), MessageCodec.encodeMessage(request));
@@ -105,26 +103,31 @@ public class Connection {
                 out.write(data);
                 out.flush();
             } catch (IOException e) {
+                pendingFutures.remove(responseType);
                 handleDisconnect();
                 return null;
             }
         }
 
-        // Wait for response
-        long start = System.currentTimeMillis();
-        while (System.currentTimeMillis() - start < timeoutMs) {
-            Object result = responseResults.remove(responseKey);
-            if (result != null) {
-                return (T) result;
-            }
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            }
+        try {
+            return (T) future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            pendingFutures.remove(responseType);
+            return null;
+        } catch (Exception e) {
+            pendingFutures.remove(responseType);
+            return null;
         }
-        return null; // Timeout
+    }
+
+    /**
+     * Feed a received response to any pending sendAndWait future.
+     */
+    public void onResponse(FrameType type, Object message) {
+        CompletableFuture<Object> future = pendingFutures.remove(type);
+        if (future != null) {
+            future.complete(message);
+        }
     }
 
     public void sendResponse(FrameType responseType, Object response) {
