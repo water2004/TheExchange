@@ -9,6 +9,7 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import org.edtp.theexchange.TheExchangeCore;
+import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.service.ExchangeService;
 
 /**
@@ -28,6 +29,7 @@ public class ExchangeMenu extends AbstractContainerMenu {
     private final String serverName;
     private final boolean local;
     private final boolean online;
+    private boolean refreshing;
 
     public ExchangeMenu(int containerId, Inventory playerInventory,
                          String serverName, boolean local, boolean online) {
@@ -82,6 +84,34 @@ public class ExchangeMenu extends AbstractContainerMenu {
         }
     }
 
+    public boolean isViewingServer(String name) {
+        return serverName.equalsIgnoreCase(name);
+    }
+
+    public void refreshFromCache() {
+        if (refreshing) return;
+        refreshing = true;
+        try {
+            exchangeContainer.clearContent();
+            if (local) {
+                exchangeContainer.loadFromLocal();
+            } else {
+                exchangeContainer.loadFromCache();
+            }
+            updateSlotReadOnly();
+            for (int i = 0; i < 54; i++) {
+                Slot slot = this.slots.get(i);
+                if (slot instanceof ExchangeSlot) {
+                    ItemStack stack = exchangeContainer.getItem(i);
+                    slot.set(stack.isEmpty() ? ItemStack.EMPTY : stack.copy());
+                }
+            }
+            broadcastChanges();
+        } finally {
+            refreshing = false;
+        }
+    }
+
     @Override
     public boolean stillValid(Player player) {
         return exchangeContainer.stillValid(player);
@@ -117,7 +147,6 @@ public class ExchangeMenu extends AbstractContainerMenu {
                         player.getUUID().toString(), player.getName().getString());
 
                 if (result.isSuccess()) {
-                    slot.set(ItemStack.EMPTY);
                     if (result.getItemsToGive() != null) {
                         Object itemObj = TheExchangeCore.getInstance().getApi()
                                 .getItemSerializer().deserialize(result.getItemsToGive());
@@ -127,6 +156,7 @@ public class ExchangeMenu extends AbstractContainerMenu {
                             }
                         }
                     }
+                    refreshFromCache();
                 } else {
                     player.sendSystemMessage(Component.literal(
                             result.getFailReason() != null ? result.getFailReason() : "取出失败"));
@@ -158,15 +188,7 @@ public class ExchangeMenu extends AbstractContainerMenu {
                         player.getUUID().toString(), player.getName().getString(), copy);
 
                 if (result.isSuccess()) {
-                    slot.set(ItemStack.EMPTY);
-                    if (result.getCurrentItem() != null) {
-                        Object itemObj = TheExchangeCore.getInstance().getApi()
-                                .getItemSerializer().deserialize(result.getCurrentItem());
-                        if (itemObj instanceof ItemStack showStack) {
-                            this.slots.get(targetSlot).set(showStack);
-                        }
-                    }
-                    exchangeContainer.updateSlotFromCache(targetSlot);
+                    refreshFromCache();
                 } else {
                     player.sendSystemMessage(Component.literal(
                             result.getFailReason() != null ? result.getFailReason() : "放入失败"));

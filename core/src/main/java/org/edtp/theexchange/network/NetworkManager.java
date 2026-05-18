@@ -7,6 +7,7 @@ import org.edtp.theexchange.network.protocol.messages.*;
 import org.edtp.theexchange.network.tls.TlsContext;
 
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
@@ -86,6 +87,7 @@ public class NetworkManager {
             serverStatus.put(request.getServerName(), ServerStatus.ONLINE);
             connections.put(request.getServerName(), conn);
             conn.setAuthenticated(true);
+            conn.setPeerServerName(request.getServerName());
 
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(true, "OK", "local", "26.1.2",
@@ -128,6 +130,7 @@ public class NetworkManager {
                         + " msg=" + resp.getMessage());
                 if (resp.isSuccess()) {
                     conn.setAuthenticated(true);
+                    conn.setPeerServerName(server.getName());
                     serverStatus.put(server.getName(), ServerStatus.ONLINE);
                     notifyStatusChange(server.getName(), ServerStatus.ONLINE);
                 } else {
@@ -161,6 +164,17 @@ public class NetworkManager {
 
     public Connection getConnection(String serverName) {
         return connections.get(serverName);
+    }
+
+    public Collection<Connection> getConnections() {
+        return connections.values();
+    }
+
+    public void broadcast(FrameType type, Object message, Connection exclude) {
+        for (Connection conn : connections.values()) {
+            if (conn == null || conn == exclude || !conn.isRunning()) continue;
+            conn.send(type, message);
+        }
     }
 
     public ServerStatus getStatus(String serverName) {

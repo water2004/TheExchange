@@ -32,6 +32,7 @@ public class Connection {
     private final SequenceWindow recvWindow = new SequenceWindow();
     private volatile boolean running;
     private volatile boolean authenticated;
+    private volatile String peerServerName;
     private volatile long lastRecvTime;
     private Thread readThread;
     private BiConsumer<FrameType, Object> messageHandler;
@@ -77,6 +78,14 @@ public class Connection {
 
     public void setAuthenticated(boolean authenticated) {
         this.authenticated = authenticated;
+    }
+
+    public String getPeerServerName() {
+        return peerServerName;
+    }
+
+    public void setPeerServerName(String peerServerName) {
+        this.peerServerName = peerServerName;
     }
 
     public void setDisconnectHandler(BiConsumer<Connection, Boolean> handler) {

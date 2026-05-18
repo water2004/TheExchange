@@ -2,6 +2,7 @@ package org.edtp.theexchange.service;
 
 import org.edtp.theexchange.compat.CompatibilityChecker;
 import org.edtp.theexchange.compat.ItemSerializer;
+import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.OperationType;
 import org.edtp.theexchange.network.Connection;
@@ -12,6 +13,7 @@ import org.edtp.theexchange.storage.LocalItemStore;
 import org.edtp.theexchange.storage.OperationLogger;
 
 import java.util.UUID;
+import java.util.List;
 
 /**
  * Core business logic for item exchange operations.
@@ -65,6 +67,8 @@ public class ExchangeService {
                     serverName, item.getItemId(), item.getCount(), true, null);
             cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
                     response.getNewTimestamp());
+            notifyRemoteUpdate(serverName, List.of(slot), response.getNewTimestamp(), conn);
+            refreshOpenViews(serverName);
             return PutResult.success(response.getCurrentItem());
         } else {
             operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
@@ -98,6 +102,8 @@ public class ExchangeService {
                     serverName, expectedItemId, requestCount, true, null);
             cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
                     response.getNewTimestamp());
+            notifyRemoteUpdate(serverName, List.of(slot), response.getNewTimestamp(), conn);
+            refreshOpenViews(serverName);
             return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
         } else {
             operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
@@ -217,9 +223,44 @@ public class ExchangeService {
                 TakeItemResponse resp = handleRemoteTake((TakeItemRequest) message);
                 conn.send(FrameType.TAKE_ITEM_RESPONSE, resp);
             }
-            case PUSH_UPDATE -> { /* optional */ }
+            case PUSH_UPDATE -> {
+                PushUpdate update = (PushUpdate) message;
+                if (update == null) return;
+                final String sourceServerName = conn.getPeerServerName() != null
+                        ? conn.getPeerServerName()
+                        : conn.getRemoteName();
+                cacheManager.clearCache(sourceServerName);
+                TheExchangeCore core = TheExchangeCore.getInstance();
+                if (core != null && core.getApi() != null && core.getSyncEngine() != null) {
+                    core.getApi().runAsync(() -> {
+                        try {
+                            core.getSyncEngine().fullSync(sourceServerName);
+                            core.getApi().refreshRemoteInventoryView(sourceServerName);
+                        } catch (Exception e) {
+                            core.getApi().getLogger().warn("Push sync failed for " + sourceServerName
+                                    + ": " + e.getMessage());
+                        }
+                    });
+                }
+            }
             default -> {}
         }
+    }
+
+    private void refreshOpenViews(String serverName) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core != null && core.getApi() != null) {
+            core.getApi().refreshRemoteInventoryView(serverName);
+        }
+    }
+
+    private void notifyRemoteUpdate(String serverName, List<Integer> changedSlots,
+                                    long timestamp, Connection sourceConn) {
+        if (networkManager == null) return;
+        if (changedSlots == null || changedSlots.isEmpty()) return;
+
+        PushUpdate update = new PushUpdate(changedSlots, timestamp);
+        networkManager.broadcast(FrameType.PUSH_UPDATE, update, sourceConn);
     }
 
     // ========== Result types ==========

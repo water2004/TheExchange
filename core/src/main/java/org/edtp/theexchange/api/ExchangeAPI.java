@@ -2,6 +2,8 @@ package org.edtp.theexchange.api;
 
 import org.edtp.theexchange.compat.ItemSerializer;
 
+import java.util.List;
+
 /**
  * Bridge between the core module and the mod loader adapter.
  * Each adapter (Fabric, Forge, NeoForge) implements this interface.
@@ -35,6 +37,9 @@ public interface ExchangeAPI {
 
     /** Schedule an async task */
     void runAsync(Runnable task);
+
+    /** Refresh open exchange views after remote inventory changes */
+    void refreshRemoteInventoryView(String serverName);
 
     interface ConfigLoader {
         /** Get the path to the mod's config directory */
