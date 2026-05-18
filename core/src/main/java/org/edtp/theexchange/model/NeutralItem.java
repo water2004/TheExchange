@@ -1,0 +1,67 @@
+package org.edtp.theexchange.model;
+
+import java.util.Arrays;
+import java.util.Objects;
+
+/**
+ * Protocol-neutral item representation for cross-server and cross-version exchange.
+ * The authoritative server MUST preserve extraData byte-for-byte (F-40).
+ */
+public class NeutralItem {
+
+    private String itemId;
+    private int count;
+    private String displayName;
+    private byte[] extraData;
+    private boolean incompatible;
+    private String sourceVersion;
+
+    public NeutralItem() {}
+
+    public NeutralItem(String itemId, int count, String displayName, byte[] extraData,
+                       boolean incompatible, String sourceVersion) {
+        this.itemId = itemId;
+        this.count = count;
+        this.displayName = displayName;
+        this.extraData = extraData;
+        this.incompatible = incompatible;
+        this.sourceVersion = sourceVersion;
+    }
+
+    public String getItemId() { return itemId; }
+    public void setItemId(String itemId) { this.itemId = itemId; }
+
+    public int getCount() { return count; }
+    public void setCount(int count) { this.count = count; }
+
+    public String getDisplayName() { return displayName; }
+    public void setDisplayName(String displayName) { this.displayName = displayName; }
+
+    public byte[] getExtraData() { return extraData; }
+    public void setExtraData(byte[] extraData) { this.extraData = extraData; }
+
+    public boolean isIncompatible() { return incompatible; }
+    public void setIncompatible(boolean incompatible) { this.incompatible = incompatible; }
+
+    public String getSourceVersion() { return sourceVersion; }
+    public void setSourceVersion(String sourceVersion) { this.sourceVersion = sourceVersion; }
+
+    public boolean isEmpty() {
+        return itemId == null || count <= 0;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof NeutralItem that)) return false;
+        return count == that.count
+                && incompatible == that.incompatible
+                && Objects.equals(itemId, that.itemId)
+                && Arrays.equals(extraData, that.extraData);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(itemId, count, incompatible, Arrays.hashCode(extraData));
+    }
+}

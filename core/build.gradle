@@ -1,0 +1,37 @@
+plugins {
+    id 'java-library'
+}
+
+group = project.maven_group
+version = project.mod_version
+
+base {
+    archivesName = "${project.archives_base_name}-core"
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    api("org.xerial:sqlite-jdbc:${project.sqlite_version}")
+    api("org.msgpack:msgpack-core:${project.msgpack_version}")
+    api("at.favre.lib:bcrypt:${project.bcrypt_version}")
+
+    testImplementation platform('org.junit:junit-bom:5.10.1')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = "UTF-8"
+}
+
+test {
+    useJUnitPlatform()
+}

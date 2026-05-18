@@ -1,0 +1,261 @@
+package org.edtp.theexchange.service;
+
+import org.edtp.theexchange.compat.CompatibilityChecker;
+import org.edtp.theexchange.compat.ItemSerializer;
+import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.OperationType;
+import org.edtp.theexchange.network.Connection;
+import org.edtp.theexchange.network.NetworkManager;
+import org.edtp.theexchange.network.protocol.FrameType;
+import org.edtp.theexchange.network.protocol.messages.*;
+import org.edtp.theexchange.storage.LocalItemStore;
+import org.edtp.theexchange.storage.OperationLogger;
+
+import java.util.UUID;
+
+/**
+ * Core business logic for item exchange operations.
+ * Implements F-31 through F-40 concurrency and consistency requirements.
+ */
+public class ExchangeService {
+
+    private static final long REQUEST_TIMEOUT_MS = 5000;
+
+    private final NetworkManager networkManager;
+    private final LocalItemStore localItemStore;
+    private final OperationLogger operationLogger;
+    private final CacheManager cacheManager;
+    private final CompatibilityChecker compatibilityChecker;
+    private final ItemSerializer itemSerializer;
+
+    public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
+                           OperationLogger operationLogger, CacheManager cacheManager,
+                           CompatibilityChecker compatibilityChecker, ItemSerializer itemSerializer) {
+        this.networkManager = networkManager;
+        this.localItemStore = localItemStore;
+        this.operationLogger = operationLogger;
+        this.cacheManager = cacheManager;
+        this.compatibilityChecker = compatibilityChecker;
+        this.itemSerializer = itemSerializer;
+    }
+
+    public PutResult putItem(String serverName, int slot, String playerUuid,
+                              String playerName, Object itemStack) {
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null) return PutResult.fail("目标服务器离线");
+
+        NeutralItem item = itemSerializer.serialize(itemStack);
+        if (item == null || item.isEmpty()) return PutResult.fail("物品为空");
+
+        String requestId = UUID.randomUUID().toString();
+
+        PutItemRequest request = new PutItemRequest(slot, item, requestId, playerUuid, playerName);
+        PutItemResponse response = conn.sendAndWait(
+                FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS);
+
+        if (response == null) {
+            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+                    serverName, item.getItemId(), item.getCount(), false, "TIMEOUT");
+            return PutResult.fail("请求超时，物品已退回");
+        }
+
+        if (response.isSuccess()) {
+            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+                    serverName, item.getItemId(), item.getCount(), true, null);
+            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
+                    response.getNewTimestamp());
+            return PutResult.success(response.getCurrentItem());
+        } else {
+            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+                    serverName, item.getItemId(), item.getCount(), false, response.getFailReason());
+            return PutResult.fail(response.getFailReason());
+        }
+    }
+
+    public TakeResult takeItem(String serverName, int slot, String expectedItemId,
+                                int expectedVersion, int requestCount,
+                                String playerUuid, String playerName) {
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null) return TakeResult.fail("目标服务器离线");
+
+        String requestId = UUID.randomUUID().toString();
+
+        TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
+                expectedVersion, requestCount, requestId, playerUuid, playerName);
+        TakeItemResponse response = conn.sendAndWait(
+                FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, REQUEST_TIMEOUT_MS);
+
+        if (response == null) {
+            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                    serverName, expectedItemId, requestCount, false, "TIMEOUT");
+            return TakeResult.fail("请求超时");
+        }
+
+        if (response.isSuccess()) {
+            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                    serverName, expectedItemId, requestCount, true, null);
+            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
+                    response.getNewTimestamp());
+            return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
+        } else {
+            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                    serverName, expectedItemId, requestCount, false, response.getFailReason());
+            return TakeResult.fail(response.getFailReason());
+        }
+    }
+
+    public PutItemResponse handleRemotePut(PutItemRequest request) {
+        OperationLogger.LogEntry existing = operationLogger.findByRequestId(request.getRequestId());
+        if (existing != null) {
+            LocalItemStore.ItemRecord r = localItemStore.getItem(request.getSlot());
+            return new PutItemResponse(existing.success(), request.getSlot(),
+                    r != null ? r.item() : null,
+                    existing.failReason(), localItemStore.getLastModifiedTimestamp(),
+                    r != null ? r.version() : 1);
+        }
+
+        try {
+            NeutralItem item = request.getItem();
+            compatibilityChecker.checkAndMark(item);
+
+            int newVersion = localItemStore.putItem(request.getSlot(), item, request.getPlayerUuid());
+
+            operationLogger.log(request.getRequestId(), OperationType.PUT,
+                    request.getPlayerUuid(), request.getPlayerName(),
+                    "local", item.getItemId(), item.getCount(), true, null);
+
+            long timestamp = localItemStore.getLastModifiedTimestamp();
+            LocalItemStore.ItemRecord updated = localItemStore.getItem(request.getSlot());
+
+            return new PutItemResponse(true, request.getSlot(),
+                    updated != null ? updated.item() : null,
+                    null, timestamp, newVersion);
+        } catch (Exception e) {
+            operationLogger.log(request.getRequestId(), OperationType.PUT,
+                    request.getPlayerUuid(), request.getPlayerName(),
+                    "local", request.getItem().getItemId(), request.getItem().getCount(),
+                    false, e.getMessage());
+            return new PutItemResponse(false, request.getSlot(), null,
+                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0);
+        }
+    }
+
+    public TakeItemResponse handleRemoteTake(TakeItemRequest request) {
+        OperationLogger.LogEntry existing = operationLogger.findByRequestId(request.getRequestId());
+        if (existing != null) {
+            LocalItemStore.ItemRecord r = localItemStore.getItem(request.getSlot());
+            return new TakeItemResponse(existing.success(), request.getSlot(),
+                    r != null ? r.item() : null,
+                    existing.failReason(), localItemStore.getLastModifiedTimestamp(),
+                    r != null ? r.version() : 0, null);
+        }
+
+        try {
+            LocalItemStore.TakeResult result = localItemStore.takeItem(
+                    request.getSlot(), request.getExpectedItemId(),
+                    request.getExpectedVersion(), request.getRequestCount());
+
+            if (result.isSuccess()) {
+                operationLogger.log(request.getRequestId(), OperationType.TAKE,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", request.getExpectedItemId(), request.getRequestCount(),
+                        true, null);
+
+                long timestamp = localItemStore.getLastModifiedTimestamp();
+                LocalItemStore.ItemRecord updated = localItemStore.getItem(request.getSlot());
+
+                return new TakeItemResponse(true, request.getSlot(),
+                        updated != null ? updated.item() : null,
+                        null, timestamp, result.getNewVersion(), result.getItem());
+            } else {
+                operationLogger.log(request.getRequestId(), OperationType.TAKE,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", request.getExpectedItemId(), request.getRequestCount(),
+                        false, result.getFailReason());
+
+                LocalItemStore.ItemRecord r = localItemStore.getItem(request.getSlot());
+                return new TakeItemResponse(false, request.getSlot(),
+                        r != null ? r.item() : null,
+                        result.getFailReason(), localItemStore.getLastModifiedTimestamp(),
+                        r != null ? r.version() : 0, null);
+            }
+        } catch (Exception e) {
+            operationLogger.log(request.getRequestId(), OperationType.TAKE,
+                    request.getPlayerUuid(), request.getPlayerName(),
+                    "local", request.getExpectedItemId(), request.getRequestCount(),
+                    false, e.getMessage());
+            return new TakeItemResponse(false, request.getSlot(), null,
+                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0, null);
+        }
+    }
+
+    // ========== Message routing ==========
+
+    public void routeMessage(FrameType type, Object message) {
+        switch (type) {
+            case QUERY_TIMESTAMP -> {
+                // Handled by the calling connection directly
+            }
+            case QUERY_ITEMS -> {
+                // Handled by the calling connection directly
+            }
+            case PUT_ITEM -> handleRemotePut((PutItemRequest) message);
+            case TAKE_ITEM -> handleRemoteTake((TakeItemRequest) message);
+            case PUSH_UPDATE -> { /* optional: trigger cache refresh */ }
+            default -> {}
+        }
+    }
+
+    // ========== Result types ==========
+
+    public static class PutResult {
+        private final boolean success;
+        private final String failReason;
+        private final NeutralItem currentItem;
+
+        private PutResult(boolean success, String failReason, NeutralItem currentItem) {
+            this.success = success;
+            this.failReason = failReason;
+            this.currentItem = currentItem;
+        }
+
+        public static PutResult success(NeutralItem currentItem) {
+            return new PutResult(true, null, currentItem);
+        }
+
+        public static PutResult fail(String reason) {
+            return new PutResult(false, reason, null);
+        }
+
+        public boolean isSuccess() { return success; }
+        public String getFailReason() { return failReason; }
+        public NeutralItem getCurrentItem() { return currentItem; }
+    }
+
+    public static class TakeResult {
+        private final boolean success;
+        private final String failReason;
+        private final NeutralItem itemsToGive;
+        private final int newVersion;
+
+        private TakeResult(boolean success, String failReason, NeutralItem itemsToGive, int newVersion) {
+            this.success = success;
+            this.failReason = failReason;
+            this.itemsToGive = itemsToGive;
+            this.newVersion = newVersion;
+        }
+
+        public static TakeResult success(NeutralItem itemsToGive, int newVersion) {
+            return new TakeResult(true, null, itemsToGive, newVersion);
+        }
+
+        public static TakeResult fail(String reason) {
+            return new TakeResult(false, reason, null, -1);
+        }
+
+        public boolean isSuccess() { return success; }
+        public String getFailReason() { return failReason; }
+        public NeutralItem getItemsToGive() { return itemsToGive; }
+        public int getNewVersion() { return newVersion; }
+    }
+}
