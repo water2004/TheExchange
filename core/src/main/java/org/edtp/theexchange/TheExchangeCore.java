@@ -83,8 +83,18 @@ public class TheExchangeCore {
             networkManager.start();
             api.getLogger().info("Network started on port " + localPort);
         } catch (Exception e) {
-            api.getLogger().error("Failed to start network on port " + localPort
-                    + " — network features disabled", e);
+            String cause = e.getMessage();
+            if (e.getCause() != null) cause = e.getCause().getMessage();
+            if (cause != null && cause.contains("Address already in use")) {
+                api.getLogger().error("Port " + localPort + " is already in use — "
+                        + "change 'server.port' in config/theexchange/theexchange.json");
+            } else if (cause != null && cause.contains("Permission denied")) {
+                api.getLogger().error("No permission to bind port " + localPort
+                        + " (ports < 1024 need root on Linux)");
+            } else {
+                api.getLogger().error("Failed to start network on port " + localPort
+                        + ": " + (cause != null ? cause : "unknown"), e);
+            }
             networkManager = null;
         }
 

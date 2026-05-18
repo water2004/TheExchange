@@ -46,6 +46,7 @@ dependencies {
     include("org.xerial:sqlite-jdbc:${project.sqlite_version}")
     include("org.msgpack:msgpack-core:${project.msgpack_version}")
     include("at.favre.lib:bcrypt:${project.bcrypt_version}")
+    include("at.favre.lib:bytes:${project.bytes_version}")
 }
 
 processResources {
