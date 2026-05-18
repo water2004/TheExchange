@@ -2,39 +2,57 @@ package org.edtp.theexchange.network.tls;
 
 import javax.net.ssl.*;
 import java.nio.file.Path;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.X509Certificate;
 
 /**
- * TLS context factory providing SSLServerSocketFactory and SSLSocketFactory.
- * Uses self-signed certificates with PKCS12 keystore.
+ * TLS context with split trust model:
+ * - Server side: uses self-signed certificate from keystore
+ * - Client side: trusts all certificates (identity verified by password auth, not PKI)
  */
 public class TlsContext {
 
-    private final SSLContext sslContext;
+    private final SSLContext serverContext;
+    private final SSLContext clientContext;
 
-    public TlsContext(SSLContext sslContext) {
-        this.sslContext = sslContext;
+    private TlsContext(SSLContext serverContext, SSLContext clientContext) {
+        this.serverContext = serverContext;
+        this.clientContext = clientContext;
     }
 
     public static TlsContext create(Path keystorePath, String cn, char[] keystorePassword) {
         try {
-            SSLContext ctx = SelfSignedCert.createSSLContext(keystorePath, cn, keystorePassword);
-            return new TlsContext(ctx);
+            SSLContext serverCtx = SelfSignedCert.createSSLContext(keystorePath, cn, keystorePassword);
+            SSLContext clientCtx = createTrustAllContext();
+            return new TlsContext(serverCtx, clientCtx);
         } catch (Exception e) {
             throw new RuntimeException("Failed to create TLS context", e);
         }
     }
 
     public SSLServerSocketFactory getServerSocketFactory() {
-        return sslContext.getServerSocketFactory();
+        return serverContext.getServerSocketFactory();
     }
 
     public SSLSocketFactory getSocketFactory() {
-        return sslContext.getSocketFactory();
+        return clientContext.getSocketFactory();
     }
 
-    /**
-     * Configure a socket for TLS 1.3 only, with strong cipher suites.
-     */
+    private static SSLContext createTrustAllContext()
+            throws NoSuchAlgorithmException, KeyManagementException {
+        TrustManager[] trustAll = new TrustManager[] {
+            new X509TrustManager() {
+                public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            }
+        };
+        SSLContext ctx = SSLContext.getInstance("TLSv1.3");
+        ctx.init(null, trustAll, null);
+        return ctx;
+    }
+
     public static void configureSocket(SSLSocket socket) {
         socket.setEnabledProtocols(new String[]{"TLSv1.3"});
         socket.setEnabledCipherSuites(new String[]{
