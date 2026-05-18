@@ -3,7 +3,6 @@ package org.edtp.theexchange;
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.compat.CompatibilityChecker;
 import org.edtp.theexchange.network.NetworkManager;
-import org.edtp.theexchange.security.ConfigSanitizer;
 import org.edtp.theexchange.service.*;
 import org.edtp.theexchange.storage.*;
 
@@ -36,10 +35,7 @@ public class TheExchangeCore {
         this.api = api;
     }
 
-    public static TheExchangeCore getInstance() {
-        return instance;
-    }
-
+    public static TheExchangeCore getInstance() { return instance; }
     public ExchangeAPI getApi() { return api; }
     public DatabaseManager getDatabaseManager() { return databaseManager; }
     public LocalItemStore getLocalItemStore() { return localItemStore; }
@@ -52,7 +48,11 @@ public class TheExchangeCore {
     public SyncEngine getSyncEngine() { return syncEngine; }
     public ExchangeService getExchangeService() { return exchangeService; }
 
-    public void initialize() {
+    /**
+     * Initialize with config values provided by the adapter layer.
+     * This ensures config is available before database/network setup.
+     */
+    public void initialize(int localPort, String localPassword) {
         if (initialized) {
             api.getLogger().warn("TheExchange core already initialized");
             return;
@@ -62,6 +62,7 @@ public class TheExchangeCore {
         // 1. Database
         databaseManager = new DatabaseManager(api.getConfigLoader().getDatabasePath());
         databaseManager.initialize();
+        api.getLogger().info("Database initialized");
 
         // 2. Stores
         localItemStore = new LocalItemStore(databaseManager);
@@ -69,27 +70,33 @@ public class TheExchangeCore {
         operationLogger = new OperationLogger(databaseManager);
         configStore = new ConfigStore(databaseManager);
 
-        // 3. Config & TLS
+        // 3. TLS
         String configDir = api.getConfigLoader().getConfigDir();
         Path keystorePath = Path.of(configDir, "tls", "keystore.jks");
         String cn = api.getServerName();
-        char[] keystorePass = "theexchange".toCharArray(); // internal keystore password
+        char[] keystorePass = "theexchange".toCharArray();
 
-        int localPort = Integer.parseInt(configStore.getOrDefault("server.port", "25566"));
-        String localPassword = configStore.get("server.password");
+        // 4. Network (may fail — don't abort entire init)
+        try {
+            networkManager = new NetworkManager(localPort, keystorePath, cn, keystorePass);
+            networkManager.setLocalPassword(localPassword);
+            networkManager.start();
+            api.getLogger().info("Network started on port " + localPort);
+        } catch (Exception e) {
+            api.getLogger().error("Failed to start network on port " + localPort
+                    + " — network features disabled", e);
+            networkManager = null;
+        }
 
-        // 4. Network
-        networkManager = new NetworkManager(localPort, keystorePath, cn, keystorePass);
-        networkManager.setLocalPassword(localPassword); // TODO: use loaded config password
-        networkManager.start();
-
-        // 5. Services
+        // 5. Services (work even without network)
         serverRegistry = new ServerRegistry(databaseManager, networkManager);
         serverRegistry.loadFromDatabase();
 
         cacheManager = new CacheManager(remoteCacheStore);
 
-        syncEngine = new SyncEngine(networkManager, cacheManager);
+        syncEngine = networkManager != null
+                ? new SyncEngine(networkManager, cacheManager)
+                : null;
 
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(
                 api.getItemSerializer());
@@ -98,18 +105,17 @@ public class TheExchangeCore {
                 operationLogger, cacheManager, compatibilityChecker,
                 api.getItemSerializer());
 
-        // 6. Heartbeat
-        heartbeatManager = new HeartbeatManager(networkManager, serverRegistry);
-        heartbeatManager.start();
-
-        // 7. Set up inbound message routing
-        networkManager.setMessageRouter((type, msg) -> {
-            exchangeService.routeMessage(type, msg);
-        });
+        // 6. Heartbeat (only if network is up)
+        if (networkManager != null) {
+            heartbeatManager = new HeartbeatManager(networkManager, serverRegistry);
+            heartbeatManager.start();
+            networkManager.setMessageRouter((type, msg) ->
+                    exchangeService.routeMessage(type, msg));
+        }
 
         instance = this;
         initialized = true;
-        api.getLogger().info("TheExchange core initialized on port " + localPort);
+        api.getLogger().info("TheExchange core initialized");
     }
 
     public void shutdown() {

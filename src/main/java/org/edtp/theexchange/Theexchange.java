@@ -1,65 +1,75 @@
 package org.edtp.theexchange;
 
+import com.mojang.logging.LogUtils;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.server.MinecraftServer;
 import org.edtp.theexchange.fabric.FabricExchangeAPI;
 import org.edtp.theexchange.fabric.command.ExchangeCommand;
+import org.slf4j.Logger;
 
 public class Theexchange implements ModInitializer {
 
+    private static final Logger LOGGER = LogUtils.getLogger();
     private TheExchangeCore core;
 
     @Override
     public void onInitialize() {
-        // Register commands early (even before server start)
+        LOGGER.info("[Exchange] Registering commands...");
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
             ExchangeCommand.register(dispatcher);
         });
 
-        // Initialize core when server starts
-        ServerLifecycleEvents.SERVER_STARTING.register(this::onServerStarting);
-
-        // Shutdown core when server stops
+        ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(this::onServerStopping);
+        LOGGER.info("[Exchange] Mod loaded, waiting for server start");
     }
 
-    private void onServerStarting(MinecraftServer server) {
+    private void onServerStarted(MinecraftServer server) {
         try {
+            LOGGER.info("[Exchange] Initializing...");
             FabricExchangeAPI api = new FabricExchangeAPI(server);
 
-            // Load config first to populate the config store
-            String config = api.getConfigLoader().loadConfig();
-            api.getLogger().info("Configuration loaded");
+            // Load JSON config
+            api.getConfigLoader().loadConfig();
+            var cfg = (org.edtp.theexchange.fabric.config.FabricConfigLoader) api.getConfigLoader();
+            LOGGER.info("[Exchange] Config: name={}, port={}", cfg.getDisplayName(), cfg.getPort());
 
+            // Initialize core with config values directly
             core = new TheExchangeCore(api);
+            core.initialize(cfg.getPort(), cfg.getPassword());
 
-            // Populate config store from JSON config
-            var configLoader = (org.edtp.theexchange.fabric.config.FabricConfigLoader) api.getConfigLoader();
-            core.getConfigStore().set("server.display_name", configLoader.getDisplayName());
-            core.getConfigStore().set("server.password", configLoader.getPassword());
-            core.getConfigStore().set("server.port", String.valueOf(configLoader.getPort()));
-
-            core.initialize();
+            // Save config values to DB for persistence
+            core.getConfigStore().set("server.display_name", cfg.getDisplayName());
+            core.getConfigStore().set("server.password", cfg.getPassword());
+            core.getConfigStore().set("server.port", String.valueOf(cfg.getPort()));
 
             // Add configured remote servers
-            for (var remoteConfig : configLoader.getRemoteServers()) {
-                core.getServerRegistry().addServer(
-                        remoteConfig.name, remoteConfig.address,
-                        remoteConfig.port, remoteConfig.password);
+            for (var remote : cfg.getRemoteServers()) {
+                try {
+                    core.getServerRegistry().addServer(
+                            remote.name, remote.address, remote.port, remote.password);
+                } catch (Exception e) {
+                    LOGGER.error("[Exchange] Failed to add server: {}", remote.name, e);
+                }
             }
 
-            api.getLogger().info("TheExchange mod initialized successfully");
+            LOGGER.info("[Exchange] Ready. Port: {}, Servers: {}",
+                    cfg.getPort(), cfg.getRemoteServers().size());
         } catch (Exception e) {
-            e.printStackTrace();
+            LOGGER.error("[Exchange] Initialization failed!", e);
         }
     }
 
     private void onServerStopping(MinecraftServer server) {
+        LOGGER.info("[Exchange] Shutting down...");
         if (core != null) {
-            core.shutdown();
+            try {
+                core.shutdown();
+            } catch (Exception e) {
+                LOGGER.error("[Exchange] Shutdown error", e);
+            }
         }
     }
 }
