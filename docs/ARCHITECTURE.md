@@ -42,15 +42,15 @@ TheExchange/
 │       │   ├── codec/
 │       │   │   ├── FrameDecoder.java     # 帧解码器（处理 TCP 粘包/半包）
 │       │   │   ├── FrameEncoder.java     # 帧编码器
-│       │   │   ├── MessageDecoder.java   # Payload 反序列化（MessagePack）
-│       │   │   └── MessageEncoder.java   # Payload 序列化（MessagePack）
+│       │   │   ├── MessageDecoder.java   # Payload 反序列化（结构化二进制）
+│       │   │   └── MessageEncoder.java   # Payload 序列化（结构化二进制）
 │       │   ├── tls/
 │       │   │   ├── TlsContext.java       # TLS 上下文工厂
 │       │   │   └── SelfSignedCert.java   # 自签名证书生成
 │       │   └── protocol/
 │       │       ├── FrameType.java        # 帧类型枚举
 │       │       ├── Frame.java            # 帧结构定义
-│       │       ├── messages/             # 各类消息体（MessagePack POJO）
+│       │       ├── messages/             # 各类消息体（固定字段顺序 POJO）
 │       │       │   ├── AuthRequest.java
 │       │       │   ├── AuthResponse.java
 │       │       │   ├── Heartbeat.java
@@ -207,14 +207,12 @@ fabric-api = "0.149.0"
 forge = "..."                 # 待定
 neoforge = "..."              # 待定
 sqlite = "3.45.1"
-messagepack = "0.9.6"
 bcrypt = "0.10.2"
 slf4j = "2.0.9"
 junit = "5.10.1"
 
 [libraries]
 sqlite = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
-messagepack = { module = "org.msgpack:msgpack-core", version.ref = "messagepack" }
 bcrypt = { module = "at.favre.lib:bcrypt", version.ref = "bcrypt" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 ```
@@ -309,7 +307,7 @@ TheExchangeCore.initialize(ExchangeAPI api)
 |                    Timestamp (cont)                           |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
-|                    Payload (MessagePack, variable)            |
+|                    Payload (structured binary, variable)      |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
@@ -322,7 +320,7 @@ TheExchangeCore.initialize(ExchangeAPI api)
 | Type | 2 字节 | u16 | 帧类型（见 6.1） |
 | Sequence | 8 字节 | u64 | 单调递增序列号（防重放，每连接独立） |
 | Timestamp | 8 字节 | s64 | Unix 毫秒时间戳（防重放） |
-| Payload | 变长 | bytes | MessagePack 编码的消息体 |
+| Payload | 变长 | bytes | 按消息类型固定字段顺序编码的结构化二进制 |
 
 **帧头固定 28 字节。**
 
@@ -354,7 +352,7 @@ TheExchangeCore.initialize(ExchangeAPI api)
 
 ## 7. 消息体定义
 
-所有消息体使用 MessagePack 序列化。以下用伪 JSON 描述结构，实际为 MessagePack 格式。
+所有消息体使用结构化二进制序列化：字段顺序由消息类型唯一确定，整数字段使用定长大端编码，字符串与字节数组使用 4 字节长度前缀（`-1` 表示 null）后跟原始 UTF-8/字节内容。以下用伪 JSON 描述字段语义，实际传输不包含 key 名称。
 
 ### 7.1 AUTH_CHALLENGE（0x0000） / AUTH_REQUEST（0x0001）
 
@@ -595,7 +593,7 @@ SequenceWindow (大小: 1024):
 CREATE TABLE IF NOT EXISTS exchange_items (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     slot       INTEGER NOT NULL UNIQUE,   -- 槽位号 0~53
-    item_data  BLOB   NOT NULL,           -- MessagePack 序列化的 NeutralItem
+    item_data  BLOB   NOT NULL,           -- 结构化二进制序列化的 NeutralItem
     item_id    TEXT   NOT NULL,           -- 快速校验与日志查询
     count      INTEGER NOT NULL,           -- 当前数量，必须与 item_data 内数量一致
     added_by   TEXT,                      -- 放入者 UUID
@@ -627,7 +625,7 @@ CREATE TABLE IF NOT EXISTS remote_servers (
 ```sql
 CREATE TABLE IF NOT EXISTS remote_cache (
     server_name TEXT    NOT NULL UNIQUE,  -- 远程服务器别名
-    items_blob  BLOB    NOT NULL,         -- MessagePack 序列化的物品列表
+    items_blob  BLOB    NOT NULL,         -- 结构化二进制序列化的物品列表
     synced_at   INTEGER NOT NULL,         -- Unix 毫秒（本地最后同步时间）
     remote_timestamp INTEGER NOT NULL,    -- 远程服务器最后修改时间戳
     PRIMARY KEY (server_name)
@@ -663,7 +661,7 @@ CREATE TABLE IF NOT EXISTS processed_requests (
     peer_server  TEXT    NOT NULL,
     op_type      TEXT    NOT NULL,          -- 'PUT' | 'TAKE'
     slot         INTEGER NOT NULL,
-    result_blob  BLOB    NOT NULL,          -- MessagePack 序列化的响应
+    result_blob  BLOB    NOT NULL,          -- 结构化二进制序列化的响应
     created_at   INTEGER NOT NULL
 );
 
@@ -682,7 +680,7 @@ CREATE TABLE IF NOT EXISTS player_compensation (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     player_uuid  TEXT    NOT NULL,
     player_name  TEXT    NOT NULL,
-    item_blob    BLOB    NOT NULL,          -- MessagePack 序列化的 NeutralItem
+    item_blob    BLOB    NOT NULL,          -- 结构化二进制序列化的 NeutralItem
     reason       TEXT    NOT NULL,          -- 'PUT_ROLLBACK' | 'TAKE_DELIVERY'
     created_at   INTEGER NOT NULL,
     delivered_at INTEGER
@@ -983,7 +981,7 @@ public class PasswordHasher {
 | 认证 | bcrypt 密码哈希 |
 | 防篡改 | TLS 内置消息完整性校验 |
 | 防重放 | 单调序列号 + 滑动窗口 + 时间戳 |
-| 存储 | bcrypt 哈希化密码存储，物品数据 MessagePack 序列化 |
+| 存储 | bcrypt 哈希化密码存储，物品数据结构化二进制序列化 |
 
 ---
 
@@ -999,7 +997,7 @@ public class NeutralItem {
     private String itemId;           // "minecraft:diamond"
     private int count;
     private String displayName;      // JSON 文本组件字符串，如 '{"text":"钻石"}'
-    private byte[] extraData;        // 可选：NBT/Data Components 的 MessagePack 二次序列化或黑盒透传字节
+    private byte[] extraData;        // 可选：NBT/Data Components 的黑盒透传字节
     private boolean incompatible;    // 接收方标记此物品是否可解析
     private String sourceVersion;    // 物品来源的 MC 版本，如 "1.21.11"
 }
@@ -1271,7 +1269,7 @@ Mixin 仅用于以下场景，且每个场景不超过 1 个 Mixin 类：
 | 连接断开 | 标记离线，启动重连，通知所有在线玩家的 GUI |
 | 帧长度超过上限 | 记录安全日志，立即关闭连接 |
 | 数据库写入失败 | 回滚事务，记录错误日志，提示管理员检查磁盘 |
-| MessagePack 反序列化失败 | 丢弃该帧，记录错误日志，不中断连接 |
+| Payload 反序列化失败 | 丢弃该帧，记录错误日志，不中断连接 |
 | TLS 握手失败 | 关闭连接，记录日志 |
 | 认证失败 | 关闭连接，记录安全事件 |
 | 服务器关闭 | 优雅关闭所有连接，保存缓存，停止定时任务 |
@@ -1311,7 +1309,7 @@ build/
 
 - 每个加载器的发布 jar 将 core 作为 shadow（内嵌）依赖，避免要求用户单独安装 core。
 - `core` 模块也可以独立发布到 Maven 仓库。
-- 使用 Gradle Shadow 插件将 core + 其依赖（SQLite JDBC, MessagePack, bcrypt）shade 并 relocate 到适配层 jar 中，避免与其他 Mod 的依赖冲突。
+- 使用 Gradle Shadow 插件将 core + 其依赖（SQLite JDBC, bcrypt）shade 并 relocate 到适配层 jar 中，避免与其他 Mod 的依赖冲突。
 
 ## 30. CI / 版本矩阵
 
@@ -1391,7 +1389,7 @@ TheExchangeCore
 
 | 小计划 | 内容 | 验收 |
 |--------|------|------|
-| P2.1 | 帧编码/解码、长度限制、MessagePack 消息映射 | 半包/粘包测试通过 |
+| P2.1 | 帧编码/解码、长度限制、结构化二进制消息映射 | 半包/粘包测试通过 |
 | P2.2 | TLS 1.3 自签名上下文和连接启动/关闭 | 两个本地 core 节点可加密握手 |
 | P2.3 | 认证消息改为挑战-应答或至少不传明文；保留 bcrypt 存储 | 错误密码拒绝，正确密码建立会话 |
 | P2.4 | 序列号窗口和时间戳防重放 | 重复帧和过期帧被拒绝 |

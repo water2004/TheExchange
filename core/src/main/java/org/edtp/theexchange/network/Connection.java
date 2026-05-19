@@ -119,7 +119,7 @@ public class Connection {
     }
 
     @SuppressWarnings("unchecked")
-    public <T> T sendAndWait(FrameType requestType, Object request,
+    private <T> T sendAndWait(FrameType requestType, Object request,
                               FrameType responseType, long timeoutMs) {
         CompletableFuture<Object> future = new CompletableFuture<>();
         requestPermit.acquireUninterruptibly();

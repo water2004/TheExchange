@@ -3,6 +3,7 @@ package org.edtp.theexchange.service;
 import org.edtp.theexchange.compat.CompatibilityChecker;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.TheExchangeCore;
+import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.OperationType;
 import org.edtp.theexchange.network.Connection;
@@ -42,51 +43,10 @@ public class ExchangeService {
         this.itemSerializer = itemSerializer;
     }
 
-    public PutResult putItem(String serverName, int slot, String playerUuid,
-                              String playerName, Object itemStack) {
+    public CompletableFuture<PutResult> putItemAsync(String serverName, int slot, String playerUuid,
+                                                     String playerName, Object itemStack) {
         NeutralItem item = itemSerializer.serialize(itemStack);
-        return putNeutralItem(serverName, slot, playerUuid, playerName, item);
-    }
-
-    public PutResult putNeutralItem(String serverName, int slot, String playerUuid,
-                                    String playerName, NeutralItem item) {
-        if (networkManager == null) return PutResult.fail("网络功能未启用，请检查端口配置");
-        Connection conn = networkManager.getConnection(serverName);
-        if (conn == null) return PutResult.fail("目标服务器离线");
-
-        if (item == null || item.isEmpty()) return PutResult.fail("物品为空");
-        int expectedVersion = 0;
-        var cache = cacheManager.getCache(serverName);
-        if (cache != null) {
-            NeutralItem cached = cache.getItem(slot);
-            expectedVersion = cached != null && !cached.isEmpty() ? cached.getVersion() : 0;
-        }
-
-        String requestId = UUID.randomUUID().toString();
-
-        PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
-                requestId, playerUuid, playerName);
-        PutItemResponse response = conn.sendAndWait(
-                FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS);
-
-        if (response == null) {
-            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
-                    serverName, item.getItemId(), item.getCount(), false, "TIMEOUT");
-            return PutResult.fail("请求超时，物品已退回");
-        }
-
-        if (response.isSuccess()) {
-            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
-                    serverName, item.getItemId(), item.getCount(), true, null);
-            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
-                    response.getNewTimestamp());
-            refreshOpenViews(serverName);
-            return PutResult.success(response.getCurrentItem());
-        } else {
-            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
-                    serverName, item.getItemId(), item.getCount(), false, response.getFailReason());
-            return PutResult.fail(response.getFailReason());
-        }
+        return putNeutralItemAsync(serverName, slot, playerUuid, playerName, item);
     }
 
     public CompletableFuture<PutResult> putNeutralItemAsync(String serverName, int slot,
@@ -104,7 +64,7 @@ public class ExchangeService {
         }
 
         int expectedVersion = 0;
-        var cache = cacheManager.getCache(serverName);
+        var cache = cacheManager.getCache(serverName, InventoryScope.server());
         if (cache != null) {
             NeutralItem cached = cache.getItem(slot);
             expectedVersion = cached != null && !cached.isEmpty() ? cached.getVersion() : 0;
@@ -127,20 +87,9 @@ public class ExchangeService {
                 .thenCompose(future -> future);
     }
 
-    public TakeResult takeItem(String serverName, int slot, int requestCount,
-                               String playerUuid, String playerName) {
-        var cache = cacheManager.getCache(serverName);
-        NeutralItem expected = cache != null ? cache.getItem(slot) : null;
-        if (expected == null || expected.isEmpty()) {
-            return TakeResult.fail("物品已变化，请重试");
-        }
-        return takeItem(serverName, slot, expected.getItemId(), expected.getVersion(),
-                requestCount, playerUuid, playerName);
-    }
-
     public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot, int requestCount,
                                                        String playerUuid, String playerName) {
-        var cache = cacheManager.getCache(serverName);
+        var cache = cacheManager.getCache(serverName, InventoryScope.server());
         NeutralItem expected = cache != null ? cache.getItem(slot) : null;
         if (expected == null || expected.isEmpty()) {
             return CompletableFuture.completedFuture(TakeResult.fail("物品已变化，请重试"));
@@ -179,40 +128,6 @@ public class ExchangeService {
                 .thenCompose(future -> future);
     }
 
-    public TakeResult takeItem(String serverName, int slot, String expectedItemId,
-                                int expectedVersion, int requestCount,
-                                String playerUuid, String playerName) {
-        if (networkManager == null) return TakeResult.fail("网络功能未启用，请检查端口配置");
-        Connection conn = networkManager.getConnection(serverName);
-        if (conn == null) return TakeResult.fail("目标服务器离线");
-
-        String requestId = UUID.randomUUID().toString();
-
-        TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
-                expectedVersion, requestCount, requestId, playerUuid, playerName);
-        TakeItemResponse response = conn.sendAndWait(
-                FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, REQUEST_TIMEOUT_MS);
-
-        if (response == null) {
-            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
-                    serverName, expectedItemId, requestCount, false, "TIMEOUT");
-            return TakeResult.fail("请求超时");
-        }
-
-        if (response.isSuccess()) {
-            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
-                    serverName, expectedItemId, requestCount, true, null);
-            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
-                    response.getNewTimestamp());
-            refreshOpenViews(serverName);
-            return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
-        } else {
-            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
-                    serverName, expectedItemId, requestCount, false, response.getFailReason());
-            return TakeResult.fail(response.getFailReason());
-        }
-    }
-
     private PutResult finishRemotePut(String serverName, int slot, String playerUuid,
                                       String playerName, NeutralItem item, String requestId,
                                       PutItemResponse response, Throwable error) {
@@ -226,7 +141,7 @@ public class ExchangeService {
         if (response.isSuccess()) {
             operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
                     serverName, item.getItemId(), item.getCount(), true, null);
-            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
+            cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, response.getCurrentItem(),
                     response.getNewTimestamp());
             refreshOpenViews(serverName);
             return PutResult.success(response.getCurrentItem());

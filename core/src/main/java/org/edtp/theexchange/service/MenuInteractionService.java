@@ -2,7 +2,6 @@ package org.edtp.theexchange.service;
 
 import org.edtp.theexchange.model.ExchangeInteraction;
 import org.edtp.theexchange.model.ExchangeInteractionResult;
-import org.edtp.theexchange.model.ExchangeMutationResult;
 import org.edtp.theexchange.model.MenuClickType;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.PlayerExchangeContext;
@@ -160,21 +159,4 @@ public class MenuInteractionService {
         return a.getCount() == b.getCount() && sameStackKind(a, b);
     }
 
-    public ExchangeMutationResult putRemote(String serverName, int slot,
-                                            NeutralItem item, PlayerExchangeContext player) {
-        ExchangeService.PutResult result = exchangeService.putNeutralItem(
-                serverName, slot, player.uuid(), player.name(), item);
-        return result.isSuccess()
-                ? ExchangeMutationResult.success()
-                : ExchangeMutationResult.fail(result.getFailReason());
-    }
-
-    public ExchangeMutationResult takeRemote(String serverName, int slot, int count,
-                                             PlayerExchangeContext player) {
-        ExchangeService.TakeResult result = exchangeService.takeItem(
-                serverName, slot, count, player.uuid(), player.name());
-        return result.isSuccess()
-                ? ExchangeMutationResult.success(result.getItemsToGive())
-                : ExchangeMutationResult.fail(result.getFailReason());
-    }
 }

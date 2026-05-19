@@ -1,6 +1,9 @@
 package org.edtp.theexchange.model;
 
 import java.util.Arrays;
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
 import java.util.Objects;
 
 /**
@@ -52,6 +55,28 @@ public class NeutralItem {
 
     public boolean isEmpty() {
         return itemId == null || count <= 0;
+    }
+
+    public void writeTo(DataOutput out) throws IOException {
+        org.edtp.theexchange.util.BinaryIO.writeString(out, itemId);
+        out.writeInt(count);
+        org.edtp.theexchange.util.BinaryIO.writeString(out, displayName);
+        org.edtp.theexchange.util.BinaryIO.writeBytes(out, extraData);
+        out.writeBoolean(incompatible);
+        org.edtp.theexchange.util.BinaryIO.writeString(out, sourceVersion);
+        out.writeInt(version);
+    }
+
+    public static NeutralItem readFrom(DataInput in) throws IOException {
+        NeutralItem item = new NeutralItem();
+        item.setItemId(org.edtp.theexchange.util.BinaryIO.readString(in));
+        item.setCount(in.readInt());
+        item.setDisplayName(org.edtp.theexchange.util.BinaryIO.readString(in));
+        item.setExtraData(org.edtp.theexchange.util.BinaryIO.readBytes(in));
+        item.setIncompatible(in.readBoolean());
+        item.setSourceVersion(org.edtp.theexchange.util.BinaryIO.readString(in));
+        item.setVersion(in.readInt());
+        return item;
     }
 
     @Override

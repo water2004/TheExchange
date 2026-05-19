@@ -41,7 +41,6 @@ public class TheExchangeCore {
     private ServerRegistry serverRegistry;
     private CacheManager cacheManager;
     private SyncEngine syncEngine;
-    private ViewService viewService;
     private MenuInteractionService menuInteractionService;
     private HeartbeatManager heartbeatManager;
     private ExchangeService exchangeService;
@@ -71,7 +70,6 @@ public class TheExchangeCore {
     public ServerRegistry getServerRegistry() { return serverRegistry; }
     public CacheManager getCacheManager() { return cacheManager; }
     public SyncEngine getSyncEngine() { return syncEngine; }
-    public ViewService getViewService() { return viewService; }
     public MenuInteractionService getMenuInteractionService() { return menuInteractionService; }
     public ExchangeService getExchangeService() { return exchangeService; }
     public boolean isInitialized() { return initialized; }
@@ -118,39 +116,27 @@ public class TheExchangeCore {
     }
 
     public CompletableFuture<ExchangeViewState> openLocalViewAsync(String serverName) {
-        return submit(() -> viewService.openLocalView(serverName));
+        return submit(() -> ExchangeViewState.local(serverName,
+                localItemStore.getAllItems(),
+                localItemStore.getLastModifiedTimestamp()));
     }
 
     public CompletableFuture<ExchangeViewState> openRemoteViewAsync(String serverName) {
-        return submit(() -> {
-                    if (syncEngine == null) {
-                        return CompletableFuture.completedFuture(remoteFromCache(serverName, false));
-                    }
-                    return syncEngine.syncIfNeededAsync(serverName)
-                            .thenCompose(result -> submit(() -> {
-                                if (result != null) {
-                                    return ExchangeViewState.remote(serverName, result.isOnline(),
-                                            result.getItems(), result.getRemoteTimestamp());
-                                }
-                                return remoteFromCache(serverName, false);
-                            }));
-                })
-                .thenCompose(future -> future);
+        if (syncEngine == null) {
+            return submit(() -> remoteFromCache(serverName, false));
+        }
+        return syncEngine.syncIfNeededAsync(serverName)
+                .thenCompose(result -> submit(() -> result != null
+                        ? ExchangeViewState.remote(serverName, result.isOnline(),
+                        result.getItems(), result.getRemoteTimestamp())
+                        : remoteFromCache(serverName, false)));
     }
 
     public CompletableFuture<Void> refreshRemoteViewAsync(String serverName) {
-        return submit(() -> syncEngine != null
-                        ? syncEngine.syncIfNeededAsync(serverName)
-                        : CompletableFuture.completedFuture(null))
-                .thenCompose(future -> future)
-                .thenApply(ignored -> null);
-    }
-
-    private ExchangeViewState remoteFromCache(String serverName, boolean online) {
-        var cache = cacheManager.getCache(serverName);
-        return ExchangeViewState.remote(serverName, online,
-                cache != null ? cache.getItems() : null,
-                cache != null ? cache.getRemoteTimestamp() : 0);
+        if (syncEngine == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return syncEngine.syncIfNeededAsync(serverName).thenApply(ignored -> null);
     }
 
     public CompletableFuture<Void> applyLocalSnapshotAsync(java.util.List<NeutralItem> before,
@@ -179,6 +165,13 @@ public class TheExchangeCore {
                 .thenApply(result -> result.isSuccess()
                         ? ExchangeMutationResult.success(result.getItemsToGive())
                         : ExchangeMutationResult.fail(result.getFailReason()));
+    }
+
+    private ExchangeViewState remoteFromCache(String serverName, boolean online) {
+        var cache = cacheManager.getCache(serverName);
+        return ExchangeViewState.remote(serverName, online,
+                cache != null ? cache.getItems() : null,
+                cache != null ? cache.getRemoteTimestamp() : 0);
     }
 
     /**
@@ -254,7 +247,6 @@ public class TheExchangeCore {
         exchangeService = new ExchangeService(networkManager, localItemStore,
                 operationLogger, cacheManager, compatibilityChecker,
                 api.getItemSerializer());
-        viewService = new ViewService(syncEngine, cacheManager, localItemStore);
         menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
 
         // 6. Heartbeat (only if network is up)

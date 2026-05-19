@@ -44,7 +44,6 @@ dependencies {
 
     // Core transitive dependencies (shaded into mod jar)
     include("org.xerial:sqlite-jdbc:${project.sqlite_version}")
-    include("org.msgpack:msgpack-core:${project.msgpack_version}")
 }
 
 processResources {

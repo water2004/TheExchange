@@ -1,6 +1,7 @@
 package org.edtp.theexchange.storage;
 
 import org.edtp.theexchange.model.CachedInventory;
+import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 import java.sql.*;
 import java.util.List;
@@ -18,14 +19,20 @@ public class RemoteCacheStore {
     }
 
     public CachedInventory getCache(String serverName) {
-        String sql = "SELECT items_blob, synced_at, remote_timestamp FROM remote_cache WHERE server_name = ?";
+        return getCache(serverName, InventoryScope.server());
+    }
+
+    public CachedInventory getCache(String serverName, InventoryScope scope) {
+        String sql = "SELECT items_blob, synced_at, remote_timestamp FROM remote_cache " +
+                "WHERE server_name = ? AND scope_type = ? AND scope_id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, serverName);
+            ps.setString(2, scope.typeName());
+            ps.setString(3, scope.getScopeId());
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     byte[] blob = rs.getBytes("items_blob");
-                    @SuppressWarnings("unchecked")
-                    List<NeutralItem> items = MessagePackBlobCodec.decodeList(blob, NeutralItem.class);
+                    List<NeutralItem> items = NeutralItemBlobCodec.decodeList(blob);
                     if (items != null) {
                         for (int i = 0; i < items.size(); i++) {
                             NeutralItem item = items.get(i);
@@ -45,13 +52,19 @@ public class RemoteCacheStore {
     }
 
     public void putCache(String serverName, List<NeutralItem> items, long remoteTimestamp) {
-        String sql = "INSERT OR REPLACE INTO remote_cache (server_name, items_blob, synced_at, remote_timestamp) " +
-                "VALUES (?, ?, ?, ?)";
+        putCache(serverName, InventoryScope.server(), items, remoteTimestamp);
+    }
+
+    public void putCache(String serverName, InventoryScope scope, List<NeutralItem> items, long remoteTimestamp) {
+        String sql = "INSERT OR REPLACE INTO remote_cache (server_name, scope_type, scope_id, items_blob, synced_at, remote_timestamp) " +
+                "VALUES (?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, serverName);
-            ps.setBytes(2, MessagePackBlobCodec.encodeList(items));
-            ps.setLong(3, System.currentTimeMillis());
-            ps.setLong(4, remoteTimestamp);
+            ps.setString(2, scope.typeName());
+            ps.setString(3, scope.getScopeId());
+            ps.setBytes(4, NeutralItemBlobCodec.encodeList(items));
+            ps.setLong(5, System.currentTimeMillis());
+            ps.setLong(6, remoteTimestamp);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to put cache for " + serverName, e);
@@ -59,9 +72,15 @@ public class RemoteCacheStore {
     }
 
     public void removeCache(String serverName) {
-        String sql = "DELETE FROM remote_cache WHERE server_name = ?";
+        removeCache(serverName, InventoryScope.server());
+    }
+
+    public void removeCache(String serverName, InventoryScope scope) {
+        String sql = "DELETE FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, serverName);
+            ps.setString(2, scope.typeName());
+            ps.setString(3, scope.getScopeId());
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to remove cache for " + serverName, e);
@@ -69,14 +88,18 @@ public class RemoteCacheStore {
     }
 
     public void updateSlot(String serverName, int slot, NeutralItem item, long remoteTimestamp) {
-        CachedInventory cache = getCache(serverName);
+        updateSlot(serverName, InventoryScope.server(), slot, item, remoteTimestamp);
+    }
+
+    public void updateSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, long remoteTimestamp) {
+        CachedInventory cache = getCache(serverName, scope);
         if (cache == null) return;
         List<NeutralItem> items = cache.getItems();
         while (items.size() <= slot) {
             items.add(null);
         }
         items.set(slot, item);
-        putCache(serverName, items, remoteTimestamp);
+        putCache(serverName, scope, items, remoteTimestamp);
     }
 
     public void cleanupExpired(long retentionMillis) {

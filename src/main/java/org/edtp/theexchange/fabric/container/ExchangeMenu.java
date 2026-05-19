@@ -169,7 +169,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                 return;
             }
             case TAKE_REMOTE -> {
-                applyRemoteTake(decision, slotIndex, buttonNum, containerInput, player);
+                applyRemoteTake(decision, buttonNum, containerInput, player);
                 return;
             }
         }
@@ -296,7 +296,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         dropAtPlayer(player, remaining);
     }
 
-    private void applyRemoteTake(ExchangeInteractionResult decision, int slotIndex, int buttonNum,
+    private void applyRemoteTake(ExchangeInteractionResult decision, int buttonNum,
                                  ContainerInput containerInput, Player player) {
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized()) return;

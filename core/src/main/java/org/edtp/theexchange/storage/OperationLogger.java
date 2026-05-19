@@ -1,5 +1,6 @@
 package org.edtp.theexchange.storage;
 
+import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.OperationType;
 import java.sql.*;
 import java.util.ArrayList;
@@ -21,19 +22,28 @@ public class OperationLogger {
      */
     public boolean log(String requestId, OperationType opType, String playerUuid, String playerName,
                        String serverName, String itemId, int quantity, boolean success, String failReason) {
-        String sql = "INSERT INTO operation_log (timestamp, op_type, player_uuid, player_name, server_name, " +
-                "item_id, quantity, result, fail_reason, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        return log(InventoryScope.server(), requestId, opType, playerUuid, playerName,
+                serverName, itemId, quantity, success, failReason);
+    }
+
+    public boolean log(InventoryScope scope, String requestId, OperationType opType,
+                       String playerUuid, String playerName, String serverName,
+                       String itemId, int quantity, boolean success, String failReason) {
+        String sql = "INSERT INTO operation_log (timestamp, op_type, scope_type, scope_id, player_uuid, player_name, server_name, " +
+                "item_id, quantity, result, fail_reason, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setLong(1, System.currentTimeMillis());
             ps.setString(2, opType.name());
-            ps.setString(3, playerUuid);
-            ps.setString(4, playerName);
-            ps.setString(5, serverName);
-            ps.setString(6, itemId);
-            ps.setInt(7, quantity);
-            ps.setString(8, success ? "SUCCESS" : "FAIL");
-            ps.setString(9, failReason);
-            ps.setString(10, requestId);
+            ps.setString(3, scope.typeName());
+            ps.setString(4, scope.getScopeId());
+            ps.setString(5, playerUuid);
+            ps.setString(6, playerName);
+            ps.setString(7, serverName);
+            ps.setString(8, itemId);
+            ps.setInt(9, quantity);
+            ps.setString(10, success ? "SUCCESS" : "FAIL");
+            ps.setString(11, failReason);
+            ps.setString(12, requestId);
             ps.executeUpdate();
             return true;
         } catch (SQLException e) {
@@ -94,6 +104,9 @@ public class OperationLogger {
                 rs.getLong("id"),
                 rs.getLong("timestamp"),
                 OperationType.valueOf(rs.getString("op_type")),
+                new InventoryScope(
+                        InventoryScope.ScopeType.valueOf(rs.getString("scope_type")),
+                        rs.getString("scope_id")),
                 rs.getString("player_uuid"),
                 rs.getString("player_name"),
                 rs.getString("server_name"),
@@ -106,6 +119,7 @@ public class OperationLogger {
     }
 
     public record LogEntry(long id, long timestamp, OperationType opType,
+                           InventoryScope scope,
                            String playerUuid, String playerName,
                            String serverName, String itemId,
                            int quantity, boolean success,

@@ -399,7 +399,7 @@ CREATE INDEX idx_log_player ON operation_log(player_uuid);
 │ Magic   │ Version │ Length   │ Type         │
 │ (4B)    │ (2B)    │ (4B)     │ (2B)         │
 ├─────────┴─────────┴──────────┴──────────────┤
-│              Payload (ProtoBuf/MessagePack)   │
+│              Payload (structured binary)       │
 └──────────────────────────────────────────────┘
 ```
 
@@ -407,7 +407,7 @@ CREATE INDEX idx_log_player ON operation_log(player_uuid);
 - `Version`: 协议版本号
 - `Length`: Payload 长度
 - `Type`: 帧类型（认证、心跳、查询库存、放入、取出、推送等）
-- `Payload`: 建议使用 MessagePack 或 Protocol Buffers 序列化
+- `Payload`: 使用固定字段顺序的结构化二进制编码，变长字符串/字节数组以长度前缀表示
 
 ## 15. 并发控制（参考）
 

@@ -1,7 +1,7 @@
 package org.edtp.theexchange.service;
 
-import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.TheExchangeCore;
+import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.network.Connection;
 import org.edtp.theexchange.network.NetworkManager;
 import org.edtp.theexchange.network.protocol.FrameType;
@@ -23,34 +23,6 @@ public class SyncEngine {
     public SyncEngine(NetworkManager networkManager, CacheManager cacheManager) {
         this.networkManager = networkManager;
         this.cacheManager = cacheManager;
-    }
-
-    /**
-     * Incremental sync: check timestamp first, only pull full data if changed.
-     */
-    public SyncResult syncIfNeeded(String serverName) {
-        if (networkManager == null) return SyncResult.offline(cacheManager.getCache(serverName));
-        Connection conn = networkManager.getConnection(serverName);
-        if (conn == null) {
-            return SyncResult.offline(cacheManager.getCache(serverName));
-        }
-
-        // Step 1: Query timestamp
-        long cachedTs = cacheManager.getRemoteTimestamp(serverName);
-        QueryTimestampRequest tsReq = new QueryTimestampRequest(cachedTs);
-        QueryTimestampResponse tsResp = conn.sendAndWait(
-                FrameType.QUERY_TIMESTAMP, tsReq,
-                FrameType.TIMESTAMP_RESPONSE, SYNC_TIMEOUT_MS);
-
-        if (tsResp == null) return SyncResult.timeout();
-
-        if (!tsResp.isChanged()) {
-            // Cache still valid
-            return SyncResult.fromCache(cacheManager.getCache(serverName));
-        }
-
-        // Step 2: Full pull
-        return fullSync(serverName, conn);
     }
 
     public CompletableFuture<SyncResult> syncIfNeededAsync(String serverName) {
@@ -83,18 +55,6 @@ public class SyncEngine {
                 .thenCompose(future -> future);
     }
 
-    /**
-     * Force full sync regardless of timestamp.
-     */
-    public SyncResult fullSync(String serverName) {
-        if (networkManager == null) return SyncResult.offline(cacheManager.getCache(serverName));
-        Connection conn = networkManager.getConnection(serverName);
-        if (conn == null) {
-            return SyncResult.offline(cacheManager.getCache(serverName));
-        }
-        return fullSync(serverName, conn);
-    }
-
     public CompletableFuture<SyncResult> fullSyncAsync(String serverName) {
         if (networkManager == null) {
             return CompletableFuture.completedFuture(SyncResult.offline(cacheManager.getCache(serverName)));
@@ -120,33 +80,12 @@ public class SyncEngine {
                 .thenCompose(future -> future);
     }
 
-    private SyncResult fullSync(String serverName, Connection conn) {
-        QueryItemsResponse resp = conn.sendAndWait(
-                FrameType.QUERY_ITEMS, new QueryItemsRequest(0, 54),
-                FrameType.ITEMS_RESPONSE, SYNC_TIMEOUT_MS);
-
-        if (resp == null) return SyncResult.timeout();
-
-        List<NeutralItem> items = resp.getItems();
-        if (items != null) {
-            for (int i = 0; i < items.size(); i++) {
-                NeutralItem item = items.get(i);
-                if (item != null && item.getVersion() <= 0) {
-                    item.setVersion(i + 1);
-                }
-            }
-        }
-        cacheManager.updateCache(serverName, items, resp.getTimestamp());
-
-        return SyncResult.fromRemote(items, resp.getTimestamp(), resp.getServerVersion());
-    }
-
     private SyncResult finishFullSync(String serverName, QueryItemsResponse resp, Throwable error) {
         if (error != null || resp == null) return SyncResult.timeout();
-        List<NeutralItem> items = resp.getItems();
+        var items = resp.getItems();
         if (items != null) {
             for (int i = 0; i < items.size(); i++) {
-                NeutralItem item = items.get(i);
+                var item = items.get(i);
                 if (item != null && item.getVersion() <= 0) {
                     item.setVersion(i + 1);
                 }
