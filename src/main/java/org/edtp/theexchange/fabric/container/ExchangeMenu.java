@@ -9,6 +9,8 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import org.edtp.theexchange.TheExchangeCore;
+import org.edtp.theexchange.api.RefreshableExchangeView;
+import org.edtp.theexchange.model.ExchangeViewState;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.service.ExchangeService;
 
@@ -23,29 +25,22 @@ import org.edtp.theexchange.service.ExchangeService;
  *
  * REMOTE mode: shift+click triggers network PUT/TAKE via ExchangeService.
  */
-public class ExchangeMenu extends AbstractContainerMenu {
+public class ExchangeMenu extends AbstractContainerMenu implements RefreshableExchangeView {
 
     private final ExchangeContainer exchangeContainer;
     private final String serverName;
     private final boolean local;
     private volatile boolean online;
     private boolean refreshing;
-    private boolean refreshQueued;
 
     public ExchangeMenu(int containerId, Inventory playerInventory,
-                         String serverName, boolean local, boolean online) {
+                         ExchangeViewState state) {
         super(MenuType.GENERIC_9x6, containerId);
-        this.serverName = serverName;
-        this.local = local;
-        this.online = online;
+        this.serverName = state.getServerName();
+        this.local = state.isLocal();
+        this.online = state.isOnline();
         this.exchangeContainer = new ExchangeContainer(serverName, local, online, 6);
-
-        // Load initial data
-        if (local) {
-            exchangeContainer.loadFromLocal();
-        } else {
-            exchangeContainer.loadFromCache();
-        }
+        exchangeContainer.loadFromItems(state.getItems());
 
         // Exchange slots (6 rows × 9 cols = 54)
         for (int row = 0; row < 6; row++) {
@@ -91,23 +86,6 @@ public class ExchangeMenu extends AbstractContainerMenu {
 
     public void refreshFromCache() {
         if (refreshing) return;
-        if (!local && !refreshQueued) {
-            refreshQueued = true;
-            var core = TheExchangeCore.getInstance();
-            if (core != null && core.getApi() != null && core.getSyncEngine() != null) {
-                core.getApi().runAsync(() -> {
-                    try {
-                        var syncResult = core.getSyncEngine().syncIfNeeded(serverName);
-                        online = syncResult.isOnline();
-                    } finally {
-                        core.getApi().runOnMainThread(() -> {
-                            refreshQueued = false;
-                            applyCachedView();
-                        });
-                    }
-                });
-            }
-        }
         applyCachedView();
     }
 
@@ -115,12 +93,12 @@ public class ExchangeMenu extends AbstractContainerMenu {
         if (refreshing) return;
         refreshing = true;
         try {
+            ExchangeViewState state = local
+                    ? TheExchangeCore.getInstance().getViewService().openLocalView(serverName)
+                    : TheExchangeCore.getInstance().getViewService().openRemoteView(serverName);
+            online = state.isOnline();
             exchangeContainer.clearContent();
-            if (local) {
-                exchangeContainer.loadFromLocal();
-            } else {
-                exchangeContainer.loadFromCache();
-            }
+            exchangeContainer.loadFromItems(state.getItems());
             updateSlotReadOnly();
             for (int i = 0; i < 54; i++) {
                 Slot slot = this.slots.get(i);
@@ -437,7 +415,7 @@ public class ExchangeMenu extends AbstractContainerMenu {
     }
 
     public Component getTitle() {
-        String prefix = local ? "[本服] " : (online ? "" : "[离线] ");
-        return Component.literal(prefix + serverName + " 的共享空间");
+        return Component.literal((local ? "[本服] " : (online ? "" : "[离线] "))
+                + serverName + " 的共享空间");
     }
 }

@@ -9,14 +9,11 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.players.NameAndId;
-import net.minecraft.world.MenuProvider;
-import net.minecraft.world.SimpleMenuProvider;
 import org.edtp.theexchange.TheExchangeCore;
-import org.edtp.theexchange.fabric.container.ExchangeMenu;
+import org.edtp.theexchange.model.ExchangeViewState;
 import org.edtp.theexchange.model.RemoteServer;
 import org.edtp.theexchange.model.ServerStatus;
-import org.edtp.theexchange.network.NetworkManager;
+import org.edtp.theexchange.fabric.container.ExchangeMenu;
 import org.slf4j.Logger;
 
 import java.util.List;
@@ -25,9 +22,6 @@ public class ExchangeCommand {
 
     private static final Logger LOGGER = LogUtils.getLogger();
 
-    /**
-     * Get core, or send failure if not ready.
-     */
     private static TheExchangeCore getCore(CommandContext<CommandSourceStack> ctx) {
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null) {
@@ -40,7 +34,6 @@ public class ExchangeCommand {
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         var root = Commands.literal("exchange");
 
-        // /exchange server add <name> <address> <port> <password>
         root.then(Commands.literal("server")
                 .then(Commands.literal("add")
                         .then(Commands.argument("name", StringArgumentType.string())
@@ -54,19 +47,14 @@ public class ExchangeCommand {
                 .then(Commands.literal("list")
                         .executes(ExchangeCommand::listServers)));
 
-        root.then(Commands.literal("list")
-                .executes(ExchangeCommand::listForPlayer));
-
+        root.then(Commands.literal("list").executes(ExchangeCommand::listForPlayer));
         root.then(Commands.literal("view")
                 .then(Commands.argument("server", StringArgumentType.string())
                         .executes(ExchangeCommand::viewServer)));
-
         root.then(Commands.literal("refresh")
                 .then(Commands.argument("server", StringArgumentType.string())
                         .executes(ExchangeCommand::refreshServer)));
-
-        root.then(Commands.literal("reload")
-                .executes(ExchangeCommand::reloadConfig));
+        root.then(Commands.literal("reload").executes(ExchangeCommand::reloadConfig));
 
         root.then(Commands.literal("log")
                 .then(Commands.literal("export")
@@ -85,11 +73,8 @@ public class ExchangeCommand {
         if (src.getServer().isSingleplayer()) return true;
         var player = src.getPlayer();
         if (player == null) return false;
-        return src.getServer().getPlayerList().isOp(
-                new NameAndId(player.getGameProfile()));
+        return src.getServer().getPlayerList().isOp(new net.minecraft.server.players.NameAndId(player.getGameProfile()));
     }
-
-    // ===== Admin commands =====
 
     private static int addServer(CommandContext<CommandSourceStack> ctx) {
         try {
@@ -107,13 +92,8 @@ public class ExchangeCommand {
             String password = StringArgumentType.getString(ctx, "password");
 
             core.getServerRegistry().addServer(name, address, port, password);
-
-            String msg = "已添加远程服务器: " + name + " (" + address + ":" + port + ")";
-            if (!core.getServerRegistry().isNetworkAvailable()) {
-                msg += " — 注意：本服网络未启用，无法连接远程。请检查 config/theexchange/theexchange.json 中的端口是否被占用";
-            }
-            final String finalMsg = msg;
-            ctx.getSource().sendSuccess(() -> Component.literal(finalMsg), true);
+            ctx.getSource().sendSuccess(() -> Component.literal(
+                    "已添加远程服务器: " + name + " (" + address + ":" + port + ")"), true);
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in addServer", e);
@@ -158,13 +138,8 @@ public class ExchangeCommand {
             ctx.getSource().sendSuccess(() -> Component.literal(
                     "  [本服] " + localName + " — 使用 /exchange view local 打开"), false);
             for (RemoteServer server : servers) {
-                String statusStr;
-                if (!netOk) {
-                    statusStr = "离线 (网络未启用)";
-                } else {
-                    ServerStatus status = core.getServerRegistry().getStatus(server.getName());
-                    statusStr = status == ServerStatus.ONLINE ? "在线" : "离线";
-                }
+                String statusStr = !netOk ? "离线 (网络未启用)"
+                        : core.getServerRegistry().getStatus(server.getName()) == ServerStatus.ONLINE ? "在线" : "离线";
                 ctx.getSource().sendSuccess(() -> Component.literal(
                         "  " + server.getName() + " - " + server.getAddress()
                                 + ":" + server.getPort() + " [" + statusStr + "]"), false);
@@ -185,8 +160,6 @@ public class ExchangeCommand {
         return 1;
     }
 
-    // ===== Player commands =====
-
     private static int listForPlayer(CommandContext<CommandSourceStack> ctx) {
         return listServers(ctx);
     }
@@ -200,55 +173,17 @@ public class ExchangeCommand {
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
 
-            String localName = core.getApi().getServerName();
-            boolean isLocal = serverName.equalsIgnoreCase("local")
-                    || serverName.equalsIgnoreCase(localName);
+            ExchangeViewState state = "local".equalsIgnoreCase(serverName)
+                    || serverName.equalsIgnoreCase(core.getApi().getServerName())
+                    ? core.getViewService().openLocalView(core.getApi().getServerName())
+                    : core.getViewService().openRemoteView(serverName);
 
-            boolean online;
-            if (isLocal) {
-                online = true;
-            } else if (!core.getServerRegistry().isNetworkAvailable()) {
-                online = false;
-            } else {
-                ServerStatus status = core.getServerRegistry().getStatus(serverName);
-                if (status == ServerStatus.ONLINE) {
-                    try {
-                        var syncResult = core.getSyncEngine().syncIfNeeded(serverName);
-                        online = syncResult.isOnline();
-                    } catch (Exception e) {
-                        LOGGER.warn("[Exchange] Sync failed for {}, using cache", serverName);
-                        online = false;
-                    }
-                } else {
-                    online = false;
-                }
-            }
-
-            String titleServerName = isLocal ? localName : serverName;
-            boolean capturedOnline = online;
-            boolean capturedLocal = isLocal;
-            Component title = Component.literal(
-                    (capturedLocal ? "[本服] " : (capturedOnline ? "" : "[离线] "))
-                            + titleServerName + " 的共享空间");
-
-            MenuProvider provider = new SimpleMenuProvider(
+            player.openMenu(new net.minecraft.world.SimpleMenuProvider(
                     (containerId, inventory, p) -> new ExchangeMenu(
-                            containerId, inventory, titleServerName, capturedLocal, capturedOnline),
-                    title);
-            player.openMenu(provider);
+                            containerId, inventory, state),
+                    Component.literal(state.getTitle(core.getApi().getServerName()))));
 
-            if (capturedOnline && !capturedLocal) {
-                core.getApi().runAsync(() -> {
-                    try {
-                        core.getSyncEngine().syncIfNeeded(serverName);
-                        core.getApi().refreshRemoteInventoryView(serverName);
-                    } catch (Exception e) {
-                        LOGGER.warn("[Exchange] Async refresh failed for {}", serverName, e);
-                    }
-                });
-            }
-
-            if (!online) {
+            if (!state.isOnline() && !state.isLocal()) {
                 player.sendSystemMessage(Component.literal("[离线] 仅可查看缓存数据 — 目标服务器离线"));
             }
             return 1;
@@ -268,12 +203,8 @@ public class ExchangeCommand {
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
 
-            var syncResult = core.getSyncEngine().fullSync(serverName);
-            if (syncResult.isOnline()) {
-                ctx.getSource().sendSuccess(() -> Component.literal("已刷新 " + serverName), false);
-            } else {
-                ctx.getSource().sendFailure(Component.literal("目标服务器离线，无法刷新"));
-            }
+            core.getViewService().refreshRemoteView(serverName);
+            ctx.getSource().sendSuccess(() -> Component.literal("已刷新 " + serverName), false);
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in refreshServer", e);

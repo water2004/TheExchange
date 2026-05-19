@@ -20,13 +20,6 @@
       "org.edtp.theexchange.Theexchange"
     ]
   },
-  "mixins": [
-    "theexchange.mixins.json",
-    {
-      "config": "theexchange.client.mixins.json",
-      "environment": "client"
-    }
-  ],
   "depends": {
     "fabricloader": ">=${loader_version}",
     "fabric-api": "*",

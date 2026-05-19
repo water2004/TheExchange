@@ -4,10 +4,10 @@ import com.mojang.logging.LogUtils;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import org.edtp.theexchange.api.ExchangeAPI;
+import org.edtp.theexchange.api.RefreshableExchangeView;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.fabric.config.FabricConfigLoader;
 import org.edtp.theexchange.fabric.item.FabricItemSerializer;
-import org.edtp.theexchange.fabric.container.ExchangeMenu;
 import org.slf4j.Logger;
 
 public class FabricExchangeAPI implements ExchangeAPI {
@@ -72,7 +72,7 @@ public class FabricExchangeAPI implements ExchangeAPI {
     public void refreshRemoteInventoryView(String serverName) {
         server.execute(() -> {
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                if (player.containerMenu instanceof ExchangeMenu menu
+                if (player.containerMenu instanceof RefreshableExchangeView menu
                         && menu.isViewingServer(serverName)) {
                     menu.refreshFromCache();
                 }

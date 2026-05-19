@@ -59,6 +59,10 @@ public class ExchangeContainer extends SimpleContainer {
         }
     }
 
+    public void loadFromItems(List<NeutralItem> items) {
+        fillFromNeutralItems(items);
+    }
+
     public void loadFromLocal() {
         var items = TheExchangeCore.getInstance().getLocalItemStore().getAllItems();
         fillFromNeutralItems(items);

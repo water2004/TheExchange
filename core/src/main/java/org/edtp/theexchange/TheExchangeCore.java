@@ -28,6 +28,7 @@ public class TheExchangeCore {
     private ServerRegistry serverRegistry;
     private CacheManager cacheManager;
     private SyncEngine syncEngine;
+    private ViewService viewService;
     private HeartbeatManager heartbeatManager;
     private ExchangeService exchangeService;
 
@@ -46,6 +47,7 @@ public class TheExchangeCore {
     public ServerRegistry getServerRegistry() { return serverRegistry; }
     public CacheManager getCacheManager() { return cacheManager; }
     public SyncEngine getSyncEngine() { return syncEngine; }
+    public ViewService getViewService() { return viewService; }
     public ExchangeService getExchangeService() { return exchangeService; }
 
     /**
@@ -108,6 +110,7 @@ public class TheExchangeCore {
         syncEngine = networkManager != null
                 ? new SyncEngine(networkManager, cacheManager)
                 : null;
+        viewService = new ViewService(syncEngine, cacheManager);
 
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(
                 api.getItemSerializer());
