@@ -1,0 +1,180 @@
+package org.edtp.theexchange.service;
+
+import org.edtp.theexchange.model.ExchangeInteraction;
+import org.edtp.theexchange.model.ExchangeInteractionResult;
+import org.edtp.theexchange.model.ExchangeMutationResult;
+import org.edtp.theexchange.model.MenuClickType;
+import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.PlayerExchangeContext;
+
+import java.util.Arrays;
+import java.util.Objects;
+
+public class MenuInteractionService {
+    private static final int EXCHANGE_SLOTS = 54;
+    private final ExchangeService exchangeService;
+    private final org.edtp.theexchange.storage.LocalItemStore localItemStore;
+
+    public MenuInteractionService(ExchangeService exchangeService,
+                                  org.edtp.theexchange.storage.LocalItemStore localItemStore) {
+        this.exchangeService = exchangeService;
+        this.localItemStore = localItemStore;
+    }
+
+    public ExchangeInteractionResult decide(ExchangeInteraction input) {
+        if (input.isLocal()) {
+            return ExchangeInteractionResult.localApply();
+        }
+        if (!touchesExchangeSpace(input)) {
+            return ExchangeInteractionResult.passToLoader();
+        }
+        if (!input.isOnline()) {
+            return ExchangeInteractionResult.refresh("目标服务器离线，仅可查看");
+        }
+
+        return switch (input.getClickType()) {
+            case QUICK_MOVE -> decideQuickMove(input);
+            case PICKUP -> decidePickup(input);
+            case SWAP -> decideSwap(input);
+            case QUICK_CRAFT, PICKUP_ALL, THROW, CLONE ->
+                    ExchangeInteractionResult.refresh("远程共享空间暂不支持该操作，请使用点击或 Shift 点击");
+        };
+    }
+
+    private ExchangeInteractionResult decideQuickMove(ExchangeInteraction input) {
+        if (isExchangeSlot(input.getSlotIndex())) {
+            NeutralItem item = input.getSlotItem();
+            if (isEmpty(item)) return ExchangeInteractionResult.refresh(null);
+            return ExchangeInteractionResult.takeRemote(input.getSlotIndex(), item.getCount());
+        }
+        NeutralItem item = input.getSlotItem();
+        if (isEmpty(item)) return ExchangeInteractionResult.refresh(null);
+        int targetSlot = findTargetSlot(input);
+        if (targetSlot < 0) {
+            return ExchangeInteractionResult.reject("共享空间已满");
+        }
+        return ExchangeInteractionResult.putRemote(targetSlot, item, item.getCount());
+    }
+
+    private ExchangeInteractionResult decidePickup(ExchangeInteraction input) {
+        if (input.getSlotIndex() < 0) {
+            return ExchangeInteractionResult.passToLoader();
+        }
+        if (!isExchangeSlot(input.getSlotIndex())) {
+            return ExchangeInteractionResult.passToLoader();
+        }
+        if (isEmpty(input.getCarriedItem())) {
+            NeutralItem remote = input.getSlotItem();
+            if (isEmpty(remote)) return ExchangeInteractionResult.refresh(null);
+            int count = input.getButton() == 1 ? (remote.getCount() + 1) / 2 : remote.getCount();
+            return ExchangeInteractionResult.takeRemote(input.getSlotIndex(), count);
+        }
+        int count = input.getButton() == 1 ? 1 : input.getCarriedItem().getCount();
+        return ExchangeInteractionResult.putRemote(input.getSlotIndex(), input.getCarriedItem(), count);
+    }
+
+    private ExchangeInteractionResult decideSwap(ExchangeInteraction input) {
+        if (!isExchangeSlot(input.getSlotIndex()) || input.getButton() < 0 || input.getButton() > 8) {
+            return ExchangeInteractionResult.refresh(null);
+        }
+        if (!isEmpty(input.getHotbarItem())) {
+            int targetSlot = findTargetSlot(input);
+            if (targetSlot < 0) {
+                return ExchangeInteractionResult.reject("共享空间已满");
+            }
+            return ExchangeInteractionResult.putRemote(targetSlot, input.getHotbarItem(), input.getHotbarItem().getCount());
+        }
+        NeutralItem remote = input.getSlotItem();
+        if (isEmpty(remote)) return ExchangeInteractionResult.refresh(null);
+        return ExchangeInteractionResult.takeRemote(input.getSlotIndex(), remote.getCount());
+    }
+
+    private int findTargetSlot(ExchangeInteraction input) {
+        NeutralItem stack = !isEmpty(input.getHotbarItem()) ? input.getHotbarItem() : input.getSlotItem();
+        if (isEmpty(stack)) return -1;
+        for (int i = 0; i < EXCHANGE_SLOTS; i++) {
+            NeutralItem current = itemAt(input, i);
+            if (!isEmpty(current) && sameStackKind(current, stack)
+                    && current.getCount() + stack.getCount() <= 64) {
+                return i;
+            }
+        }
+        for (int i = 0; i < EXCHANGE_SLOTS; i++) {
+            if (isEmpty(itemAt(input, i))) return i;
+        }
+        return -1;
+    }
+
+    private NeutralItem itemAt(ExchangeInteraction input, int slot) {
+        if (slot < 0 || slot >= input.getExchangeItems().size()) return null;
+        return input.getExchangeItems().get(slot);
+    }
+
+    private boolean sameStackKind(NeutralItem a, NeutralItem b) {
+        if (a == null || b == null) return false;
+        return Objects.equals(a.getItemId(), b.getItemId())
+                && Objects.equals(a.getDisplayName(), b.getDisplayName())
+                && Arrays.equals(a.getExtraData(), b.getExtraData())
+                && a.isIncompatible() == b.isIncompatible()
+                && Objects.equals(a.getSourceVersion(), b.getSourceVersion());
+    }
+
+    private boolean touchesExchangeSpace(ExchangeInteraction input) {
+        if (isExchangeSlot(input.getSlotIndex())) return true;
+        if (input.getClickType() == MenuClickType.QUICK_MOVE && input.getSlotIndex() >= EXCHANGE_SLOTS) return true;
+        if (input.getClickType() == MenuClickType.SWAP
+                && isExchangeSlot(input.getSlotIndex())
+                && input.getButton() >= 0 && input.getButton() < 9) return true;
+        return input.getClickType() == MenuClickType.QUICK_CRAFT
+                || input.getClickType() == MenuClickType.PICKUP_ALL;
+    }
+
+    private boolean isExchangeSlot(int slot) {
+        return slot >= 0 && slot < EXCHANGE_SLOTS;
+    }
+
+    private boolean isEmpty(NeutralItem item) {
+        return item == null || item.isEmpty();
+    }
+
+    public void applyLocalSnapshot(java.util.List<NeutralItem> before,
+                                   java.util.List<NeutralItem> after,
+                                   PlayerExchangeContext player) {
+        java.util.List<Integer> changed = new java.util.ArrayList<>();
+        for (int i = 0; i < EXCHANGE_SLOTS; i++) {
+            NeutralItem prev = i < before.size() ? before.get(i) : null;
+            NeutralItem current = i < after.size() ? after.get(i) : null;
+            if (sameItemState(prev, current)) continue;
+            if (localItemStore.replaceSlotFromLocal(i, current, player.uuid())) {
+                changed.add(i);
+            }
+        }
+        if (!changed.isEmpty()) {
+            exchangeService.publishLocalInventoryUpdate(changed);
+        }
+    }
+
+    private boolean sameItemState(NeutralItem a, NeutralItem b) {
+        if (isEmpty(a) && isEmpty(b)) return true;
+        if (isEmpty(a) || isEmpty(b)) return false;
+        return a.getCount() == b.getCount() && sameStackKind(a, b);
+    }
+
+    public ExchangeMutationResult putRemote(String serverName, int slot,
+                                            NeutralItem item, PlayerExchangeContext player) {
+        ExchangeService.PutResult result = exchangeService.putNeutralItem(
+                serverName, slot, player.uuid(), player.name(), item);
+        return result.isSuccess()
+                ? ExchangeMutationResult.success()
+                : ExchangeMutationResult.fail(result.getFailReason());
+    }
+
+    public ExchangeMutationResult takeRemote(String serverName, int slot, int count,
+                                             PlayerExchangeContext player) {
+        ExchangeService.TakeResult result = exchangeService.takeItem(
+                serverName, slot, count, player.uuid(), player.name());
+        return result.isSuccess()
+                ? ExchangeMutationResult.success(result.getItemsToGive())
+                : ExchangeMutationResult.fail(result.getFailReason());
+    }
+}

@@ -7,7 +7,7 @@ import net.minecraft.world.item.ItemStack;
 
 /**
  * Slot in the exchange GUI. Read-only when server is offline.
- * PUT/TAKE operations are dispatched to ExchangeService by the parent ExchangeMenu.
+ * PUT/TAKE decisions are made by the core interaction service.
  */
 public class ExchangeSlot extends Slot {
 

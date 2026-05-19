@@ -89,6 +89,21 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
         return configData.remoteServers;
     }
 
+    @Override
+    public ExchangeAPI.RuntimeConfig getRuntimeConfig() {
+        if (configData == null) loadConfig();
+        List<ExchangeAPI.RemoteServerConfig> remotes = new ArrayList<>();
+        for (RemoteServerConfig remote : configData.remoteServers) {
+            remotes.add(new ExchangeAPI.RemoteServerConfig(
+                    remote.name, remote.address, remote.port, remote.password));
+        }
+        return new ExchangeAPI.RuntimeConfig(
+                configData.server.displayName,
+                configData.server.port,
+                configData.server.password,
+                remotes);
+    }
+
     public int getCacheRetentionHours() {
         if (configData == null) loadConfig();
         return configData.cache.offlineRetentionHours;

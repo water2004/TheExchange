@@ -43,11 +43,16 @@ public class ExchangeService {
 
     public PutResult putItem(String serverName, int slot, String playerUuid,
                               String playerName, Object itemStack) {
+        NeutralItem item = itemSerializer.serialize(itemStack);
+        return putNeutralItem(serverName, slot, playerUuid, playerName, item);
+    }
+
+    public PutResult putNeutralItem(String serverName, int slot, String playerUuid,
+                                    String playerName, NeutralItem item) {
         if (networkManager == null) return PutResult.fail("网络功能未启用，请检查端口配置");
         Connection conn = networkManager.getConnection(serverName);
         if (conn == null) return PutResult.fail("目标服务器离线");
 
-        NeutralItem item = itemSerializer.serialize(itemStack);
         if (item == null || item.isEmpty()) return PutResult.fail("物品为空");
         int expectedVersion = 0;
         var cache = cacheManager.getCache(serverName);
@@ -81,6 +86,17 @@ public class ExchangeService {
                     serverName, item.getItemId(), item.getCount(), false, response.getFailReason());
             return PutResult.fail(response.getFailReason());
         }
+    }
+
+    public TakeResult takeItem(String serverName, int slot, int requestCount,
+                               String playerUuid, String playerName) {
+        var cache = cacheManager.getCache(serverName);
+        NeutralItem expected = cache != null ? cache.getItem(slot) : null;
+        if (expected == null || expected.isEmpty()) {
+            return TakeResult.fail("物品已变化，请重试");
+        }
+        return takeItem(serverName, slot, expected.getItemId(), expected.getVersion(),
+                requestCount, playerUuid, playerName);
     }
 
     public TakeResult takeItem(String serverName, int slot, String expectedItemId,

@@ -29,6 +29,7 @@ public class TheExchangeCore {
     private CacheManager cacheManager;
     private SyncEngine syncEngine;
     private ViewService viewService;
+    private MenuInteractionService menuInteractionService;
     private HeartbeatManager heartbeatManager;
     private ExchangeService exchangeService;
 
@@ -48,6 +49,7 @@ public class TheExchangeCore {
     public CacheManager getCacheManager() { return cacheManager; }
     public SyncEngine getSyncEngine() { return syncEngine; }
     public ViewService getViewService() { return viewService; }
+    public MenuInteractionService getMenuInteractionService() { return menuInteractionService; }
     public ExchangeService getExchangeService() { return exchangeService; }
 
     /**
@@ -110,14 +112,14 @@ public class TheExchangeCore {
         syncEngine = networkManager != null
                 ? new SyncEngine(networkManager, cacheManager)
                 : null;
-        viewService = new ViewService(syncEngine, cacheManager);
-
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(
                 api.getItemSerializer());
 
         exchangeService = new ExchangeService(networkManager, localItemStore,
                 operationLogger, cacheManager, compatibilityChecker,
                 api.getItemSerializer());
+        viewService = new ViewService(syncEngine, cacheManager, localItemStore);
+        menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
 
         // 6. Heartbeat (only if network is up)
         if (networkManager != null) {
@@ -135,6 +137,26 @@ public class TheExchangeCore {
         instance = this;
         initialized = true;
         api.getLogger().info("TheExchange core initialized");
+    }
+
+    public void initialize() {
+        api.getConfigLoader().loadConfig();
+        ExchangeAPI.RuntimeConfig config = api.getConfigLoader().getRuntimeConfig();
+        initialize(config.getPort(), config.getPassword());
+
+        configStore.set("server.display_name", config.getDisplayName());
+        configStore.set("server.password", config.getPassword());
+        configStore.set("server.port", String.valueOf(config.getPort()));
+        for (var remote : config.getRemoteServers()) {
+            try {
+                serverRegistry.addServer(remote.getName(), remote.getAddress(),
+                        remote.getPort(), remote.getPassword());
+            } catch (Exception e) {
+                api.getLogger().error("Failed to add server: " + remote.getName(), e);
+            }
+        }
+        api.getLogger().info("TheExchange configured. Port: " + config.getPort()
+                + ", Servers: " + config.getRemoteServers().size());
     }
 
     public void shutdown() {

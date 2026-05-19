@@ -2,6 +2,7 @@ package org.edtp.theexchange.api;
 
 import org.edtp.theexchange.compat.ItemSerializer;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -53,5 +54,49 @@ public interface ExchangeAPI {
 
         /** Save the main configuration from a JSON string */
         void saveConfig(String json);
+
+        /** Loader-neutral parsed runtime config. */
+        default RuntimeConfig getRuntimeConfig() {
+            return new RuntimeConfig("Default Server", 25566, "changeme", List.of());
+        }
+    }
+
+    class RuntimeConfig {
+        private final String displayName;
+        private final int port;
+        private final String password;
+        private final List<RemoteServerConfig> remoteServers;
+
+        public RuntimeConfig(String displayName, int port, String password,
+                             List<RemoteServerConfig> remoteServers) {
+            this.displayName = displayName;
+            this.port = port;
+            this.password = password;
+            this.remoteServers = remoteServers != null ? new ArrayList<>(remoteServers) : new ArrayList<>();
+        }
+
+        public String getDisplayName() { return displayName; }
+        public int getPort() { return port; }
+        public String getPassword() { return password; }
+        public List<RemoteServerConfig> getRemoteServers() { return remoteServers; }
+    }
+
+    class RemoteServerConfig {
+        private final String name;
+        private final String address;
+        private final int port;
+        private final String password;
+
+        public RemoteServerConfig(String name, String address, int port, String password) {
+            this.name = name;
+            this.address = address;
+            this.port = port;
+            this.password = password;
+        }
+
+        public String getName() { return name; }
+        public String getAddress() { return address; }
+        public int getPort() { return port; }
+        public String getPassword() { return password; }
     }
 }

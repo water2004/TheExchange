@@ -1,27 +1,26 @@
 package org.edtp.theexchange.service;
 
-import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.model.CachedInventory;
 import org.edtp.theexchange.model.ExchangeViewState;
+import org.edtp.theexchange.storage.LocalItemStore;
 
 public class ViewService {
 
     private final SyncEngine syncEngine;
     private final CacheManager cacheManager;
+    private final LocalItemStore localItemStore;
 
-    public ViewService(SyncEngine syncEngine, CacheManager cacheManager) {
+    public ViewService(SyncEngine syncEngine, CacheManager cacheManager,
+                       LocalItemStore localItemStore) {
         this.syncEngine = syncEngine;
         this.cacheManager = cacheManager;
+        this.localItemStore = localItemStore;
     }
 
     public ExchangeViewState openLocalView(String serverName) {
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core == null) {
-            return ExchangeViewState.local(serverName, null, 0);
-        }
         return ExchangeViewState.local(serverName,
-                core.getLocalItemStore().getAllItems(),
-                core.getLocalItemStore().getLastModifiedTimestamp());
+                localItemStore.getAllItems(),
+                localItemStore.getLastModifiedTimestamp());
     }
 
     public ExchangeViewState openRemoteView(String serverName) {

@@ -10,9 +10,13 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.api.RefreshableExchangeView;
+import org.edtp.theexchange.model.ExchangeInteraction;
+import org.edtp.theexchange.model.ExchangeInteractionResult;
+import org.edtp.theexchange.model.ExchangeMutationResult;
 import org.edtp.theexchange.model.ExchangeViewState;
+import org.edtp.theexchange.model.MenuClickType;
 import org.edtp.theexchange.model.NeutralItem;
-import org.edtp.theexchange.service.ExchangeService;
+import org.edtp.theexchange.model.PlayerExchangeContext;
 
 /**
  * Container menu for the exchange GUI.
@@ -20,10 +24,8 @@ import org.edtp.theexchange.service.ExchangeService;
  * 54-80: Player inventory
  * 81-89: Player hotbar
  *
- * LOCAL mode: ExchangeContainer auto-persists to LocalItemStore on every write.
- *   No special handling needed — vanilla click/move logic triggers setItem/removeItem.
- *
- * REMOTE mode: shift+click triggers network PUT/TAKE via ExchangeService.
+ * Loader-facing menu: translates Minecraft clicks and ItemStacks into core
+ * interaction requests, then applies the core result back to the player.
  */
 public class ExchangeMenu extends AbstractContainerMenu implements RefreshableExchangeView {
 
@@ -39,7 +41,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         this.serverName = state.getServerName();
         this.local = state.isLocal();
         this.online = state.isOnline();
-        this.exchangeContainer = new ExchangeContainer(serverName, local, online, 6);
+        this.exchangeContainer = new ExchangeContainer(online, 6);
         exchangeContainer.loadFromItems(state.getItems());
 
         // Exchange slots (6 rows × 9 cols = 54)
@@ -120,293 +122,203 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
     @Override
     public void clicked(int slotIndex, int buttonNum, ContainerInput containerInput, Player player) {
-        if (local) {
-            handleLocalClick(slotIndex, buttonNum, containerInput, player);
-            return;
-        }
-        if (!touchesExchangeSpace(slotIndex, buttonNum, containerInput)) {
-            super.clicked(slotIndex, buttonNum, containerInput, player);
-            return;
-        }
+        ExchangeInteractionResult decision = TheExchangeCore.getInstance()
+                .getMenuInteractionService()
+                .decide(buildInteraction(slotIndex, buttonNum, containerInput, player));
 
-        if (!online) {
-            player.sendSystemMessage(Component.literal("目标服务器离线，仅可查看"));
+        switch (decision.getAction()) {
+            case PASS_TO_LOADER -> {
+                super.clicked(slotIndex, buttonNum, containerInput, player);
+                return;
+            }
+            case LOCAL_APPLY -> {
+                handleLocalClick(slotIndex, buttonNum, containerInput, player);
+                return;
+            }
+            case REJECT -> {
+                if (decision.getMessage() != null) {
+                    player.sendSystemMessage(Component.literal(decision.getMessage()));
+                }
+                return;
+            }
+            case REFRESH -> {
+                if (decision.getMessage() != null) {
+                    player.sendSystemMessage(Component.literal(decision.getMessage()));
+                }
+                refreshFromCache();
+                return;
+            }
+            case PUT_REMOTE -> {
+                applyRemotePut(decision, slotIndex, buttonNum, containerInput, player);
+                return;
+            }
+            case TAKE_REMOTE -> {
+                applyRemoteTake(decision, slotIndex, buttonNum, containerInput, player);
+                return;
+            }
+        }
+    }
+
+    private ExchangeInteraction buildInteraction(int slotIndex, int buttonNum,
+                                                 ContainerInput containerInput, Player player) {
+        return new ExchangeInteraction(
+                serverName,
+                local,
+                online,
+                slotIndex,
+                buttonNum,
+                mapClickType(containerInput),
+                neutralFromSlot(slotIndex),
+                neutralFromStack(getCarried()),
+                neutralFromHotbar(buttonNum),
+                snapshotNeutralItems(),
+                new PlayerExchangeContext(player.getUUID().toString(), player.getName().getString()));
+    }
+
+    private MenuClickType mapClickType(ContainerInput input) {
+        return switch (input) {
+            case PICKUP -> MenuClickType.PICKUP;
+            case QUICK_MOVE -> MenuClickType.QUICK_MOVE;
+            case SWAP -> MenuClickType.SWAP;
+            case QUICK_CRAFT -> MenuClickType.QUICK_CRAFT;
+            case PICKUP_ALL -> MenuClickType.PICKUP_ALL;
+            case THROW -> MenuClickType.THROW;
+            case CLONE -> MenuClickType.CLONE;
+        };
+    }
+
+    private NeutralItem neutralFromSlot(int slotIndex) {
+        if (slotIndex < 0 || slotIndex >= this.slots.size()) return null;
+        return neutralFromStack(this.slots.get(slotIndex).getItem());
+    }
+
+    private NeutralItem neutralFromHotbar(int button) {
+        if (button < 0 || button > 8 || 81 + button >= this.slots.size()) return null;
+        return neutralFromStack(this.slots.get(81 + button).getItem());
+    }
+
+    private NeutralItem neutralFromStack(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return null;
+        return TheExchangeCore.getInstance().getApi().getItemSerializer().serialize(stack.copy());
+    }
+
+    private java.util.List<NeutralItem> snapshotNeutralItems() {
+        java.util.List<NeutralItem> items = new java.util.ArrayList<>(54);
+        for (int i = 0; i < 54; i++) {
+            items.add(neutralFromStack(exchangeContainer.getItem(i)));
+        }
+        return items;
+    }
+
+    private void applyRemotePut(ExchangeInteractionResult decision, int slotIndex, int buttonNum,
+                                ContainerInput containerInput, Player player) {
+        ExchangeMutationResult result = TheExchangeCore.getInstance().getMenuInteractionService()
+                .putRemote(serverName, decision.getTargetSlot(), decision.getItem(), playerContext(player));
+        if (!result.isSuccess()) {
+            player.sendSystemMessage(Component.literal(
+                    result.getFailReason() != null ? result.getFailReason() : "放入失败"));
             refreshFromCache();
             return;
         }
 
-        switch (containerInput) {
-            case QUICK_MOVE -> {
-                quickMoveStack(player, slotIndex);
-                broadcastChanges();
-            }
-            case PICKUP -> handleRemotePickup(slotIndex, buttonNum, player);
-            case SWAP -> handleRemoteSwap(slotIndex, buttonNum, player);
-            case QUICK_CRAFT, PICKUP_ALL, THROW, CLONE -> {
-                player.sendSystemMessage(Component.literal("远程共享空间暂不支持该操作，请使用点击或 Shift 点击"));
-                refreshFromCache();
-            }
-            default -> refreshFromCache();
-        }
-    }
-
-    private void handleLocalClick(int slotIndex, int buttonNum, ContainerInput containerInput, Player player) {
-        java.util.List<ItemStack> before = snapshotExchangeSlots();
-        exchangeContainer.setSuppressPersistence(true);
-        try {
-            super.clicked(slotIndex, buttonNum, containerInput, player);
-        } finally {
-            exchangeContainer.setSuppressPersistence(false);
-        }
-
-        java.util.List<Integer> changed = new java.util.ArrayList<>();
-        var core = TheExchangeCore.getInstance();
-        var serializer = core.getApi().getItemSerializer();
-        for (int i = 0; i < 54; i++) {
-            ItemStack current = exchangeContainer.getItem(i);
-            if (ItemStack.matches(before.get(i), current)
-                    && ItemStack.isSameItemSameComponents(before.get(i), current)
-                    && before.get(i).getCount() == current.getCount()) {
-                continue;
-            }
-            NeutralItem neutral = current.isEmpty() ? null : serializer.serialize(current);
-            if (core.getLocalItemStore().replaceSlotFromLocal(i, neutral, player.getUUID().toString())) {
-                changed.add(i);
-            }
-        }
-        if (!changed.isEmpty()) {
-            core.getExchangeService().publishLocalInventoryUpdate(changed);
-        }
-    }
-
-    private java.util.List<ItemStack> snapshotExchangeSlots() {
-        java.util.List<ItemStack> snapshot = new java.util.ArrayList<>(54);
-        for (int i = 0; i < 54; i++) {
-            snapshot.add(exchangeContainer.getItem(i).copy());
-        }
-        return snapshot;
-    }
-
-    @Override
-    public ItemStack quickMoveStack(Player player, int slotIndex) {
-        Slot slot = this.slots.get(slotIndex);
-        if (!slot.hasItem()) return ItemStack.EMPTY;
-
-        ItemStack sourceStack = slot.getItem();
-        ItemStack copy = sourceStack.copy();
-
-        if (slotIndex < 54) {
-            // === Exchange → Player inventory (TAKE) ===
-            if (!online && !local) {
-                player.sendSystemMessage(Component.literal("目标服务器离线，仅可查看"));
-                return ItemStack.EMPTY;
-            }
-
-            if (local) {
-                // Local: move items via vanilla, container persists automatically
-                if (!moveItemStackTo(sourceStack, 54, 90, true)) {
-                    return ItemStack.EMPTY;
-                }
-            } else {
-                if (takeRemoteSlotToPlayer(slotIndex, copy.getCount(), player)) {
-                    refreshFromCache();
-                } else {
-                    return ItemStack.EMPTY;
-                }
-            }
-        } else {
-            // === Player inventory → Exchange (PUT) ===
-            if (!online && !local) {
-                player.sendSystemMessage(Component.literal("目标服务器离线，仅可查看"));
-                return ItemStack.EMPTY;
-            }
-
-            if (local) {
-                // Local: move items via vanilla, container persists automatically
-                if (!moveItemStackTo(sourceStack, 0, 54, false)) {
-                    return ItemStack.EMPTY;
-                }
-            } else {
-                int targetSlot = findTargetSlot(copy);
-                if (targetSlot < 0) {
-                    player.sendSystemMessage(Component.literal("共享空间已满"));
-                    return ItemStack.EMPTY;
-                }
-                int putCount = copy.getCount();
-                if (putRemoteStack(targetSlot, copy, putCount, player)) {
-                    sourceStack.shrink(copy.getCount());
-                    refreshFromCache();
-                } else {
-                    return ItemStack.EMPTY;
-                }
-            }
-        }
-
-        if (sourceStack.isEmpty()) {
-            slot.setByPlayer(ItemStack.EMPTY);
-        } else {
-            slot.setChanged();
-        }
-
-        return copy;
-    }
-
-    private void handleRemotePickup(int slotIndex, int buttonNum, Player player) {
-        if (slotIndex < 0) {
-            super.clicked(slotIndex, buttonNum, ContainerInput.PICKUP, player);
-            return;
-        }
-        if (slotIndex < 54) {
+        int count = decision.getCount();
+        if (containerInput == ContainerInput.PICKUP) {
             ItemStack carried = getCarried();
-            if (carried.isEmpty()) {
-                handleTakeClick(slotIndex, buttonNum, player);
+            carried.shrink(count);
+            setCarried(carried.isEmpty() ? ItemStack.EMPTY : carried);
+        } else if (containerInput == ContainerInput.SWAP && buttonNum >= 0 && buttonNum <= 8) {
+            Slot hotbarSlot = this.slots.get(81 + buttonNum);
+            ItemStack hotbarStack = hotbarSlot.getItem();
+            hotbarStack.shrink(count);
+            hotbarSlot.setChanged();
+        } else if (slotIndex >= 0 && slotIndex < this.slots.size()) {
+            Slot slot = this.slots.get(slotIndex);
+            ItemStack source = slot.getItem();
+            source.shrink(count);
+            if (source.isEmpty()) {
+                slot.setByPlayer(ItemStack.EMPTY);
             } else {
-                int count = buttonNum == 1 ? 1 : carried.getCount();
-                ItemStack toPut = carried.copyWithCount(count);
-                if (putRemoteStack(slotIndex, toPut, count, player)) {
-                    carried.shrink(count);
-                    setCarried(carried.isEmpty() ? ItemStack.EMPTY : carried);
-                }
+                slot.setChanged();
             }
         }
         refreshFromCache();
     }
 
-    private void handleTakeClick(int slotIndex, int buttonNum, Player player) {
-        ItemStack remoteStack = this.slots.get(slotIndex).getItem();
-        if (remoteStack.isEmpty()) return;
-        ItemStack carried = getCarried();
-        if (!carried.isEmpty() && !ItemStack.isSameItemSameComponents(carried, remoteStack)) {
-            player.sendSystemMessage(Component.literal("请先清空鼠标上的物品"));
-            return;
-        }
-        int space = carried.isEmpty() ? remoteStack.getMaxStackSize()
-                : carried.getMaxStackSize() - carried.getCount();
-        if (space <= 0) return;
-        int requestCount = buttonNum == 1 && carried.isEmpty()
-                ? (remoteStack.getCount() + 1) / 2
-                : remoteStack.getCount();
-        requestCount = Math.min(requestCount, space);
-        NeutralItem taken = takeRemoteSlot(slotIndex, requestCount, player);
-        if (taken == null) return;
-        Object itemObj = TheExchangeCore.getInstance().getApi().getItemSerializer().deserialize(taken);
-        if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) return;
-        if (carried.isEmpty()) {
-            setCarried(giveStack);
-        } else {
-            carried.grow(giveStack.getCount());
-            setCarried(carried);
-        }
-    }
-
-    private void handleRemoteSwap(int slotIndex, int buttonNum, Player player) {
-        if (slotIndex < 0 || slotIndex >= 54 || buttonNum < 0 || buttonNum > 8) return;
-        Slot hotbarSlot = this.slots.get(81 + buttonNum);
-        if (hotbarSlot.hasItem()) {
-            ItemStack hotbarStack = hotbarSlot.getItem();
-            int targetSlot = findTargetSlot(hotbarStack);
-            if (targetSlot >= 0) {
-                ItemStack toPut = hotbarStack.copy();
-                if (putRemoteStack(targetSlot, toPut, toPut.getCount(), player)) {
-                    hotbarStack.shrink(toPut.getCount());
-                    hotbarSlot.setChanged();
-                }
-            }
-            refreshFromCache();
-            return;
-        }
-        ItemStack remoteStack = this.slots.get(slotIndex).getItem();
-        if (!remoteStack.isEmpty() && takeRemoteSlotToPlayerSlot(slotIndex, remoteStack.getCount(), hotbarSlot, player)) {
-            refreshFromCache();
-        }
-    }
-
-    private NeutralItem takeRemoteSlot(int slotIndex, int count, Player player) {
-        NeutralItem expected = cachedItem(slotIndex);
-        if (expected == null || expected.isEmpty()) {
-            player.sendSystemMessage(Component.literal("物品已变化，请重试"));
-            return null;
-        }
-        ExchangeService.TakeResult result = TheExchangeCore.getInstance().getExchangeService()
-                .takeItem(serverName, slotIndex, expected.getItemId(), expected.getVersion(), count,
-                        player.getUUID().toString(), player.getName().getString());
+    private void applyRemoteTake(ExchangeInteractionResult decision, int slotIndex, int buttonNum,
+                                 ContainerInput containerInput, Player player) {
+        ExchangeMutationResult result = TheExchangeCore.getInstance().getMenuInteractionService()
+                .takeRemote(serverName, decision.getTargetSlot(), decision.getCount(), playerContext(player));
         if (!result.isSuccess()) {
             player.sendSystemMessage(Component.literal(
                     result.getFailReason() != null ? result.getFailReason() : "取出失败"));
             refreshFromCache();
-            return null;
+            return;
         }
-        return result.getItemsToGive();
-    }
-
-    private boolean takeRemoteSlotToPlayer(int slotIndex, int count, Player player) {
-        NeutralItem taken = takeRemoteSlot(slotIndex, count, player);
-        if (taken == null) return false;
-        Object itemObj = TheExchangeCore.getInstance().getApi().getItemSerializer().deserialize(taken);
-        if (itemObj instanceof ItemStack giveStack && !giveStack.isEmpty()) {
-            if (!player.getInventory().add(giveStack)) {
-                player.drop(giveStack, false);
-            }
-            return true;
-        }
-        return false;
-    }
-
-    private boolean takeRemoteSlotToPlayerSlot(int slotIndex, int count, Slot targetSlot, Player player) {
-        NeutralItem taken = takeRemoteSlot(slotIndex, count, player);
-        if (taken == null) return false;
-        Object itemObj = TheExchangeCore.getInstance().getApi().getItemSerializer().deserialize(taken);
-        if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) return false;
-        if (!targetSlot.mayPlace(giveStack) || targetSlot.hasItem()) {
-            if (!player.getInventory().add(giveStack)) {
-                player.drop(giveStack, false);
-            }
-        } else {
-            targetSlot.set(giveStack);
-        }
-        return true;
-    }
-
-    private boolean putRemoteStack(int targetSlot, ItemStack sourceStack, int count, Player player) {
-        if (count <= 0 || sourceStack.isEmpty()) return false;
-        ItemStack toPut = sourceStack.copyWithCount(count);
-        ExchangeService.PutResult result = TheExchangeCore.getInstance().getExchangeService()
-                .putItem(serverName, targetSlot,
-                        player.getUUID().toString(), player.getName().getString(), toPut);
-        if (!result.isSuccess()) {
-            player.sendSystemMessage(Component.literal(
-                    result.getFailReason() != null ? result.getFailReason() : "放入失败"));
+        Object itemObj = TheExchangeCore.getInstance().getApi().getItemSerializer()
+                .deserialize(result.getItem());
+        if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) {
             refreshFromCache();
-            return false;
+            return;
         }
-        return true;
-    }
 
-    private NeutralItem cachedItem(int slot) {
-        var cache = TheExchangeCore.getInstance().getCacheManager().getCache(serverName);
-        return cache != null ? cache.getItem(slot) : null;
-    }
-
-    private boolean touchesExchangeSpace(int slotIndex, int buttonNum, ContainerInput input) {
-        if (slotIndex >= 0 && slotIndex < 54) return true;
-        if (input == ContainerInput.QUICK_MOVE && slotIndex >= 54) return true;
-        if (input == ContainerInput.SWAP && slotIndex >= 0 && slotIndex < 54 && buttonNum >= 0 && buttonNum < 9) return true;
-        return input == ContainerInput.QUICK_CRAFT || input == ContainerInput.PICKUP_ALL;
-    }
-
-    private int findTargetSlot(ItemStack stack) {
-        for (int i = 0; i < 54; i++) {
-            Slot es = this.slots.get(i);
-            if (es.hasItem()
-                    && es.getItem().getItem() == stack.getItem()
-                    && es.getItem().getCount() + stack.getCount() <= es.getMaxStackSize()) {
-                return i;
+        if (containerInput == ContainerInput.PICKUP) {
+            ItemStack carried = getCarried();
+            if (carried.isEmpty()) {
+                setCarried(giveStack);
+            } else if (ItemStack.isSameItemSameComponents(carried, giveStack)) {
+                carried.grow(giveStack.getCount());
+                setCarried(carried);
+            } else if (!player.getInventory().add(giveStack)) {
+                player.drop(giveStack, false);
             }
+        } else if (containerInput == ContainerInput.SWAP && buttonNum >= 0 && buttonNum <= 8) {
+            Slot hotbarSlot = this.slots.get(81 + buttonNum);
+            if (!hotbarSlot.hasItem() && hotbarSlot.mayPlace(giveStack)) {
+                hotbarSlot.set(giveStack);
+            } else if (!player.getInventory().add(giveStack)) {
+                player.drop(giveStack, false);
+            }
+        } else if (!player.getInventory().add(giveStack)) {
+            player.drop(giveStack, false);
         }
-        for (int i = 0; i < 54; i++) {
-            if (!this.slots.get(i).hasItem()) return i;
+        refreshFromCache();
+    }
+
+    private void handleLocalClick(int slotIndex, int buttonNum, ContainerInput containerInput, Player player) {
+        java.util.List<NeutralItem> before = snapshotNeutralItems();
+        super.clicked(slotIndex, buttonNum, containerInput, player);
+        TheExchangeCore.getInstance().getMenuInteractionService().applyLocalSnapshot(
+                before,
+                snapshotNeutralItems(),
+                playerContext(player));
+    }
+
+    @Override
+    public ItemStack quickMoveStack(Player player, int slotIndex) {
+        if (slotIndex < 0 || slotIndex >= this.slots.size()) return ItemStack.EMPTY;
+        if (local) {
+            Slot slot = this.slots.get(slotIndex);
+            if (!slot.hasItem()) return ItemStack.EMPTY;
+            ItemStack sourceStack = slot.getItem();
+            ItemStack copy = sourceStack.copy();
+            boolean moved = slotIndex < 54
+                    ? moveItemStackTo(sourceStack, 54, 90, true)
+                    : moveItemStackTo(sourceStack, 0, 54, false);
+            if (!moved) return ItemStack.EMPTY;
+            if (sourceStack.isEmpty()) {
+                slot.setByPlayer(ItemStack.EMPTY);
+            } else {
+                slot.setChanged();
+            }
+            return copy;
         }
-        return -1;
+        ItemStack before = this.slots.get(slotIndex).getItem().copy();
+        clicked(slotIndex, 0, ContainerInput.QUICK_MOVE, player);
+        return before;
+    }
+
+    private PlayerExchangeContext playerContext(Player player) {
+        return new PlayerExchangeContext(player.getUUID().toString(), player.getName().getString());
     }
 
     @Override
