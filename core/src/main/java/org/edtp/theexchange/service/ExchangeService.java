@@ -49,10 +49,17 @@ public class ExchangeService {
 
         NeutralItem item = itemSerializer.serialize(itemStack);
         if (item == null || item.isEmpty()) return PutResult.fail("物品为空");
+        int expectedVersion = 0;
+        var cache = cacheManager.getCache(serverName);
+        if (cache != null) {
+            NeutralItem cached = cache.getItem(slot);
+            expectedVersion = cached != null && !cached.isEmpty() ? cached.getVersion() : 0;
+        }
 
         String requestId = UUID.randomUUID().toString();
 
-        PutItemRequest request = new PutItemRequest(slot, item, requestId, playerUuid, playerName);
+        PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
+                requestId, playerUuid, playerName);
         PutItemResponse response = conn.sendAndWait(
                 FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS);
 
@@ -67,7 +74,6 @@ public class ExchangeService {
                     serverName, item.getItemId(), item.getCount(), true, null);
             cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
                     response.getNewTimestamp());
-            notifyRemoteUpdate(serverName, List.of(slot), response.getNewTimestamp(), conn);
             refreshOpenViews(serverName);
             return PutResult.success(response.getCurrentItem());
         } else {
@@ -102,7 +108,6 @@ public class ExchangeService {
                     serverName, expectedItemId, requestCount, true, null);
             cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
                     response.getNewTimestamp());
-            notifyRemoteUpdate(serverName, List.of(slot), response.getNewTimestamp(), conn);
             refreshOpenViews(serverName);
             return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
         } else {
@@ -126,18 +131,30 @@ public class ExchangeService {
             NeutralItem item = request.getItem();
             compatibilityChecker.checkAndMark(item);
 
-            int newVersion = localItemStore.putItem(request.getSlot(), item, request.getPlayerUuid());
+            LocalItemStore.PutResult result = localItemStore.putItem(
+                    request.getSlot(), item, request.getExpectedVersion(), request.getPlayerUuid());
+
+            if (result.isSuccess()) {
+                operationLogger.log(request.getRequestId(), OperationType.PUT,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", item.getItemId(), item.getCount(), true, null);
+
+                long timestamp = localItemStore.getLastModifiedTimestamp();
+                LocalItemStore.ItemRecord updated = localItemStore.getItem(request.getSlot());
+
+                return new PutItemResponse(true, request.getSlot(),
+                        updated != null ? updated.item() : result.getItem(),
+                        null, timestamp, result.getNewVersion());
+            }
 
             operationLogger.log(request.getRequestId(), OperationType.PUT,
                     request.getPlayerUuid(), request.getPlayerName(),
-                    "local", item.getItemId(), item.getCount(), true, null);
-
-            long timestamp = localItemStore.getLastModifiedTimestamp();
-            LocalItemStore.ItemRecord updated = localItemStore.getItem(request.getSlot());
-
-            return new PutItemResponse(true, request.getSlot(),
-                    updated != null ? updated.item() : null,
-                    null, timestamp, newVersion);
+                    "local", item.getItemId(), item.getCount(), false, result.getFailReason());
+            LocalItemStore.ItemRecord current = localItemStore.getItem(request.getSlot());
+            return new PutItemResponse(false, request.getSlot(),
+                    current != null ? current.item() : null,
+                    result.getFailReason(), localItemStore.getLastModifiedTimestamp(),
+                    current != null ? current.version() : 0);
         } catch (Exception e) {
             operationLogger.log(request.getRequestId(), OperationType.PUT,
                     request.getPlayerUuid(), request.getPlayerName(),
@@ -218,10 +235,18 @@ public class ExchangeService {
             case PUT_ITEM -> {
                 PutItemResponse resp = handleRemotePut((PutItemRequest) message);
                 conn.send(FrameType.PUT_ITEM_RESPONSE, resp);
+                if (resp.isSuccess()) {
+                    broadcastInventoryUpdate(conn, List.of(((PutItemRequest) message).getSlot()),
+                            resp.getNewTimestamp());
+                }
             }
             case TAKE_ITEM -> {
                 TakeItemResponse resp = handleRemoteTake((TakeItemRequest) message);
                 conn.send(FrameType.TAKE_ITEM_RESPONSE, resp);
+                if (resp.isSuccess()) {
+                    broadcastInventoryUpdate(conn, List.of(((TakeItemRequest) message).getSlot()),
+                            resp.getNewTimestamp());
+                }
             }
             case PUSH_UPDATE -> {
                 PushUpdate update = (PushUpdate) message;
@@ -251,6 +276,21 @@ public class ExchangeService {
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core != null && core.getApi() != null) {
             core.getApi().refreshRemoteInventoryView(serverName);
+        }
+    }
+
+    private void broadcastInventoryUpdate(Connection sourceConn, List<Integer> changedSlots, long timestamp) {
+        if (networkManager == null || changedSlots == null || changedSlots.isEmpty()) return;
+        PushUpdate update = new PushUpdate(changedSlots, timestamp);
+        networkManager.broadcast(FrameType.PUSH_UPDATE, update, sourceConn);
+    }
+
+    public void publishLocalInventoryUpdate(List<Integer> changedSlots) {
+        long timestamp = localItemStore.getLastModifiedTimestamp();
+        broadcastInventoryUpdate(null, changedSlots, timestamp);
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core != null && core.getApi() != null) {
+            core.getApi().refreshRemoteInventoryView(core.getApi().getServerName());
         }
     }
 

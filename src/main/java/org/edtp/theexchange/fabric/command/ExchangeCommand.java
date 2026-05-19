@@ -237,6 +237,17 @@ public class ExchangeCommand {
                     title);
             player.openMenu(provider);
 
+            if (capturedOnline && !capturedLocal) {
+                core.getApi().runAsync(() -> {
+                    try {
+                        core.getSyncEngine().syncIfNeeded(serverName);
+                        core.getApi().refreshRemoteInventoryView(serverName);
+                    } catch (Exception e) {
+                        LOGGER.warn("[Exchange] Async refresh failed for {}", serverName, e);
+                    }
+                });
+            }
+
             if (!online) {
                 player.sendSystemMessage(Component.literal("[离线] 仅可查看缓存数据 — 目标服务器离线"));
             }

@@ -12,10 +12,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 
 /**
@@ -38,8 +38,9 @@ public class Connection {
     private BiConsumer<FrameType, Object> messageHandler;
     private volatile BiConsumer<Connection, Boolean> disconnectHandler;
 
-    // Pending request-response futures, keyed by response type
-    private final ConcurrentHashMap<FrameType, CompletableFuture<Object>> pendingFutures = new ConcurrentHashMap<>();
+    private final ReentrantLock requestLock = new ReentrantLock();
+    private volatile FrameType pendingResponseType;
+    private volatile CompletableFuture<Object> pendingFuture;
 
     public Connection(String remoteName, SSLSocket socket) throws IOException {
         this.remoteName = remoteName;
@@ -114,7 +115,9 @@ public class Connection {
     public <T> T sendAndWait(FrameType requestType, Object request,
                               FrameType responseType, long timeoutMs) {
         CompletableFuture<Object> future = new CompletableFuture<>();
-        pendingFutures.put(responseType, future);
+        requestLock.lock();
+        pendingResponseType = responseType;
+        pendingFuture = future;
 
         Frame frame = new Frame(requestType, sendSequence.incrementAndGet(),
                 System.currentTimeMillis(), MessageCodec.encodeMessage(request));
@@ -124,7 +127,8 @@ public class Connection {
                 out.write(data);
                 out.flush();
             } catch (IOException e) {
-                pendingFutures.remove(responseType);
+                clearPending(future);
+                requestLock.unlock();
                 handleDisconnect();
                 return null;
             }
@@ -133,11 +137,14 @@ public class Connection {
         try {
             return (T) future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            pendingFutures.remove(responseType);
+            clearPending(future);
             return null;
         } catch (Exception e) {
-            pendingFutures.remove(responseType);
+            clearPending(future);
             return null;
+        } finally {
+            clearPending(future);
+            requestLock.unlock();
         }
     }
 
@@ -145,9 +152,17 @@ public class Connection {
      * Feed a received response to any pending sendAndWait future.
      */
     public void onResponse(FrameType type, Object message) {
-        CompletableFuture<Object> future = pendingFutures.remove(type);
-        if (future != null) {
+        CompletableFuture<Object> future = pendingFuture;
+        if (future != null && pendingResponseType == type) {
+            clearPending(future);
             future.complete(message);
+        }
+    }
+
+    private void clearPending(CompletableFuture<Object> future) {
+        if (pendingFuture == future) {
+            pendingFuture = null;
+            pendingResponseType = null;
         }
     }
 

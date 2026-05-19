@@ -26,6 +26,14 @@ public class RemoteCacheStore {
                     byte[] blob = rs.getBytes("items_blob");
                     @SuppressWarnings("unchecked")
                     List<NeutralItem> items = MessagePackBlobCodec.decodeList(blob, NeutralItem.class);
+                    if (items != null) {
+                        for (int i = 0; i < items.size(); i++) {
+                            NeutralItem item = items.get(i);
+                            if (item != null && item.getVersion() <= 0) {
+                                item.setVersion(1);
+                            }
+                        }
+                    }
                     return new CachedInventory(items, items.size(),
                             rs.getLong("synced_at"), rs.getLong("remote_timestamp"));
                 }

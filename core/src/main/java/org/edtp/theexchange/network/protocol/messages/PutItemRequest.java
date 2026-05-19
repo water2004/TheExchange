@@ -5,6 +5,7 @@ import org.edtp.theexchange.model.NeutralItem;
 public class PutItemRequest {
     private int slot;
     private NeutralItem item;
+    private int expectedVersion;
     private String requestId;
     private String playerUuid;
     private String playerName;
@@ -12,8 +13,14 @@ public class PutItemRequest {
     public PutItemRequest() {}
 
     public PutItemRequest(int slot, NeutralItem item, String requestId, String playerUuid, String playerName) {
+        this(slot, item, 0, requestId, playerUuid, playerName);
+    }
+
+    public PutItemRequest(int slot, NeutralItem item, int expectedVersion,
+                          String requestId, String playerUuid, String playerName) {
         this.slot = slot;
         this.item = item;
+        this.expectedVersion = expectedVersion;
         this.requestId = requestId;
         this.playerUuid = playerUuid;
         this.playerName = playerName;
@@ -24,6 +31,9 @@ public class PutItemRequest {
 
     public NeutralItem getItem() { return item; }
     public void setItem(NeutralItem item) { this.item = item; }
+
+    public int getExpectedVersion() { return expectedVersion; }
+    public void setExpectedVersion(int expectedVersion) { this.expectedVersion = expectedVersion; }
 
     public String getRequestId() { return requestId; }
     public void setRequestId(String requestId) { this.requestId = requestId; }

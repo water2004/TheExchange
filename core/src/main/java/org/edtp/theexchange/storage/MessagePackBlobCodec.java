@@ -107,6 +107,7 @@ public final class MessagePackBlobCodec {
                 }
                 case "ic" -> item.setIncompatible(unpacker.unpackBoolean());
                 case "sv" -> item.setSourceVersion(unpacker.unpackString());
+                case "v" -> item.setVersion(unpacker.unpackInt());
                 default -> unpacker.skipValue();
             }
         }
@@ -115,7 +116,7 @@ public final class MessagePackBlobCodec {
 
     private static void encodeNeutralItem(MessagePacker packer, org.edtp.theexchange.model.NeutralItem item) throws IOException {
         // Compact field names to minimize wire/db size
-        packer.packMapHeader(6);
+        packer.packMapHeader(7);
         packer.packString("id"); packer.packString(item.getItemId() != null ? item.getItemId() : "");
         packer.packString("ct"); packer.packInt(item.getCount());
         packer.packString("dn"); packer.packString(item.getDisplayName() != null ? item.getDisplayName() : "");
@@ -130,5 +131,6 @@ public final class MessagePackBlobCodec {
         }
         packer.packString("ic"); packer.packBoolean(item.isIncompatible());
         packer.packString("sv"); packer.packString(item.getSourceVersion() != null ? item.getSourceVersion() : "");
+        packer.packString("v"); packer.packInt(item.getVersion());
     }
 }

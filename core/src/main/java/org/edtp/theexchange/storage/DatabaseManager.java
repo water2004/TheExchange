@@ -37,7 +37,10 @@ public class DatabaseManager {
                     "item_data   BLOB    NOT NULL," +
                     "added_by    TEXT," +
                     "added_at    INTEGER NOT NULL," +
+                    "updated_at  INTEGER NOT NULL DEFAULT 0," +
                     "version     INTEGER NOT NULL DEFAULT 1)");
+            addColumnIfMissing("exchange_items", "updated_at", "INTEGER NOT NULL DEFAULT 0");
+            stmt.execute("UPDATE exchange_items SET updated_at = added_at WHERE updated_at = 0");
 
             // Remote server config
             stmt.execute("CREATE TABLE IF NOT EXISTS remote_servers (" +
@@ -77,12 +80,32 @@ public class DatabaseManager {
             stmt.execute("CREATE TABLE IF NOT EXISTS exchange_config (" +
                     "key   TEXT PRIMARY KEY," +
                     "value TEXT NOT NULL)");
+
+            stmt.execute("CREATE TABLE IF NOT EXISTS exchange_metadata (" +
+                    "key   TEXT PRIMARY KEY," +
+                    "value TEXT NOT NULL)");
+            stmt.execute("INSERT OR IGNORE INTO exchange_metadata (key, value) " +
+                    "SELECT 'last_modified', COALESCE(MAX(updated_at), 0) FROM exchange_items");
         }
 
         // Run migrations
         int currentVersion = getSchemaVersion();
         if (currentVersion < 1) {
             setSchemaVersion(1);
+        }
+    }
+
+    private void addColumnIfMissing(String table, String column, String definition) throws SQLException {
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("name"))) {
+                    return;
+                }
+            }
+        }
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
         }
     }
 

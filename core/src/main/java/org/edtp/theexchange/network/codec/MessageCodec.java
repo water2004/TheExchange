@@ -128,9 +128,10 @@ public final class MessageCodec {
     }
 
     private static void encodePutItemRequest(MessagePacker p, PutItemRequest m) throws IOException {
-        p.packMapHeader(5);
+        p.packMapHeader(6);
         p.packString("s"); p.packInt(m.getSlot());
         p.packString("item"); encodeNeutralItem(p, m.getItem());
+        p.packString("ev"); p.packInt(m.getExpectedVersion());
         p.packString("rid"); p.packString(m.getRequestId());
         p.packString("uid"); p.packString(m.getPlayerUuid());
         p.packString("pn"); p.packString(m.getPlayerName());
@@ -187,7 +188,7 @@ public final class MessageCodec {
 
     private static void encodeNeutralItem(MessagePacker p, NeutralItem item) throws IOException {
         if (item == null) { p.packNil(); return; }
-        p.packMapHeader(6);
+        p.packMapHeader(7);
         p.packString("id"); p.packString(orEmpty(item.getItemId()));
         p.packString("ct"); p.packInt(item.getCount());
         p.packString("dn"); p.packString(orEmpty(item.getDisplayName()));
@@ -198,6 +199,7 @@ public final class MessageCodec {
         }
         p.packString("ic"); p.packBoolean(item.isIncompatible());
         p.packString("sv"); p.packString(orEmpty(item.getSourceVersion()));
+        p.packString("v"); p.packInt(item.getVersion());
     }
 
     private static void encodeNeutralItemOrNull(MessagePacker p, NeutralItem item) throws IOException {
@@ -314,6 +316,7 @@ public final class MessageCodec {
             switch (u.unpackString()) {
                 case "s" -> m.setSlot(u.unpackInt());
                 case "item" -> m.setItem(decodeNeutralItem(u));
+                case "ev" -> m.setExpectedVersion(u.unpackInt());
                 case "rid" -> m.setRequestId(u.unpackString());
                 case "uid" -> m.setPlayerUuid(u.unpackString());
                 case "pn" -> m.setPlayerName(u.unpackString());
@@ -425,6 +428,7 @@ public final class MessageCodec {
                 }
                 case "ic" -> item.setIncompatible(u.unpackBoolean());
                 case "sv" -> item.setSourceVersion(u.unpackString());
+                case "v" -> item.setVersion(u.unpackInt());
                 default -> u.skipValue();
             }
         }

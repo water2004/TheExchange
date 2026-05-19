@@ -24,6 +24,7 @@ public class NetworkManager {
     private final ConcurrentHashMap<String, ServerStatus> serverStatus = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<BiConsumer<String, ServerStatus>> statusListeners = new CopyOnWriteArrayList<>();
 
+    private String localServerName;
     private String localPassword;
     private MessageHandler messageRouter;
 
@@ -42,6 +43,11 @@ public class NetworkManager {
     public void setLocalPassword(String password) {
         this.localPassword = password;
         System.out.println(TAG + "Local password set (len=" + (password != null ? password.length() : 0) + ")");
+    }
+
+    public void setLocalServerName(String localServerName) {
+        this.localServerName = localServerName;
+        System.out.println(TAG + "Local server name set to " + localServerName);
     }
 
     public void setMessageRouter(MessageHandler router) {
@@ -90,7 +96,9 @@ public class NetworkManager {
             conn.setPeerServerName(request.getServerName());
 
             conn.send(FrameType.AUTH_RESPONSE,
-                    new AuthResponse(true, "OK", "local", "26.1.2",
+                    new AuthResponse(true, "OK",
+                            localServerName != null ? localServerName : "local",
+                            "26.1.2",
                             System.currentTimeMillis()));
 
             notifyStatusChange(request.getServerName(), ServerStatus.ONLINE);
@@ -114,7 +122,8 @@ public class NetworkManager {
         }
 
         System.out.println(TAG + "TLS connected to " + server.getName() + ", sending AUTH...");
-        AuthRequest auth = new AuthRequest("local", server.getPasswordHash(), "1", "26.1.2");
+        String authServerName = localServerName != null ? localServerName : "local";
+        AuthRequest auth = new AuthRequest(authServerName, server.getPasswordHash(), "1", "26.1.2");
         conn.send(FrameType.AUTH_REQUEST, auth);
 
         conn.start((type, msg) -> {

@@ -71,6 +71,14 @@ public class SyncEngine {
         if (resp == null) return SyncResult.timeout();
 
         List<NeutralItem> items = resp.getItems();
+        if (items != null) {
+            for (int i = 0; i < items.size(); i++) {
+                NeutralItem item = items.get(i);
+                if (item != null && item.getVersion() <= 0) {
+                    item.setVersion(i + 1);
+                }
+            }
+        }
         cacheManager.updateCache(serverName, items, resp.getTimestamp());
 
         return SyncResult.fromRemote(items, resp.getTimestamp(), resp.getServerVersion());

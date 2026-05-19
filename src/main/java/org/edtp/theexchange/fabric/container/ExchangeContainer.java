@@ -9,7 +9,6 @@ import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.service.ExchangeService;
 
 import java.util.List;
-import java.util.UUID;
 
 /**
  * Virtual container backing the exchange GUI.
@@ -27,6 +26,7 @@ public class ExchangeContainer extends SimpleContainer {
     private final boolean local;
     private final boolean online;
     private boolean loading; // true during initial load, suppresses persistence
+    private boolean suppressPersistence;
 
     public ExchangeContainer(String serverName, boolean local, boolean online, int rows) {
         super(rows * 9);
@@ -38,6 +38,10 @@ public class ExchangeContainer extends SimpleContainer {
     public String getServerName() { return serverName; }
     public boolean isLocal() { return local; }
     public boolean isOnline() { return online; }
+
+    public void setSuppressPersistence(boolean suppressPersistence) {
+        this.suppressPersistence = suppressPersistence;
+    }
 
     @Override
     public boolean stillValid(Player player) {
@@ -90,7 +94,7 @@ public class ExchangeContainer extends SimpleContainer {
     @Override
     public void setItem(int slot, ItemStack stack) {
         super.setItem(slot, stack);
-        if (loading) return;
+        if (loading || suppressPersistence) return;
 
         if (local) {
             persistSlotToLocal(slot, stack);
@@ -100,7 +104,7 @@ public class ExchangeContainer extends SimpleContainer {
     @Override
     public ItemStack removeItem(int slot, int count) {
         ItemStack removed = super.removeItem(slot, count);
-        if (loading) return removed;
+        if (loading || suppressPersistence) return removed;
 
         if (local) {
             ItemStack remaining = super.getItem(slot);
@@ -112,7 +116,7 @@ public class ExchangeContainer extends SimpleContainer {
     @Override
     public ItemStack removeItemNoUpdate(int slot) {
         ItemStack removed = super.removeItemNoUpdate(slot);
-        if (loading) return removed;
+        if (loading || suppressPersistence) return removed;
 
         if (local) {
             persistSlotToLocal(slot, ItemStack.EMPTY);
@@ -134,24 +138,11 @@ public class ExchangeContainer extends SimpleContainer {
         var core = TheExchangeCore.getInstance();
         var serializer = core.getApi().getItemSerializer();
         ExchangeService service = core.getExchangeService();
+        NeutralItem neutral = stack.isEmpty() ? null : serializer.serialize(stack);
+        boolean changed = core.getLocalItemStore().replaceSlotFromLocal(slot, neutral, "");
 
-        if (stack.isEmpty()) {
-            // Slot cleared — delete from store by setting version to 0
-            // We handle this via takeItem with the full count
-            var record = core.getLocalItemStore().getItem(slot);
-            if (record != null && record.item() != null && !record.item().isEmpty()) {
-                var request = new org.edtp.theexchange.network.protocol.messages.TakeItemRequest(
-                        slot, record.item().getItemId(), record.version(),
-                        record.item().getCount(),
-                        UUID.randomUUID().toString(), "", "");
-                service.handleRemoteTake(request);
-            }
-        } else {
-            NeutralItem neutral = serializer.serialize(stack);
-            if (neutral == null) return;
-            var request = new org.edtp.theexchange.network.protocol.messages.PutItemRequest(
-                    slot, neutral, UUID.randomUUID().toString(), "", "");
-            service.handleRemotePut(request);
+        if (changed) {
+            service.publishLocalInventoryUpdate(List.of(slot));
         }
     }
 

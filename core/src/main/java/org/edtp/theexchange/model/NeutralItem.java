@@ -15,6 +15,7 @@ public class NeutralItem {
     private byte[] extraData;
     private boolean incompatible;
     private String sourceVersion;
+    private int version = 1;
 
     public NeutralItem() {}
 
@@ -45,6 +46,9 @@ public class NeutralItem {
 
     public String getSourceVersion() { return sourceVersion; }
     public void setSourceVersion(String sourceVersion) { this.sourceVersion = sourceVersion; }
+
+    public int getVersion() { return version; }
+    public void setVersion(int version) { this.version = version; }
 
     public boolean isEmpty() {
         return itemId == null || count <= 0;

@@ -79,6 +79,7 @@ public class TheExchangeCore {
         // 4. Network
         try {
             networkManager = new NetworkManager(localPort, keystorePath, cn, keystorePass);
+            networkManager.setLocalServerName(api.getServerName());
             networkManager.setLocalPassword(localPassword);
             networkManager.start();
             api.getLogger().info("Network started on port " + localPort);
