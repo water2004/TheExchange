@@ -21,6 +21,9 @@ public class MenuInteractionService {
     }
 
     public ExchangeInteractionResult decide(ExchangeInteraction input) {
+        if (touchesIncompatibleItem(input)) {
+            return ExchangeInteractionResult.reject("不兼容物品禁止操作");
+        }
         if (input.isLocal()) {
             return ExchangeInteractionResult.localApply();
         }
@@ -44,10 +47,12 @@ public class MenuInteractionService {
         if (isExchangeSlot(input.getSlotIndex())) {
             NeutralItem item = input.getSlotItem();
             if (isEmpty(item)) return ExchangeInteractionResult.refresh(null);
+            if (item.isIncompatible()) return ExchangeInteractionResult.reject("不兼容物品禁止操作");
             return ExchangeInteractionResult.takeRemote(input.getSlotIndex(), item.getCount());
         }
         NeutralItem item = input.getSlotItem();
         if (isEmpty(item)) return ExchangeInteractionResult.refresh(null);
+        if (item.isIncompatible()) return ExchangeInteractionResult.reject("不兼容物品禁止操作");
         int targetSlot = findTargetSlot(input);
         if (targetSlot < 0) {
             return ExchangeInteractionResult.reject("共享空间已满");
@@ -65,8 +70,12 @@ public class MenuInteractionService {
         if (isEmpty(input.getCarriedItem())) {
             NeutralItem remote = input.getSlotItem();
             if (isEmpty(remote)) return ExchangeInteractionResult.refresh(null);
+            if (remote.isIncompatible()) return ExchangeInteractionResult.reject("不兼容物品禁止操作");
             int count = input.getButton() == 1 ? (remote.getCount() + 1) / 2 : remote.getCount();
             return ExchangeInteractionResult.takeRemote(input.getSlotIndex(), count);
+        }
+        if (input.getCarriedItem().isIncompatible()) {
+            return ExchangeInteractionResult.reject("不兼容物品禁止操作");
         }
         int count = input.getButton() == 1 ? 1 : input.getCarriedItem().getCount();
         return ExchangeInteractionResult.putRemote(input.getSlotIndex(), input.getCarriedItem(), count);
@@ -76,14 +85,20 @@ public class MenuInteractionService {
         if (!isExchangeSlot(input.getSlotIndex()) || input.getButton() < 0 || input.getButton() > 8) {
             return ExchangeInteractionResult.refresh(null);
         }
+        NeutralItem remote = input.getSlotItem();
+        if (!isEmpty(remote) && remote.isIncompatible()) {
+            return ExchangeInteractionResult.reject("不兼容物品禁止操作");
+        }
         if (!isEmpty(input.getHotbarItem())) {
+            if (input.getHotbarItem().isIncompatible()) {
+                return ExchangeInteractionResult.reject("不兼容物品禁止操作");
+            }
             int targetSlot = findTargetSlot(input);
             if (targetSlot < 0) {
                 return ExchangeInteractionResult.reject("共享空间已满");
             }
             return ExchangeInteractionResult.putRemote(targetSlot, input.getHotbarItem(), input.getHotbarItem().getCount());
         }
-        NeutralItem remote = input.getSlotItem();
         if (isEmpty(remote)) return ExchangeInteractionResult.refresh(null);
         return ExchangeInteractionResult.takeRemote(input.getSlotIndex(), remote.getCount());
     }
@@ -112,10 +127,16 @@ public class MenuInteractionService {
     private boolean sameStackKind(NeutralItem a, NeutralItem b) {
         if (a == null || b == null) return false;
         return Objects.equals(a.getItemId(), b.getItemId())
-                && Objects.equals(a.getDisplayName(), b.getDisplayName())
-                && Arrays.equals(a.getExtraData(), b.getExtraData())
-                && a.isIncompatible() == b.isIncompatible()
-                && Objects.equals(a.getSourceVersion(), b.getSourceVersion());
+                && Arrays.equals(a.getExtraData(), b.getExtraData());
+    }
+
+    private boolean touchesIncompatibleItem(ExchangeInteraction input) {
+        NeutralItem slotItem = input.getSlotItem();
+        NeutralItem carriedItem = input.getCarriedItem();
+        NeutralItem hotbarItem = input.getHotbarItem();
+        return (slotItem != null && slotItem.isIncompatible())
+                || (carriedItem != null && carriedItem.isIncompatible())
+                || (hotbarItem != null && hotbarItem.isIncompatible());
     }
 
     private boolean touchesExchangeSpace(ExchangeInteraction input) {

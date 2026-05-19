@@ -72,6 +72,9 @@ public class LocalItemStore {
         if (item == null || item.isEmpty()) {
             return PutResult.fail("EMPTY_ITEM");
         }
+        if (item.isIncompatible()) {
+            return PutResult.fail("INCOMPATIBLE");
+        }
 
         try {
             beginImmediate();
@@ -92,6 +95,10 @@ public class LocalItemStore {
             if (existing.version != expectedVersion) {
                 rollbackQuietly();
                 return PutResult.fail("VERSION_MISMATCH");
+            }
+            if (existing.item.isIncompatible()) {
+                rollbackQuietly();
+                return PutResult.fail("INCOMPATIBLE");
             }
             if (!sameStackKind(existing.item, item)) {
                 rollbackQuietly();
@@ -123,6 +130,9 @@ public class LocalItemStore {
 
     public synchronized boolean replaceSlotFromLocal(InventoryScope scope, int slot, NeutralItem item, String addedBy) {
         if (slot < 0 || slot >= 54) {
+            return false;
+        }
+        if (item != null && item.isIncompatible()) {
             return false;
         }
 
@@ -389,10 +399,7 @@ public class LocalItemStore {
     private boolean sameStackKind(NeutralItem a, NeutralItem b) {
         if (a == null || b == null) return false;
         return Objects.equals(a.getItemId(), b.getItemId())
-                && Objects.equals(a.getDisplayName(), b.getDisplayName())
-                && Arrays.equals(a.getExtraData(), b.getExtraData())
-                && a.isIncompatible() == b.isIncompatible()
-                && Objects.equals(a.getSourceVersion(), b.getSourceVersion());
+                && Arrays.equals(a.getExtraData(), b.getExtraData());
     }
 
     public record ItemRecord(int slot, NeutralItem item, String addedBy, long addedAt,
