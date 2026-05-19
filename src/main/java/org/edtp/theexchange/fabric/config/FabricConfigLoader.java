@@ -86,14 +86,14 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
 
     public List<RemoteServerConfig> getRemoteServers() {
         if (configData == null) loadConfig();
-        return configData.remoteServers;
+        return configData.remoteServers != null ? configData.remoteServers : List.of();
     }
 
     @Override
     public ExchangeAPI.RuntimeConfig getRuntimeConfig() {
         if (configData == null) loadConfig();
         List<ExchangeAPI.RemoteServerConfig> remotes = new ArrayList<>();
-        for (RemoteServerConfig remote : configData.remoteServers) {
+        for (RemoteServerConfig remote : getRemoteServers()) {
             remotes.add(new ExchangeAPI.RemoteServerConfig(
                     remote.name, remote.address, remote.port, remote.password));
         }
@@ -120,7 +120,6 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
         data.server.displayName = "Default Server";
         data.server.port = 25566;
         data.server.password = "changeme";
-        data.remoteServers = new ArrayList<>();
         data.network = new NetworkConfig();
         data.network.heartbeatIntervalSeconds = 10;
         data.network.heartbeatTimeoutSeconds = 30;
