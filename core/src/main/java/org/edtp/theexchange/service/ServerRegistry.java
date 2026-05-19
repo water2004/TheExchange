@@ -44,6 +44,15 @@ public class ServerRegistry {
         }
     }
 
+    public void connectAllEnabled() {
+        if (networkManager == null) return;
+        for (RemoteServer server : getAllServers()) {
+            if (server.isEnabled()) {
+                networkManager.connectToRemote(server);
+            }
+        }
+    }
+
     public RemoteServer addServer(String name, String address, int port, String password) {
         RemoteServer existing = servers.get(name);
         if (existing != null && networkManager != null) {

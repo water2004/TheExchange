@@ -238,6 +238,7 @@ public class ExchangeService {
                 if (resp.isSuccess()) {
                     broadcastInventoryUpdate(conn, List.of(((PutItemRequest) message).getSlot()),
                             resp.getNewTimestamp());
+                    refreshOpenViews(sourceServerName(conn));
                 }
             }
             case TAKE_ITEM -> {
@@ -246,6 +247,7 @@ public class ExchangeService {
                 if (resp.isSuccess()) {
                     broadcastInventoryUpdate(conn, List.of(((TakeItemRequest) message).getSlot()),
                             resp.getNewTimestamp());
+                    refreshOpenViews(sourceServerName(conn));
                 }
             }
             case PUSH_UPDATE -> {
@@ -260,7 +262,8 @@ public class ExchangeService {
                     core.getApi().runAsync(() -> {
                         try {
                             core.getSyncEngine().fullSync(sourceServerName);
-                            core.getApi().refreshRemoteInventoryView(sourceServerName);
+                            core.getApi().runOnMainThread(() ->
+                                    core.getApi().refreshRemoteInventoryView(sourceServerName));
                         } catch (Exception e) {
                             core.getApi().getLogger().warn("Push sync failed for " + sourceServerName
                                     + ": " + e.getMessage());
@@ -279,6 +282,10 @@ public class ExchangeService {
         }
     }
 
+    private String sourceServerName(Connection conn) {
+        return conn.getPeerServerName() != null ? conn.getPeerServerName() : conn.getRemoteName();
+    }
+
     private void broadcastInventoryUpdate(Connection sourceConn, List<Integer> changedSlots, long timestamp) {
         if (networkManager == null || changedSlots == null || changedSlots.isEmpty()) return;
         PushUpdate update = new PushUpdate(changedSlots, timestamp);
@@ -290,17 +297,9 @@ public class ExchangeService {
         broadcastInventoryUpdate(null, changedSlots, timestamp);
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core != null && core.getApi() != null) {
-            core.getApi().refreshRemoteInventoryView(core.getApi().getServerName());
+            String localName = core.getApi().getServerName();
+            core.getApi().runOnMainThread(() -> core.getApi().refreshRemoteInventoryView(localName));
         }
-    }
-
-    private void notifyRemoteUpdate(String serverName, List<Integer> changedSlots,
-                                    long timestamp, Connection sourceConn) {
-        if (networkManager == null) return;
-        if (changedSlots == null || changedSlots.isEmpty()) return;
-
-        PushUpdate update = new PushUpdate(changedSlots, timestamp);
-        networkManager.broadcast(FrameType.PUSH_UPDATE, update, sourceConn);
     }
 
     // ========== Result types ==========

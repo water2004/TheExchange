@@ -1,5 +1,6 @@
 package org.edtp.theexchange.network;
 
+import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.model.RemoteServer;
 import org.edtp.theexchange.model.ServerStatus;
 import org.edtp.theexchange.network.protocol.FrameType;
@@ -112,6 +113,13 @@ public class NetworkManager {
     }
 
     public boolean connectToRemote(RemoteServer server) {
+        Connection existing = connections.get(server.getName());
+        if (existing != null && existing.isRunning()) {
+            return true;
+        }
+        if (existing != null) {
+            connections.remove(server.getName());
+        }
         System.out.println(TAG + "Connecting to " + server.getName()
                 + " at " + server.getAddress() + ":" + server.getPort());
         Connection conn = tcpClient.connect(server.getName(), server.getAddress(), server.getPort());
@@ -142,6 +150,9 @@ public class NetworkManager {
                     conn.setPeerServerName(server.getName());
                     serverStatus.put(server.getName(), ServerStatus.ONLINE);
                     notifyStatusChange(server.getName(), ServerStatus.ONLINE);
+                    if (messageRouter != null) {
+                        // let higher layer decide whether to refresh open views
+                    }
                 } else {
                     serverStatus.put(server.getName(), ServerStatus.OFFLINE);
                     connections.remove(server.getName());
@@ -198,6 +209,12 @@ public class NetworkManager {
         System.out.println(TAG + "Status: " + serverName + " → " + status);
         for (BiConsumer<String, ServerStatus> listener : statusListeners) {
             listener.accept(serverName, status);
+        }
+        if (status == ServerStatus.ONLINE) {
+            TheExchangeCore core = TheExchangeCore.getInstance();
+            if (core != null && core.getApi() != null) {
+                core.getApi().runOnMainThread(() -> core.getApi().refreshRemoteInventoryView(serverName));
+            }
         }
     }
 

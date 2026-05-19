@@ -128,7 +128,6 @@ public class Connection {
                 out.flush();
             } catch (IOException e) {
                 clearPending(future);
-                requestLock.unlock();
                 handleDisconnect();
                 return null;
             }

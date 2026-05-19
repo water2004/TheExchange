@@ -20,6 +20,7 @@ public class HeartbeatManager {
     private final ServerRegistry serverRegistry;
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
     private final ConcurrentHashMap<String, Integer> reconnectDelays = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> reconnectScheduled = new ConcurrentHashMap<>();
     private volatile boolean running;
 
     public HeartbeatManager(NetworkManager networkManager, ServerRegistry serverRegistry) {
@@ -34,6 +35,16 @@ public class HeartbeatManager {
                 HEARTBEAT_INTERVAL_SEC, TimeUnit.SECONDS);
         // Check timeouts every 5 seconds
         scheduler.scheduleAtFixedRate(this::checkTimeouts, 5, 5, TimeUnit.SECONDS);
+        scheduler.execute(this::connectAllMissing);
+    }
+
+    private void connectAllMissing() {
+        for (RemoteServer server : serverRegistry.getAllServers()) {
+            if (!server.isEnabled()) continue;
+            if (networkManager.getConnection(server.getName()) == null) {
+                scheduleReconnect(server);
+            }
+        }
     }
 
     private void sendHeartbeats() {
@@ -42,6 +53,8 @@ public class HeartbeatManager {
             if (conn != null && conn.isRunning()) {
                 Heartbeat hb = new Heartbeat(false, System.currentTimeMillis());
                 conn.send(FrameType.HEARTBEAT, hb);
+            } else if (server.isEnabled()) {
+                scheduleReconnect(server);
             }
         }
     }
@@ -68,15 +81,22 @@ public class HeartbeatManager {
     }
 
     private void scheduleReconnect(RemoteServer server) {
+        if (reconnectScheduled.putIfAbsent(server.getName(), Boolean.TRUE) != null) {
+            return;
+        }
         int delay = reconnectDelays.getOrDefault(server.getName(), INITIAL_RECONNECT_DELAY_SEC);
         scheduler.schedule(() -> {
-            boolean success = networkManager.connectToRemote(server);
-            if (success) {
-                reconnectDelays.remove(server.getName());
-            } else {
-                // Exponential backoff
-                int nextDelay = Math.min(delay * 2, MAX_RECONNECT_DELAY_SEC);
-                reconnectDelays.put(server.getName(), nextDelay);
+            try {
+                boolean success = networkManager.connectToRemote(server);
+                if (success) {
+                    reconnectDelays.remove(server.getName());
+                } else {
+                    // Exponential backoff
+                    int nextDelay = Math.min(delay * 2, MAX_RECONNECT_DELAY_SEC);
+                    reconnectDelays.put(server.getName(), nextDelay);
+                }
+            } finally {
+                reconnectScheduled.remove(server.getName());
             }
         }, delay, TimeUnit.SECONDS);
     }

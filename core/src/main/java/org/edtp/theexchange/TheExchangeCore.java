@@ -122,6 +122,11 @@ public class TheExchangeCore {
             heartbeatManager.start();
             networkManager.setMessageRouter((conn, type, msg) ->
                     exchangeService.routeMessage(conn, type, msg));
+            for (var server : serverRegistry.getAllServers()) {
+                if (server.isEnabled()) {
+                    networkManager.connectToRemote(server);
+                }
+            }
         }
 
         instance = this;
