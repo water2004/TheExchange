@@ -14,6 +14,7 @@ import org.edtp.theexchange.storage.OperationLogger;
 
 import java.util.UUID;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Core business logic for item exchange operations.
@@ -88,6 +89,44 @@ public class ExchangeService {
         }
     }
 
+    public CompletableFuture<PutResult> putNeutralItemAsync(String serverName, int slot,
+                                                            String playerUuid, String playerName,
+                                                            NeutralItem item) {
+        if (networkManager == null) {
+            return CompletableFuture.completedFuture(PutResult.fail("网络功能未启用，请检查端口配置"));
+        }
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null) {
+            return CompletableFuture.completedFuture(PutResult.fail("目标服务器离线"));
+        }
+        if (item == null || item.isEmpty()) {
+            return CompletableFuture.completedFuture(PutResult.fail("物品为空"));
+        }
+
+        int expectedVersion = 0;
+        var cache = cacheManager.getCache(serverName);
+        if (cache != null) {
+            NeutralItem cached = cache.getItem(slot);
+            expectedVersion = cached != null && !cached.isEmpty() ? cached.getVersion() : 0;
+        }
+
+        String requestId = UUID.randomUUID().toString();
+        PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
+                requestId, playerUuid, playerName);
+
+        return conn.<PutItemResponse>sendAsync(
+                        FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
+                .handle((response, error) -> {
+                    TheExchangeCore core = TheExchangeCore.getInstance();
+                    if (core != null) {
+                        return core.submit(() -> finishRemotePut(serverName, slot, playerUuid,
+                                playerName, item, requestId, response, error));
+                    }
+                    return CompletableFuture.completedFuture(PutResult.fail("核心已停止"));
+                })
+                .thenCompose(future -> future);
+    }
+
     public TakeResult takeItem(String serverName, int slot, int requestCount,
                                String playerUuid, String playerName) {
         var cache = cacheManager.getCache(serverName);
@@ -97,6 +136,47 @@ public class ExchangeService {
         }
         return takeItem(serverName, slot, expected.getItemId(), expected.getVersion(),
                 requestCount, playerUuid, playerName);
+    }
+
+    public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot, int requestCount,
+                                                       String playerUuid, String playerName) {
+        var cache = cacheManager.getCache(serverName);
+        NeutralItem expected = cache != null ? cache.getItem(slot) : null;
+        if (expected == null || expected.isEmpty()) {
+            return CompletableFuture.completedFuture(TakeResult.fail("物品已变化，请重试"));
+        }
+        return takeItemAsync(serverName, slot, expected.getItemId(), expected.getVersion(),
+                requestCount, playerUuid, playerName);
+    }
+
+    public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot,
+                                                       String expectedItemId, int expectedVersion,
+                                                       int requestCount,
+                                                       String playerUuid, String playerName) {
+        if (networkManager == null) {
+            return CompletableFuture.completedFuture(TakeResult.fail("网络功能未启用，请检查端口配置"));
+        }
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null) {
+            return CompletableFuture.completedFuture(TakeResult.fail("目标服务器离线"));
+        }
+
+        String requestId = UUID.randomUUID().toString();
+        TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
+                expectedVersion, requestCount, requestId, playerUuid, playerName);
+
+        return conn.<TakeItemResponse>sendAsync(
+                        FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
+                .handle((response, error) -> {
+                    TheExchangeCore core = TheExchangeCore.getInstance();
+                    if (core != null) {
+                        return core.submit(() -> finishRemoteTake(serverName, slot,
+                                expectedItemId, requestCount, playerUuid, playerName,
+                                requestId, response, error));
+                    }
+                    return CompletableFuture.completedFuture(TakeResult.fail("核心已停止"));
+                })
+                .thenCompose(future -> future);
     }
 
     public TakeResult takeItem(String serverName, int slot, String expectedItemId,
@@ -131,6 +211,55 @@ public class ExchangeService {
                     serverName, expectedItemId, requestCount, false, response.getFailReason());
             return TakeResult.fail(response.getFailReason());
         }
+    }
+
+    private PutResult finishRemotePut(String serverName, int slot, String playerUuid,
+                                      String playerName, NeutralItem item, String requestId,
+                                      PutItemResponse response, Throwable error) {
+        if (error != null || response == null) {
+            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+                    serverName, item.getItemId(), item.getCount(), false,
+                    error != null ? error.getMessage() : "TIMEOUT");
+            return PutResult.fail("请求超时，物品已退回");
+        }
+
+        if (response.isSuccess()) {
+            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+                    serverName, item.getItemId(), item.getCount(), true, null);
+            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
+                    response.getNewTimestamp());
+            refreshOpenViews(serverName);
+            return PutResult.success(response.getCurrentItem());
+        }
+
+        operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+                serverName, item.getItemId(), item.getCount(), false, response.getFailReason());
+        return PutResult.fail(response.getFailReason());
+    }
+
+    private TakeResult finishRemoteTake(String serverName, int slot, String expectedItemId,
+                                        int requestCount, String playerUuid, String playerName,
+                                        String requestId, TakeItemResponse response,
+                                        Throwable error) {
+        if (error != null || response == null) {
+            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                    serverName, expectedItemId, requestCount, false,
+                    error != null ? error.getMessage() : "TIMEOUT");
+            return TakeResult.fail("请求超时");
+        }
+
+        if (response.isSuccess()) {
+            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                    serverName, expectedItemId, requestCount, true, null);
+            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
+                    response.getNewTimestamp());
+            refreshOpenViews(serverName);
+            return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
+        }
+
+        operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                serverName, expectedItemId, requestCount, false, response.getFailReason());
+        return TakeResult.fail(response.getFailReason());
     }
 
     public PutItemResponse handleRemotePut(PutItemRequest request) {
@@ -234,6 +363,11 @@ public class ExchangeService {
 
     public void routeMessage(org.edtp.theexchange.network.Connection conn,
                               FrameType type, Object message) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core != null && !core.isOnCoreThread()) {
+            core.executeCore(() -> routeMessage(conn, type, message));
+            return;
+        }
         switch (type) {
             case QUERY_TIMESTAMP -> {
                 QueryTimestampRequest req = (QueryTimestampRequest) message;
@@ -273,18 +407,17 @@ public class ExchangeService {
                         ? conn.getPeerServerName()
                         : conn.getRemoteName();
                 cacheManager.clearCache(sourceServerName);
-                TheExchangeCore core = TheExchangeCore.getInstance();
                 if (core != null && core.getApi() != null && core.getSyncEngine() != null) {
-                    core.getApi().runAsync(() -> {
-                        try {
-                            core.getSyncEngine().fullSync(sourceServerName);
-                            core.getApi().runOnMainThread(() ->
-                                    core.getApi().refreshRemoteInventoryView(sourceServerName));
-                        } catch (Exception e) {
-                            core.getApi().getLogger().warn("Push sync failed for " + sourceServerName
-                                    + ": " + e.getMessage());
-                        }
-                    });
+                    core.getSyncEngine().fullSyncAsync(sourceServerName)
+                            .whenComplete((ignored, error) -> {
+                                if (error != null) {
+                                    core.getApi().getLogger().warn("Push sync failed for " + sourceServerName
+                                            + ": " + error.getMessage());
+                                } else {
+                                    core.getApi().runOnMainThread(() ->
+                                            core.getApi().refreshRemoteInventoryView(sourceServerName));
+                                }
+                            });
                 }
             }
             default -> {}

@@ -2,17 +2,30 @@ package org.edtp.theexchange;
 
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.compat.CompatibilityChecker;
+import org.edtp.theexchange.model.ExchangeMutationResult;
+import org.edtp.theexchange.model.ExchangeViewState;
+import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.PlayerExchangeContext;
 import org.edtp.theexchange.network.NetworkManager;
 import org.edtp.theexchange.service.*;
 import org.edtp.theexchange.storage.*;
 
 import java.nio.file.Path;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 
 public class TheExchangeCore {
 
     private static TheExchangeCore instance;
     private final ExchangeAPI api;
-    private boolean initialized;
+    private final ExecutorService coreExecutor;
+    private volatile boolean initialized;
+    private volatile boolean shuttingDown;
+    private volatile Thread coreThread;
+    private CompletableFuture<Void> startupFuture;
 
     // Storage
     private DatabaseManager databaseManager;
@@ -35,6 +48,16 @@ public class TheExchangeCore {
 
     public TheExchangeCore(ExchangeAPI api) {
         this.api = api;
+        this.coreExecutor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable runnable) {
+                Thread thread = new Thread(runnable, "exchange-core");
+                thread.setDaemon(true);
+                coreThread = thread;
+                return thread;
+            }
+        });
+        instance = this;
     }
 
     public static TheExchangeCore getInstance() { return instance; }
@@ -51,12 +74,125 @@ public class TheExchangeCore {
     public ViewService getViewService() { return viewService; }
     public MenuInteractionService getMenuInteractionService() { return menuInteractionService; }
     public ExchangeService getExchangeService() { return exchangeService; }
+    public boolean isInitialized() { return initialized; }
+    public boolean isOnCoreThread() { return Thread.currentThread() == coreThread; }
+
+    public CompletableFuture<Void> startAsync() {
+        if (startupFuture != null) {
+            return startupFuture;
+        }
+        startupFuture = submit(() -> {
+            initialize();
+            return null;
+        });
+        return startupFuture;
+    }
+
+    public <T> CompletableFuture<T> submit(Callable<T> task) {
+        if (shuttingDown) {
+            return CompletableFuture.failedFuture(new IllegalStateException("TheExchange core is shutting down"));
+        }
+        if (isOnCoreThread()) {
+            try {
+                return CompletableFuture.completedFuture(task.call());
+            } catch (Exception e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+        CompletableFuture<T> future = new CompletableFuture<>();
+        coreExecutor.execute(() -> {
+            try {
+                future.complete(task.call());
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            }
+        });
+        return future;
+    }
+
+    public CompletableFuture<Void> executeCore(Runnable task) {
+        return submit(() -> {
+            task.run();
+            return null;
+        });
+    }
+
+    public CompletableFuture<ExchangeViewState> openLocalViewAsync(String serverName) {
+        return submit(() -> viewService.openLocalView(serverName));
+    }
+
+    public CompletableFuture<ExchangeViewState> openRemoteViewAsync(String serverName) {
+        return submit(() -> {
+                    if (syncEngine == null) {
+                        return CompletableFuture.completedFuture(remoteFromCache(serverName, false));
+                    }
+                    return syncEngine.syncIfNeededAsync(serverName)
+                            .thenCompose(result -> submit(() -> {
+                                if (result != null) {
+                                    return ExchangeViewState.remote(serverName, result.isOnline(),
+                                            result.getItems(), result.getRemoteTimestamp());
+                                }
+                                return remoteFromCache(serverName, false);
+                            }));
+                })
+                .thenCompose(future -> future);
+    }
+
+    public CompletableFuture<Void> refreshRemoteViewAsync(String serverName) {
+        return submit(() -> syncEngine != null
+                        ? syncEngine.syncIfNeededAsync(serverName)
+                        : CompletableFuture.completedFuture(null))
+                .thenCompose(future -> future)
+                .thenApply(ignored -> null);
+    }
+
+    private ExchangeViewState remoteFromCache(String serverName, boolean online) {
+        var cache = cacheManager.getCache(serverName);
+        return ExchangeViewState.remote(serverName, online,
+                cache != null ? cache.getItems() : null,
+                cache != null ? cache.getRemoteTimestamp() : 0);
+    }
+
+    public CompletableFuture<Void> applyLocalSnapshotAsync(java.util.List<NeutralItem> before,
+                                                           java.util.List<NeutralItem> after,
+                                                           PlayerExchangeContext player) {
+        return executeCore(() -> menuInteractionService.applyLocalSnapshot(before, after, player));
+    }
+
+    public CompletableFuture<ExchangeMutationResult> putRemoteAsync(String serverName, int slot,
+                                                                    NeutralItem item,
+                                                                    PlayerExchangeContext player) {
+        return submit(() -> exchangeService.putNeutralItemAsync(
+                        serverName, slot, player.uuid(), player.name(), item))
+                .thenCompose(future -> future)
+                .thenApply(result -> result.isSuccess()
+                        ? ExchangeMutationResult.success()
+                        : ExchangeMutationResult.fail(result.getFailReason()));
+    }
+
+    public CompletableFuture<ExchangeMutationResult> takeRemoteAsync(String serverName, int slot,
+                                                                     int count,
+                                                                     PlayerExchangeContext player) {
+        return submit(() -> exchangeService.takeItemAsync(
+                        serverName, slot, count, player.uuid(), player.name()))
+                .thenCompose(future -> future)
+                .thenApply(result -> result.isSuccess()
+                        ? ExchangeMutationResult.success(result.getItemsToGive())
+                        : ExchangeMutationResult.fail(result.getFailReason()));
+    }
 
     /**
      * Initialize with config values provided by the adapter layer.
      * This ensures config is available before database/network setup.
      */
     public void initialize(int localPort, String localPassword) {
+        if (!isOnCoreThread()) {
+            submit(() -> {
+                initialize(localPort, localPassword);
+                return null;
+            }).join();
+            return;
+        }
         if (initialized) {
             api.getLogger().warn("TheExchange core already initialized");
             return;
@@ -134,12 +270,18 @@ public class TheExchangeCore {
             }
         }
 
-        instance = this;
         initialized = true;
         api.getLogger().info("TheExchange core initialized");
     }
 
     public void initialize() {
+        if (!isOnCoreThread()) {
+            submit(() -> {
+                initialize();
+                return null;
+            }).join();
+            return;
+        }
         api.getConfigLoader().loadConfig();
         ExchangeAPI.RuntimeConfig config = api.getConfigLoader().getRuntimeConfig();
         initialize(config.getPort(), config.getPassword());
@@ -162,15 +304,29 @@ public class TheExchangeCore {
     }
 
     public void shutdown() {
-        if (!initialized) return;
-        api.getLogger().info("Shutting down TheExchange core...");
+        shuttingDown = true;
+        CompletableFuture<Void> stopped = new CompletableFuture<>();
+        coreExecutor.execute(() -> {
+            try {
+                if (!initialized) {
+                    stopped.complete(null);
+                    return;
+                }
+                api.getLogger().info("Shutting down TheExchange core...");
 
-        if (heartbeatManager != null) heartbeatManager.stop();
-        if (networkManager != null) networkManager.shutdown();
-        if (databaseManager != null) databaseManager.close();
+                if (heartbeatManager != null) heartbeatManager.stop();
+                if (networkManager != null) networkManager.shutdown();
+                if (databaseManager != null) databaseManager.close();
 
-        instance = null;
-        initialized = false;
-        api.getLogger().info("TheExchange core shut down");
+                instance = null;
+                initialized = false;
+                api.getLogger().info("TheExchange core shut down");
+                stopped.complete(null);
+            } catch (Throwable t) {
+                stopped.completeExceptionally(t);
+            }
+        });
+        stopped.join();
+        coreExecutor.shutdownNow();
     }
 }

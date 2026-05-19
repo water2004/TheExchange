@@ -32,9 +32,13 @@ public class Theexchange implements ModInitializer {
             FabricExchangeAPI api = new FabricExchangeAPI(server);
 
             core = new TheExchangeCore(api);
-            core.initialize();
-
-            LOGGER.info("[Exchange] Ready");
+            core.startAsync().whenComplete((ignored, error) -> {
+                if (error != null) {
+                    LOGGER.error("[Exchange] Initialization failed!", error);
+                } else {
+                    LOGGER.info("[Exchange] Ready");
+                }
+            });
         } catch (Exception e) {
             LOGGER.error("[Exchange] Initialization failed!", e);
         }

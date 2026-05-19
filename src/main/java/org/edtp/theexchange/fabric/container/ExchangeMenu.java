@@ -7,7 +7,9 @@ import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
+import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.api.RefreshableExchangeView;
 import org.edtp.theexchange.model.ExchangeInteraction;
@@ -88,16 +90,33 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
     public void refreshFromCache() {
         if (refreshing) return;
-        applyCachedView();
+        loadViewAsync();
     }
 
-    private void applyCachedView() {
+    private void loadViewAsync() {
         if (refreshing) return;
         refreshing = true;
-        try {
-            ExchangeViewState state = local
-                    ? TheExchangeCore.getInstance().getViewService().openLocalView(serverName)
-                    : TheExchangeCore.getInstance().getViewService().openRemoteView(serverName);
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) {
+            refreshing = false;
+            return;
+        }
+        var future = local
+                ? core.openLocalViewAsync(serverName)
+                : core.openRemoteViewAsync(serverName);
+        future.whenComplete((state, error) -> core.getApi().runOnMainThread(() -> {
+            try {
+                if (error != null || state == null || !isViewingServer(state.getServerName())) {
+                    return;
+                }
+                applyViewState(state);
+            } finally {
+                refreshing = false;
+            }
+        }));
+    }
+
+    private void applyViewState(ExchangeViewState state) {
             online = state.isOnline();
             exchangeContainer.clearContent();
             exchangeContainer.loadFromItems(state.getItems());
@@ -110,9 +129,6 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                 }
             }
             broadcastChanges();
-        } finally {
-            refreshing = false;
-        }
     }
 
     @Override
@@ -212,52 +228,102 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
     private void applyRemotePut(ExchangeInteractionResult decision, int slotIndex, int buttonNum,
                                 ContainerInput containerInput, Player player) {
-        ExchangeMutationResult result = TheExchangeCore.getInstance().getMenuInteractionService()
-                .putRemote(serverName, decision.getTargetSlot(), decision.getItem(), playerContext(player));
-        if (!result.isSuccess()) {
-            player.sendSystemMessage(Component.literal(
-                    result.getFailReason() != null ? result.getFailReason() : "放入失败"));
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) return;
+
+        ItemStack inFlight = removeSourceStack(decision.getCount(), slotIndex, buttonNum, containerInput);
+        if (inFlight.isEmpty()) {
+            player.sendSystemMessage(Component.literal("物品已变化，请重试"));
             refreshFromCache();
             return;
         }
 
-        int count = decision.getCount();
+        NeutralItem item = neutralFromStack(inFlight);
+        core.putRemoteAsync(serverName, decision.getTargetSlot(), item, playerContext(player))
+                .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
+                    if (error != null || result == null || !result.isSuccess()) {
+                        giveOrDrop(player, inFlight);
+                        player.sendSystemMessage(Component.literal(error != null
+                                ? "放入失败: " + rootMessage(error)
+                                : result.getFailReason() != null ? result.getFailReason() : "放入失败"));
+                    }
+                    refreshFromCache();
+                }));
+    }
+
+    private ItemStack removeSourceStack(int count, int slotIndex, int buttonNum,
+                                        ContainerInput containerInput) {
+        if (count <= 0) return ItemStack.EMPTY;
         if (containerInput == ContainerInput.PICKUP) {
             ItemStack carried = getCarried();
+            if (carried.isEmpty() || carried.getCount() < count) return ItemStack.EMPTY;
+            ItemStack removed = carried.copyWithCount(count);
             carried.shrink(count);
             setCarried(carried.isEmpty() ? ItemStack.EMPTY : carried);
-        } else if (containerInput == ContainerInput.SWAP && buttonNum >= 0 && buttonNum <= 8) {
-            Slot hotbarSlot = this.slots.get(81 + buttonNum);
-            ItemStack hotbarStack = hotbarSlot.getItem();
-            hotbarStack.shrink(count);
-            hotbarSlot.setChanged();
-        } else if (slotIndex >= 0 && slotIndex < this.slots.size()) {
-            Slot slot = this.slots.get(slotIndex);
-            ItemStack source = slot.getItem();
-            source.shrink(count);
-            if (source.isEmpty()) {
-                slot.setByPlayer(ItemStack.EMPTY);
-            } else {
-                slot.setChanged();
+            broadcastChanges();
+            return removed;
+        }
+        if (containerInput == ContainerInput.SWAP && buttonNum >= 0 && buttonNum <= 8) {
+            return removeFromSlot(81 + buttonNum, count);
+        }
+        return removeFromSlot(slotIndex, count);
+    }
+
+    private ItemStack removeFromSlot(int slotIndex, int count) {
+        if (slotIndex < 0 || slotIndex >= this.slots.size()) return ItemStack.EMPTY;
+        Slot slot = this.slots.get(slotIndex);
+        ItemStack source = slot.getItem();
+        if (source.isEmpty() || source.getCount() < count) return ItemStack.EMPTY;
+        ItemStack removed = source.copyWithCount(count);
+        source.shrink(count);
+        if (source.isEmpty()) {
+            slot.setByPlayer(ItemStack.EMPTY);
+        } else {
+            slot.setChanged();
+        }
+        broadcastChanges();
+        return removed;
+    }
+
+    private void giveOrDrop(Player player, ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return;
+        ItemStack remaining = stack.copy();
+        if (!player.isRemoved()) {
+            if (player.getInventory().add(remaining)) {
+                return;
             }
         }
-        refreshFromCache();
+        dropAtPlayer(player, remaining);
     }
 
     private void applyRemoteTake(ExchangeInteractionResult decision, int slotIndex, int buttonNum,
                                  ContainerInput containerInput, Player player) {
-        ExchangeMutationResult result = TheExchangeCore.getInstance().getMenuInteractionService()
-                .takeRemote(serverName, decision.getTargetSlot(), decision.getCount(), playerContext(player));
-        if (!result.isSuccess()) {
-            player.sendSystemMessage(Component.literal(
-                    result.getFailReason() != null ? result.getFailReason() : "取出失败"));
-            refreshFromCache();
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) return;
+        core.takeRemoteAsync(serverName, decision.getTargetSlot(), decision.getCount(), playerContext(player))
+                .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
+                    if (error != null || result == null || !result.isSuccess()) {
+                        player.sendSystemMessage(Component.literal(error != null
+                                ? "取出失败: " + rootMessage(error)
+                                : result.getFailReason() != null ? result.getFailReason() : "取出失败"));
+                        refreshFromCache();
+                        return;
+                    }
+                    applyTakenItem(result, buttonNum, containerInput, player);
+                    refreshFromCache();
+                }));
+    }
+
+    private void applyTakenItem(ExchangeMutationResult result, int buttonNum,
+                                ContainerInput containerInput, Player player) {
+        ExchangeAPI api = TheExchangeCore.getInstance().getApi();
+        Object itemObj = api.getItemSerializer().deserialize(result.getItem());
+        if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) {
             return;
         }
-        Object itemObj = TheExchangeCore.getInstance().getApi().getItemSerializer()
-                .deserialize(result.getItem());
-        if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) {
-            refreshFromCache();
+
+        if (player.isRemoved() || player.containerMenu != this) {
+            giveOrDrop(player, giveStack);
             return;
         }
 
@@ -279,18 +345,22 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                 player.drop(giveStack, false);
             }
         } else if (!player.getInventory().add(giveStack)) {
-            player.drop(giveStack, false);
+            dropAtPlayer(player, giveStack);
         }
-        refreshFromCache();
     }
 
     private void handleLocalClick(int slotIndex, int buttonNum, ContainerInput containerInput, Player player) {
         java.util.List<NeutralItem> before = snapshotNeutralItems();
         super.clicked(slotIndex, buttonNum, containerInput, player);
-        TheExchangeCore.getInstance().getMenuInteractionService().applyLocalSnapshot(
-                before,
-                snapshotNeutralItems(),
-                playerContext(player));
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) return;
+        java.util.List<NeutralItem> after = snapshotNeutralItems();
+        core.applyLocalSnapshotAsync(before, after, playerContext(player))
+                .whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        core.getApi().getLogger().error("Failed to persist local exchange snapshot", error);
+                    }
+                });
     }
 
     @Override
@@ -329,5 +399,21 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
     public Component getTitle() {
         return Component.literal((local ? "[本服] " : (online ? "" : "[离线] "))
                 + serverName + " 的共享空间");
+    }
+
+    private String rootMessage(Throwable error) {
+        Throwable t = error;
+        while (t.getCause() != null) t = t.getCause();
+        return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+    }
+
+    private void dropAtPlayer(Player player, ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return;
+        if (!player.level().isClientSide()) {
+            ItemEntity entity = new ItemEntity(player.level(),
+                    player.getX(), player.getY(), player.getZ(), stack.copy());
+            entity.setPickUpDelay(20);
+            player.level().addFreshEntity(entity);
+        }
     }
 }

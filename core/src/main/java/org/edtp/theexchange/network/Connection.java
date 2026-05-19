@@ -14,8 +14,10 @@ import java.io.OutputStream;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 
 /**
@@ -38,16 +40,21 @@ public class Connection {
     private BiConsumer<FrameType, Object> messageHandler;
     private volatile BiConsumer<Connection, Boolean> disconnectHandler;
 
-    private final ReentrantLock requestLock = new ReentrantLock();
+    private final Semaphore requestPermit = new Semaphore(1);
     private volatile FrameType pendingResponseType;
     private volatile CompletableFuture<Object> pendingFuture;
-
+    private final ExecutorService requestExecutor;
     public Connection(String remoteName, SSLSocket socket) throws IOException {
         this.remoteName = remoteName;
         this.socket = socket;
         this.in = socket.getInputStream();
         this.out = socket.getOutputStream();
         this.lastRecvTime = System.currentTimeMillis();
+        this.requestExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r, "exchange-req-" + remoteName);
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     public synchronized void start(BiConsumer<FrameType, Object> handler) {
@@ -115,7 +122,7 @@ public class Connection {
     public <T> T sendAndWait(FrameType requestType, Object request,
                               FrameType responseType, long timeoutMs) {
         CompletableFuture<Object> future = new CompletableFuture<>();
-        requestLock.lock();
+        requestPermit.acquireUninterruptibly();
         pendingResponseType = responseType;
         pendingFuture = future;
 
@@ -127,7 +134,9 @@ public class Connection {
                 out.write(data);
                 out.flush();
             } catch (IOException e) {
-                clearPending(future);
+                if (clearPending(future)) {
+                    requestPermit.release();
+                }
                 handleDisconnect();
                 return null;
             }
@@ -136,15 +145,29 @@ public class Connection {
         try {
             return (T) future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            clearPending(future);
             return null;
         } catch (Exception e) {
-            clearPending(future);
             return null;
         } finally {
-            clearPending(future);
-            requestLock.unlock();
+            if (clearPending(future)) {
+                requestPermit.release();
+            }
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> CompletableFuture<T> sendAsync(FrameType requestType, Object request,
+                                              FrameType responseType, long timeoutMs) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        requestExecutor.execute(() -> {
+            try {
+                T response = sendAndWait(requestType, request, responseType, timeoutMs);
+                future.complete(response);
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            }
+        });
+        return future;
     }
 
     /**
@@ -153,16 +176,20 @@ public class Connection {
     public void onResponse(FrameType type, Object message) {
         CompletableFuture<Object> future = pendingFuture;
         if (future != null && pendingResponseType == type) {
-            clearPending(future);
-            future.complete(message);
+            if (clearPending(future)) {
+                requestPermit.release();
+                future.complete(message);
+            }
         }
     }
 
-    private void clearPending(CompletableFuture<Object> future) {
+    private synchronized boolean clearPending(CompletableFuture<Object> future) {
         if (pendingFuture == future) {
             pendingFuture = null;
             pendingResponseType = null;
+            return true;
         }
+        return false;
     }
 
     public void sendResponse(FrameType responseType, Object response) {
@@ -232,6 +259,11 @@ public class Connection {
 
     private void handleDisconnect() {
         running = false;
+        CompletableFuture<Object> future = pendingFuture;
+        if (future != null && clearPending(future)) {
+            requestPermit.release();
+            future.complete(null);
+        }
         try { socket.close(); } catch (IOException ignored) {}
         if (disconnectHandler != null) {
             disconnectHandler.accept(this, false);
@@ -240,6 +272,7 @@ public class Connection {
 
     public void close() {
         running = false;
+        requestExecutor.shutdownNow();
         if (readThread != null) {
             readThread.interrupt();
         }

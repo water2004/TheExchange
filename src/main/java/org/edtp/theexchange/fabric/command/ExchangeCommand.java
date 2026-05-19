@@ -12,11 +12,12 @@ import net.minecraft.server.level.ServerPlayer;
 import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.model.ExchangeViewState;
 import org.edtp.theexchange.model.RemoteServer;
-import org.edtp.theexchange.model.ServerStatus;
 import org.edtp.theexchange.fabric.container.ExchangeMenu;
 import org.slf4j.Logger;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class ExchangeCommand {
 
@@ -24,9 +25,10 @@ public class ExchangeCommand {
 
     private static TheExchangeCore getCore(CommandContext<CommandSourceStack> ctx) {
         TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core == null) {
+        if (core == null || !core.isInitialized()) {
             ctx.getSource().sendFailure(Component.literal(
                     "[Exchange] Mod 尚未初始化，请等待服务器完全启动后再试"));
+            return null;
         }
         return core;
     }
@@ -91,9 +93,17 @@ public class ExchangeCommand {
             int port = IntegerArgumentType.getInteger(ctx, "port");
             String password = StringArgumentType.getString(ctx, "password");
 
-            core.getServerRegistry().addServer(name, address, port, password);
-            ctx.getSource().sendSuccess(() -> Component.literal(
-                    "已添加远程服务器: " + name + " (" + address + ":" + port + ")"), true);
+            core.executeCore(() -> core.getServerRegistry().addServer(name, address, port, password))
+                    .whenComplete((ignored, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in addServer", error);
+                            ctx.getSource().sendFailure(Component.literal(
+                                    "添加失败: " + rootMessage(error)));
+                        } else {
+                            ctx.getSource().sendSuccess(() -> Component.literal(
+                                    "已添加远程服务器: " + name + " (" + address + ":" + port + ")"), true);
+                        }
+                    }));
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in addServer", e);
@@ -112,12 +122,18 @@ public class ExchangeCommand {
             if (core == null) return 0;
 
             String name = StringArgumentType.getString(ctx, "name");
-            boolean removed = core.getServerRegistry().removeServer(name);
-            if (removed) {
-                ctx.getSource().sendSuccess(() -> Component.literal("已移除: " + name), true);
-            } else {
-                ctx.getSource().sendFailure(Component.literal("服务器不存在: " + name));
-            }
+            core.submit(() -> core.getServerRegistry().removeServer(name))
+                    .whenComplete((removed, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in removeServer", error);
+                            ctx.getSource().sendFailure(Component.literal(
+                                    "移除失败: " + rootMessage(error)));
+                        } else if (Boolean.TRUE.equals(removed)) {
+                            ctx.getSource().sendSuccess(() -> Component.literal("已移除: " + name), true);
+                        } else {
+                            ctx.getSource().sendFailure(Component.literal("服务器不存在: " + name));
+                        }
+                    }));
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in removeServer", e);
@@ -130,24 +146,33 @@ public class ExchangeCommand {
         try {
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
-            List<RemoteServer> servers = core.getServerRegistry().getAllServers();
-            boolean netOk = core.getServerRegistry().isNetworkAvailable();
-            String localName = core.getApi().getServerName();
-
-            ctx.getSource().sendSuccess(() -> Component.literal("=== 共享空间服务器列表 ==="), false);
-            ctx.getSource().sendSuccess(() -> Component.literal(
-                    "  [本服] " + localName + " — 使用 /exchange view local 打开"), false);
-            for (RemoteServer server : servers) {
-                String statusStr = !netOk ? "离线 (网络未启用)"
-                        : core.getServerRegistry().getStatus(server.getName()) == ServerStatus.ONLINE ? "在线" : "离线";
-                ctx.getSource().sendSuccess(() -> Component.literal(
-                        "  " + server.getName() + " - " + server.getAddress()
-                                + ":" + server.getPort() + " [" + statusStr + "]"), false);
-            }
-            if (servers.isEmpty()) {
-                ctx.getSource().sendSuccess(() -> Component.literal("  (无远程服务器)"), false);
-            }
-            return servers.size() + 1;
+            core.submit(() -> new ServerListSnapshot(
+                            core.getServerRegistry().getAllServers(),
+                            core.getServerRegistry().isNetworkAvailable(),
+                            core.getApi().getServerName(),
+                            serverStatuses(core)))
+                    .whenComplete((snapshot, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in listServers", error);
+                            ctx.getSource().sendFailure(Component.literal(
+                                    "读取服务器列表失败: " + rootMessage(error)));
+                            return;
+                        }
+                        ctx.getSource().sendSuccess(() -> Component.literal("=== 共享空间服务器列表 ==="), false);
+                        ctx.getSource().sendSuccess(() -> Component.literal(
+                                "  [本服] " + snapshot.localName() + " - 使用 /exchange view local 打开"), false);
+                        for (RemoteServer server : snapshot.servers()) {
+                            String statusStr = !snapshot.networkAvailable() ? "离线 (网络未启用)"
+                                    : snapshot.statusByName().getOrDefault(server.getName(), "离线");
+                            ctx.getSource().sendSuccess(() -> Component.literal(
+                                    "  " + server.getName() + " - " + server.getAddress()
+                                            + ":" + server.getPort() + " [" + statusStr + "]"), false);
+                        }
+                        if (snapshot.servers().isEmpty()) {
+                            ctx.getSource().sendSuccess(() -> Component.literal("  (无远程服务器)"), false);
+                        }
+                    }));
+            return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in listServers", e);
             ctx.getSource().sendFailure(Component.literal("内部错误: " + e.getMessage()));
@@ -173,19 +198,31 @@ public class ExchangeCommand {
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
 
-            ExchangeViewState state = "local".equalsIgnoreCase(serverName)
-                    || serverName.equalsIgnoreCase(core.getApi().getServerName())
-                    ? core.getViewService().openLocalView(core.getApi().getServerName())
-                    : core.getViewService().openRemoteView(serverName);
+            ctx.getSource().sendSuccess(() -> Component.literal("正在加载共享空间: " + serverName), false);
+            core.submit(() -> {
+                        String localName = core.getApi().getServerName();
+                        return "local".equalsIgnoreCase(serverName)
+                                || serverName.equalsIgnoreCase(localName)
+                                ? core.openLocalViewAsync(localName)
+                                : core.openRemoteViewAsync(serverName);
+                    })
+                    .thenCompose(future -> future)
+                    .whenComplete((state, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in viewServer", error);
+                            player.sendSystemMessage(Component.literal("打开失败: " + rootMessage(error)));
+                            return;
+                        }
+                        if (player.isRemoved()) return;
+                        player.openMenu(new net.minecraft.world.SimpleMenuProvider(
+                                (containerId, inventory, p) -> new ExchangeMenu(
+                                        containerId, inventory, state),
+                                Component.literal(state.getTitle(core.getApi().getServerName()))));
 
-            player.openMenu(new net.minecraft.world.SimpleMenuProvider(
-                    (containerId, inventory, p) -> new ExchangeMenu(
-                            containerId, inventory, state),
-                    Component.literal(state.getTitle(core.getApi().getServerName()))));
-
-            if (!state.isOnline() && !state.isLocal()) {
-                player.sendSystemMessage(Component.literal("[离线] 仅可查看缓存数据 — 目标服务器离线"));
-            }
+                        if (!state.isOnline() && !state.isLocal()) {
+                            player.sendSystemMessage(Component.literal("[离线] 仅可查看缓存数据 - 目标服务器离线"));
+                        }
+                    }));
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in viewServer", e);
@@ -203,8 +240,18 @@ public class ExchangeCommand {
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
 
-            core.getViewService().refreshRemoteView(serverName);
-            ctx.getSource().sendSuccess(() -> Component.literal("已刷新 " + serverName), false);
+            ctx.getSource().sendSuccess(() -> Component.literal("正在刷新 " + serverName), false);
+            core.refreshRemoteViewAsync(serverName)
+                    .whenComplete((ignored, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in refreshServer", error);
+                            ctx.getSource().sendFailure(Component.literal(
+                                    "刷新失败: " + rootMessage(error)));
+                        } else {
+                            ctx.getSource().sendSuccess(() -> Component.literal("已刷新 " + serverName), false);
+                            core.getApi().refreshRemoteInventoryView(serverName);
+                        }
+                    }));
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in refreshServer", e);
@@ -219,16 +266,24 @@ public class ExchangeCommand {
             if (core == null) return 0;
 
             long since = System.currentTimeMillis() - (long) days * 24 * 3600 * 1000;
-            var logs = core.getOperationLogger().queryLogs(since);
-            ctx.getSource().sendSuccess(() -> Component.literal(
-                    "最近 " + days + " 天的记录 (" + logs.size() + " 条):"), false);
-            for (var entry : logs) {
-                ctx.getSource().sendSuccess(() -> Component.literal(
-                        entry.timestamp() + " " + entry.opType() + " "
-                                + entry.playerName() + " → " + entry.serverName()
-                                + " " + entry.itemId() + " x" + entry.quantity()
-                                + " " + (entry.success() ? "成功" : entry.failReason())), false);
-            }
+            core.submit(() -> core.getOperationLogger().queryLogs(since))
+                    .whenComplete((logs, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in exportLog", error);
+                            ctx.getSource().sendFailure(Component.literal(
+                                    "导出失败: " + rootMessage(error)));
+                            return;
+                        }
+                        ctx.getSource().sendSuccess(() -> Component.literal(
+                                "最近 " + days + " 天的记录 (" + logs.size() + " 条):"), false);
+                        for (var entry : logs) {
+                            ctx.getSource().sendSuccess(() -> Component.literal(
+                                    entry.timestamp() + " " + entry.opType() + " "
+                                            + entry.playerName() + " -> " + entry.serverName()
+                                            + " " + entry.itemId() + " x" + entry.quantity()
+                                            + " " + (entry.success() ? "成功" : entry.failReason())), false);
+                        }
+                    }));
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in exportLog", e);
@@ -242,9 +297,17 @@ public class ExchangeCommand {
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
 
-            int deleted = core.getOperationLogger().cleanupOldLogs(days);
-            ctx.getSource().sendSuccess(() -> Component.literal(
-                    "已清理 " + deleted + " 条 " + days + " 天前的日志"), true);
+            core.submit(() -> core.getOperationLogger().cleanupOldLogs(days))
+                    .whenComplete((deleted, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in clearLog", error);
+                            ctx.getSource().sendFailure(Component.literal(
+                                    "清理失败: " + rootMessage(error)));
+                        } else {
+                            ctx.getSource().sendSuccess(() -> Component.literal(
+                                    "已清理 " + deleted + " 条 " + days + " 天前的日志"), true);
+                        }
+                    }));
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in clearLog", e);
@@ -252,4 +315,25 @@ public class ExchangeCommand {
             return 0;
         }
     }
+
+    private static String rootMessage(Throwable error) {
+        Throwable t = error;
+        while (t.getCause() != null) t = t.getCause();
+        return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+    }
+
+    private static Map<String, String> serverStatuses(TheExchangeCore core) {
+        Map<String, String> statuses = new LinkedHashMap<>();
+        for (RemoteServer server : core.getServerRegistry().getAllServers()) {
+            statuses.put(server.getName(),
+                    core.getServerRegistry().getStatus(server.getName()).name().equals("ONLINE")
+                            ? "在线" : "离线");
+        }
+        return statuses;
+    }
+
+    private record ServerListSnapshot(List<RemoteServer> servers,
+                                      boolean networkAvailable,
+                                      String localName,
+                                      Map<String, String> statusByName) {}
 }

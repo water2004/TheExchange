@@ -1,6 +1,7 @@
 package org.edtp.theexchange.service;
 
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.network.Connection;
 import org.edtp.theexchange.network.NetworkManager;
 import org.edtp.theexchange.network.protocol.FrameType;
@@ -10,6 +11,7 @@ import org.edtp.theexchange.network.protocol.messages.QueryTimestampRequest;
 import org.edtp.theexchange.network.protocol.messages.QueryTimestampResponse;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 public class SyncEngine {
 
@@ -51,6 +53,36 @@ public class SyncEngine {
         return fullSync(serverName, conn);
     }
 
+    public CompletableFuture<SyncResult> syncIfNeededAsync(String serverName) {
+        if (networkManager == null) {
+            return CompletableFuture.completedFuture(SyncResult.offline(cacheManager.getCache(serverName)));
+        }
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null) {
+            return CompletableFuture.completedFuture(SyncResult.offline(cacheManager.getCache(serverName)));
+        }
+
+        long cachedTs = cacheManager.getRemoteTimestamp(serverName);
+        QueryTimestampRequest tsReq = new QueryTimestampRequest(cachedTs);
+        return conn.<QueryTimestampResponse>sendAsync(
+                        FrameType.QUERY_TIMESTAMP, tsReq,
+                        FrameType.TIMESTAMP_RESPONSE, SYNC_TIMEOUT_MS)
+                .handle((response, error) -> {
+                    if (error != null || response == null) {
+                        return CompletableFuture.completedFuture(SyncResult.timeout());
+                    }
+                    if (!response.isChanged()) {
+                        TheExchangeCore core = TheExchangeCore.getInstance();
+                        if (core != null) {
+                            return core.submit(() -> SyncResult.fromCache(cacheManager.getCache(serverName)));
+                        }
+                        return CompletableFuture.completedFuture(SyncResult.fromCache(cacheManager.getCache(serverName)));
+                    }
+                    return fullSyncAsync(serverName, conn);
+                })
+                .thenCompose(future -> future);
+    }
+
     /**
      * Force full sync regardless of timestamp.
      */
@@ -61,6 +93,31 @@ public class SyncEngine {
             return SyncResult.offline(cacheManager.getCache(serverName));
         }
         return fullSync(serverName, conn);
+    }
+
+    public CompletableFuture<SyncResult> fullSyncAsync(String serverName) {
+        if (networkManager == null) {
+            return CompletableFuture.completedFuture(SyncResult.offline(cacheManager.getCache(serverName)));
+        }
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null) {
+            return CompletableFuture.completedFuture(SyncResult.offline(cacheManager.getCache(serverName)));
+        }
+        return fullSyncAsync(serverName, conn);
+    }
+
+    private CompletableFuture<SyncResult> fullSyncAsync(String serverName, Connection conn) {
+        return conn.<QueryItemsResponse>sendAsync(
+                        FrameType.QUERY_ITEMS, new QueryItemsRequest(0, 54),
+                        FrameType.ITEMS_RESPONSE, SYNC_TIMEOUT_MS)
+                .handle((response, error) -> {
+                    TheExchangeCore core = TheExchangeCore.getInstance();
+                    if (core != null) {
+                        return core.submit(() -> finishFullSync(serverName, response, error));
+                    }
+                    return CompletableFuture.completedFuture(SyncResult.timeout());
+                })
+                .thenCompose(future -> future);
     }
 
     private SyncResult fullSync(String serverName, Connection conn) {
@@ -81,6 +138,21 @@ public class SyncEngine {
         }
         cacheManager.updateCache(serverName, items, resp.getTimestamp());
 
+        return SyncResult.fromRemote(items, resp.getTimestamp(), resp.getServerVersion());
+    }
+
+    private SyncResult finishFullSync(String serverName, QueryItemsResponse resp, Throwable error) {
+        if (error != null || resp == null) return SyncResult.timeout();
+        List<NeutralItem> items = resp.getItems();
+        if (items != null) {
+            for (int i = 0; i < items.size(); i++) {
+                NeutralItem item = items.get(i);
+                if (item != null && item.getVersion() <= 0) {
+                    item.setVersion(i + 1);
+                }
+            }
+        }
+        cacheManager.updateCache(serverName, items, resp.getTimestamp());
         return SyncResult.fromRemote(items, resp.getTimestamp(), resp.getServerVersion());
     }
 
