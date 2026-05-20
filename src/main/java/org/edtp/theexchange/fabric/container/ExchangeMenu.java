@@ -316,9 +316,14 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
     private void applyTakenItem(ExchangeMutationResult result, int buttonNum,
                                 ContainerInput containerInput, Player player) {
+        if (result.getItem() == null || result.getItem().isEmpty() || result.getItem().isIncompatible()) {
+            player.sendSystemMessage(Component.literal("不兼容物品禁止操作"));
+            return;
+        }
         ExchangeAPI api = TheExchangeCore.getInstance().getApi();
         Object itemObj = api.getItemSerializer().deserialize(result.getItem());
         if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) {
+            player.sendSystemMessage(Component.literal("不兼容物品禁止操作"));
             return;
         }
 

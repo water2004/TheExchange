@@ -12,7 +12,6 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.model.NeutralItem;
-import org.edtp.theexchange.util.BinaryIO;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -43,6 +42,7 @@ public class FabricItemSerializer implements ItemSerializer {
         try {
             CompoundTag tag = (CompoundTag) ItemStack.CODEC.encodeStart(NbtOps.INSTANCE, stack)
                     .getOrThrow();
+            tag.remove("count");
             extraData = writeCanonical(tag);
         } catch (Exception e) {
             extraData = new byte[0];
@@ -50,6 +50,35 @@ public class FabricItemSerializer implements ItemSerializer {
 
         return new NeutralItem(itemId, stack.getCount(), displayName,
                 extraData, false, "26.1.2");
+    }
+
+    @Override
+    public boolean canDeserialize(NeutralItem item) {
+        if (item == null || item.isEmpty()) return false;
+        try {
+            Identifier id = Identifier.tryParse(item.getItemId());
+            if (id == null) {
+                debugCanDeserializeFailure(item, "BAD_ID", null);
+                return false;
+            }
+            var itemHolder = BuiltInRegistries.ITEM.get(id);
+            if (itemHolder.isEmpty() || itemHolder.get().value() == Items.AIR) {
+                debugCanDeserializeFailure(item, "UNKNOWN_ITEM", null);
+                return false;
+            }
+            if (item.getExtraData() == null || item.getExtraData().length == 0) {
+                return true;
+            }
+            ByteArrayInputStream bis = new ByteArrayInputStream(item.getExtraData());
+            DataInputStream dis = new DataInputStream(bis);
+            CompoundTag tag = NbtIo.read(dis);
+            tag.putInt("count", Math.max(1, item.getCount()));
+            ItemStack.CODEC.parse(NbtOps.INSTANCE, tag).getOrThrow();
+            return true;
+        } catch (Exception e) {
+            debugCanDeserializeFailure(item, "NBT_OR_CODEC", e);
+            return false;
+        }
     }
 
     @Override
@@ -61,6 +90,7 @@ public class FabricItemSerializer implements ItemSerializer {
                 ByteArrayInputStream bis = new ByteArrayInputStream(item.getExtraData());
                 DataInputStream dis = new DataInputStream(bis);
                 CompoundTag tag = NbtIo.read(dis);
+                tag.putInt("count", Math.max(1, item.getCount()));
                 ItemStack stack = ItemStack.CODEC.parse(NbtOps.INSTANCE, tag)
                         .getOrThrow();
                 stack.setCount(item.getCount());
@@ -95,7 +125,7 @@ public class FabricItemSerializer implements ItemSerializer {
             return false;
         }
         return Objects.equals(a.getItemId(), b.getItemId())
-                && Arrays.equals(a.getExtraData(), b.getExtraData());
+                && Arrays.equals(canonicalStackKindData(a), canonicalStackKindData(b));
     }
 
     @Override
@@ -111,10 +141,29 @@ public class FabricItemSerializer implements ItemSerializer {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(bos);
         out.writeByte(10);
-        BinaryIO.writeString(out, "");
+        out.writeUTF("");
         writeCompoundSorted(tag, out);
         out.flush();
         return bos.toByteArray();
+    }
+
+    private byte[] canonicalStackKindData(NeutralItem item) {
+        if (item == null || item.getExtraData() == null || item.getExtraData().length == 0) {
+            return new byte[0];
+        }
+        try {
+            ByteArrayInputStream bis = new ByteArrayInputStream(item.getExtraData());
+            DataInputStream dis = new DataInputStream(bis);
+            CompoundTag tag = NbtIo.read(dis);
+            tag.remove("count");
+            return writeCanonical(tag);
+        } catch (Exception e) {
+            return normalizeExtra(item.getExtraData());
+        }
+    }
+
+    private static byte[] normalizeExtra(byte[] data) {
+        return data == null || data.length == 0 ? new byte[0] : data;
     }
 
     private void writeCompoundSorted(CompoundTag tag, DataOutputStream out) throws IOException {
@@ -125,7 +174,7 @@ public class FabricItemSerializer implements ItemSerializer {
             if (child == null) continue;
             out.writeByte(child.getId());
             if (child.getId() != 0) {
-                BinaryIO.writeString(out, key);
+                out.writeUTF(key);
                 writeTag(child, out);
             }
         }
@@ -138,5 +187,17 @@ public class FabricItemSerializer implements ItemSerializer {
             return;
         }
         tag.write(out);
+    }
+
+    private void debugCanDeserializeFailure(NeutralItem item, String stage, Exception error) {
+        byte[] extra = item.getExtraData();
+        String message = "[Exchange|Debug][Compat][canDeserialize] fail stage=" + stage
+                + " id=" + item.getItemId()
+                + " count=" + item.getCount()
+                + " incompatible=" + item.isIncompatible()
+                + " extraLen=" + (extra == null ? -1 : extra.length)
+                + " extraHash=" + Arrays.hashCode(extra)
+                + (error == null ? "" : " error=" + error.getClass().getSimpleName() + ": " + error.getMessage());
+        System.out.println(message);
     }
 }

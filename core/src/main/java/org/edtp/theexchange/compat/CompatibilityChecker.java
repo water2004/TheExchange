@@ -21,16 +21,7 @@ public class CompatibilityChecker {
      */
     public NeutralItem checkAndMark(NeutralItem item) {
         if (item == null || item.isEmpty()) return item;
-        try {
-            Object stack = serializer.deserialize(item);
-            if (stack == null) {
-                item.setIncompatible(true);
-            } else {
-                item.setIncompatible(false);
-            }
-        } catch (Exception e) {
-            item.setIncompatible(true);
-        }
+        item.setIncompatible(!serializer.canDeserialize(item));
         return item;
     }
 

@@ -22,8 +22,16 @@ public interface ItemSerializer {
     Object deserialize(NeutralItem item);
 
     /**
-     * Compare two neutral items using the loader's native stack semantics.
-     * Core callers use this instead of comparing serialized bytes.
+     * Return whether this runtime can materialize the neutral item as its native ItemStack.
+     * Implementations must not mutate the item.
+     */
+    default boolean canDeserialize(NeutralItem item) {
+        return item != null && !item.isEmpty() && deserialize(item) != null;
+    }
+
+    /**
+     * Compare two neutral items by stack-kind identity.
+     * Count, server source version and display-only names are intentionally ignored.
      */
     default boolean sameStackKind(NeutralItem a, NeutralItem b) {
         if (a == null || b == null || a.isEmpty() || b.isEmpty()) {

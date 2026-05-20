@@ -243,11 +243,11 @@ public class TheExchangeCore {
 
         cacheManager = new CacheManager(remoteCacheStore);
 
-        syncEngine = networkManager != null
-                ? new SyncEngine(networkManager, cacheManager)
-                : null;
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(
                 api.getItemSerializer());
+        syncEngine = networkManager != null
+                ? new SyncEngine(networkManager, cacheManager, compatibilityChecker)
+                : null;
 
         exchangeService = new ExchangeService(networkManager, localItemStore,
                 operationLogger, cacheManager, compatibilityChecker,

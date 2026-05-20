@@ -106,6 +106,13 @@ public class ExchangeService {
         if (expected == null || expected.isEmpty()) {
             return CompletableFuture.completedFuture(TakeResult.fail("物品已变化，请重试"));
         }
+        if (compatibilityChecker != null) {
+            expected = expected.copy();
+            compatibilityChecker.checkAndMark(expected);
+            if (expected.isIncompatible()) {
+                return CompletableFuture.completedFuture(TakeResult.fail("不兼容物品禁止操作"));
+            }
+        }
         return takeItemAsync(serverName, slot, expected.getItemId(), expected.getVersion(),
                 requestCount, playerUuid, playerName);
     }
@@ -176,6 +183,14 @@ public class ExchangeService {
         }
 
         if (response.isSuccess()) {
+            if (response.getItemsToGive() == null || response.getItemsToGive().isEmpty()
+                    || response.getItemsToGive().isIncompatible()) {
+                operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                        serverName, expectedItemId, requestCount, false, "INCOMPATIBLE");
+                debugTake("rejectResponse", serverName, slot, expectedItemId, requestCount,
+                        requestId, response, null, null);
+                return TakeResult.fail("不兼容物品禁止操作");
+            }
             operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
                     serverName, expectedItemId, requestCount, true, null);
             cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
@@ -253,9 +268,32 @@ public class ExchangeService {
         }
 
         try {
+            LocalItemStore.ItemRecord before = localItemStore.getItem(request.getSlot());
+            debugTake("incoming", "local", request.getSlot(), request.getExpectedItemId(),
+                    request.getRequestCount(), request.getRequestId(), null, before, null);
+            if (before == null || before.item() == null || before.item().isEmpty()) {
+                operationLogger.log(request.getRequestId(), OperationType.TAKE,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", request.getExpectedItemId(), request.getRequestCount(),
+                        false, "ITEM_NOT_FOUND");
+                return new TakeItemResponse(false, request.getSlot(), null,
+                        "ITEM_NOT_FOUND", localItemStore.getLastModifiedTimestamp(), 0, null);
+            }
+            if (before.item().isIncompatible()) {
+                debugTake("rejectIncompatible", "local", request.getSlot(), request.getExpectedItemId(),
+                        request.getRequestCount(), request.getRequestId(), null, before, null);
+                operationLogger.log(request.getRequestId(), OperationType.TAKE,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", request.getExpectedItemId(), request.getRequestCount(),
+                        false, "INCOMPATIBLE");
+                return new TakeItemResponse(false, request.getSlot(), before.item(),
+                        "INCOMPATIBLE", localItemStore.getLastModifiedTimestamp(), before.version(), null);
+            }
             LocalItemStore.TakeResult result = localItemStore.takeItem(
                     request.getSlot(), request.getExpectedItemId(),
                     request.getExpectedVersion(), request.getRequestCount());
+            debugTake("storeResult", "local", request.getSlot(), request.getExpectedItemId(),
+                    request.getRequestCount(), request.getRequestId(), null, before, result);
 
             if (result.isSuccess()) {
                 operationLogger.log(request.getRequestId(), OperationType.TAKE,
@@ -289,6 +327,39 @@ public class ExchangeService {
             return new TakeItemResponse(false, request.getSlot(), null,
                     "INTERNAL_ERROR: " + e.getMessage(), 0, 0, null);
         }
+    }
+
+    private void debugTake(String stage, String serverName, int slot, String expectedItemId,
+                           int requestCount, String requestId, TakeItemResponse response,
+                           LocalItemStore.ItemRecord existing, LocalItemStore.TakeResult result) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || core.getApi() == null || core.getApi().getLogger() == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("[Exchange|Debug][TAKE][").append(stage).append("] ")
+                .append("server=").append(serverName)
+                .append(" slot=").append(slot)
+                .append(" expectedItem=").append(expectedItemId)
+                .append(" count=").append(requestCount)
+                .append(" reqId=").append(requestId);
+        if (existing != null) {
+            sb.append(" existing=").append(describeRecord(existing));
+        }
+        if (response != null) {
+            sb.append(" responseSuccess=").append(response.isSuccess())
+                    .append(" failReason=").append(response.getFailReason())
+                    .append(" current=").append(describeItem(response.getCurrentItem()))
+                    .append(" give=").append(describeItem(response.getItemsToGive()))
+                    .append(" newVersion=").append(response.getNewVersion());
+        }
+        if (result != null) {
+            sb.append(" resultSuccess=").append(result.isSuccess())
+                    .append(" failReason=").append(result.getFailReason())
+                    .append(" taken=").append(describeItem(result.getItem()))
+                    .append(" newVersion=").append(result.getNewVersion());
+        }
+        core.getApi().getLogger().info(sb.toString());
     }
 
     private void debugPut(String stage, PutItemRequest request, NeutralItem item,

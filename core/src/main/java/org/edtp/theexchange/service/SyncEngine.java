@@ -1,6 +1,7 @@
 package org.edtp.theexchange.service;
 
 import org.edtp.theexchange.TheExchangeCore;
+import org.edtp.theexchange.compat.CompatibilityChecker;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.network.Connection;
 import org.edtp.theexchange.network.NetworkManager;
@@ -19,10 +20,13 @@ public class SyncEngine {
 
     private final NetworkManager networkManager;
     private final CacheManager cacheManager;
+    private final CompatibilityChecker compatibilityChecker;
 
-    public SyncEngine(NetworkManager networkManager, CacheManager cacheManager) {
+    public SyncEngine(NetworkManager networkManager, CacheManager cacheManager,
+                      CompatibilityChecker compatibilityChecker) {
         this.networkManager = networkManager;
         this.cacheManager = cacheManager;
+        this.compatibilityChecker = compatibilityChecker;
     }
 
     public CompletableFuture<SyncResult> syncIfNeededAsync(String serverName) {
@@ -88,6 +92,9 @@ public class SyncEngine {
                 var item = items.get(i);
                 if (item != null && item.getVersion() <= 0) {
                     item.setVersion(i + 1);
+                }
+                if (item != null && compatibilityChecker != null) {
+                    compatibilityChecker.checkAndMark(item);
                 }
             }
         }
