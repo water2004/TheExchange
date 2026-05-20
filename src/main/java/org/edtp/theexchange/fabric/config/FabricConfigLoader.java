@@ -115,6 +115,12 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
         return configData.cache.localInventoryCacheCapacity;
     }
 
+    @Override
+    public int getRemoteInventoryCacheCapacity() {
+        if (configData == null) loadConfig();
+        return configData.cache.remoteInventoryCacheCapacity;
+    }
+
     public int getLogRetentionDays() {
         if (configData == null) loadConfig();
         return configData.logging.retentionDays;
@@ -134,6 +140,8 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
         data.network.requestTimeoutSeconds = 5;
         data.cache = new CacheConfig();
         data.cache.offlineRetentionHours = 24;
+        data.cache.localInventoryCacheCapacity = 32;
+        data.cache.remoteInventoryCacheCapacity = 64;
         data.logging = new LoggingConfig();
         data.logging.retentionDays = 30;
         data.logging.cleanupIntervalHours = 1;
@@ -184,6 +192,8 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
         public int offlineRetentionHours;
         @SerializedName("local_inventory_cache_capacity")
         public int localInventoryCacheCapacity;
+        @SerializedName("remote_inventory_cache_capacity")
+        public int remoteInventoryCacheCapacity;
     }
 
     public static class LoggingConfig {

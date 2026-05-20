@@ -241,7 +241,8 @@ public class TheExchangeCore {
         serverRegistry = new ServerRegistry(databaseManager, networkManager);
         serverRegistry.loadFromDatabase();
 
-        cacheManager = new CacheManager(remoteCacheStore);
+        cacheManager = new CacheManager(remoteCacheStore,
+                api.getConfigLoader().getRemoteInventoryCacheCapacity());
 
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(
                 api.getItemSerializer());
@@ -314,6 +315,7 @@ public class TheExchangeCore {
                 if (heartbeatManager != null) heartbeatManager.stop();
                 if (networkManager != null) networkManager.shutdown();
                 if (localInventoryCacheManager != null) localInventoryCacheManager.flushAll();
+                if (cacheManager != null) cacheManager.shutdown();
                 if (databaseManager != null) databaseManager.close();
 
                 instance = null;

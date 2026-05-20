@@ -34,9 +34,20 @@ public class CachedInventory {
 
     public NeutralItem getItem(int slot) {
         if (slot >= 0 && slot < items.size()) {
-            return items.get(slot);
+            NeutralItem item = items.get(slot);
+            return item != null ? item.copy() : null;
         }
         return null;
+    }
+
+    public CachedInventory copy() {
+        List<NeutralItem> copied = new ArrayList<>();
+        if (items != null) {
+            for (NeutralItem item : items) {
+                copied.add(item != null ? item.copy() : null);
+            }
+        }
+        return new CachedInventory(copied, totalSlots, syncedAt, remoteTimestamp);
     }
 
     public boolean isStale(long expirationMillis) {

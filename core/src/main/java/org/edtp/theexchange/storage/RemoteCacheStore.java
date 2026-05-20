@@ -87,21 +87,6 @@ public class RemoteCacheStore {
         }
     }
 
-    public void updateSlot(String serverName, int slot, NeutralItem item, long remoteTimestamp) {
-        updateSlot(serverName, InventoryScope.server(), slot, item, remoteTimestamp);
-    }
-
-    public void updateSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, long remoteTimestamp) {
-        CachedInventory cache = getCache(serverName, scope);
-        if (cache == null) return;
-        List<NeutralItem> items = cache.getItems();
-        while (items.size() <= slot) {
-            items.add(null);
-        }
-        items.set(slot, item);
-        putCache(serverName, scope, items, remoteTimestamp);
-    }
-
     public void cleanupExpired(long retentionMillis) {
         long cutoff = System.currentTimeMillis() - retentionMillis;
         String sql = "DELETE FROM remote_cache WHERE synced_at < ?";

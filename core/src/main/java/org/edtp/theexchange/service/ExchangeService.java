@@ -44,19 +44,15 @@ public class ExchangeService {
     }
 
     public boolean sameStackKind(NeutralItem a, NeutralItem b) {
-        return itemSerializer != null ? itemSerializer.sameStackKind(a, b)
-                : a != null && a.sameStackKind(b);
+        return itemSerializer.sameStackKind(a, b);
     }
 
     public int getMaxStackSize(NeutralItem item) {
-        return itemSerializer != null ? itemSerializer.getMaxStackSize(item) : 64;
+        return itemSerializer.getMaxStackSize(item);
     }
 
     public CompletableFuture<PutResult> putItemAsync(String serverName, int slot, String playerUuid,
                                                      String playerName, Object itemStack) {
-        if (itemSerializer == null) {
-            return CompletableFuture.completedFuture(PutResult.fail("物品序列化器未初始化"));
-        }
         NeutralItem item = itemSerializer.serialize(itemStack);
         return putNeutralItemAsync(serverName, slot, playerUuid, playerName, item);
     }

@@ -78,8 +78,8 @@ public final class LocalInventoryCacheManager {
     public LocalItemStore.PutResult put(InventoryScope scope, int slot, NeutralItem item, int expectedVersion, String addedBy) {
         LocalInventoryCache cache = getOrLoad(scope);
         LocalInventoryCache.Result result = cache.put(slot, item, expectedVersion, addedBy,
-                itemSerializer != null ? itemSerializer::sameStackKind : (a, b) -> a != null && a.sameStackKind(b),
-                itemSerializer != null ? itemSerializer::getMaxStackSize : ignored -> 64);
+                itemSerializer::sameStackKind,
+                itemSerializer::getMaxStackSize);
         if (!result.success()) {
             return LocalItemStore.PutResult.fail(result.failReason());
         }

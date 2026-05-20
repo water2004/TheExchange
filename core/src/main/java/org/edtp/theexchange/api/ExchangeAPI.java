@@ -50,9 +50,10 @@ public interface ExchangeAPI {
         String getDatabasePath();
 
         /** Maximum number of authoritative local inventory scopes to keep in memory. */
-        default int getLocalInventoryCacheCapacity() {
-            return 32;
-        }
+        int getLocalInventoryCacheCapacity();
+
+        /** Maximum number of remote inventory snapshots to keep in memory. */
+        int getRemoteInventoryCacheCapacity();
 
         /** Load the main configuration as a JSON string */
         String loadConfig();
@@ -61,9 +62,7 @@ public interface ExchangeAPI {
         void saveConfig(String json);
 
         /** Loader-neutral parsed runtime config. */
-        default RuntimeConfig getRuntimeConfig() {
-            return new RuntimeConfig("Default Server", 25566, "changeme", List.of());
-        }
+        RuntimeConfig getRuntimeConfig();
     }
 
     class RuntimeConfig {

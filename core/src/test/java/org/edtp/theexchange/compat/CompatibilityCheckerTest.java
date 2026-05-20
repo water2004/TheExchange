@@ -19,6 +19,21 @@ class CompatibilityCheckerTest {
             public Object deserialize(NeutralItem neutralItem) {
                 return new Object();
             }
+
+            @Override
+            public boolean canDeserialize(NeutralItem item) {
+                return true;
+            }
+
+            @Override
+            public boolean sameStackKind(NeutralItem a, NeutralItem b) {
+                return false;
+            }
+
+            @Override
+            public int getMaxStackSize(NeutralItem item) {
+                return 64;
+            }
         };
 
         CompatibilityChecker checker = new CompatibilityChecker(serializer);

@@ -25,26 +25,16 @@ public interface ItemSerializer {
      * Return whether this runtime can materialize the neutral item as its native ItemStack.
      * Implementations must not mutate the item.
      */
-    default boolean canDeserialize(NeutralItem item) {
-        return item != null && !item.isEmpty() && deserialize(item) != null;
-    }
+    boolean canDeserialize(NeutralItem item);
 
     /**
      * Compare two neutral items by stack-kind identity.
      * Count, server source version and display-only names are intentionally ignored.
      */
-    default boolean sameStackKind(NeutralItem a, NeutralItem b) {
-        if (a == null || b == null || a.isEmpty() || b.isEmpty()) {
-            return false;
-        }
-        return a.sameStackKind(b);
-    }
+    boolean sameStackKind(NeutralItem a, NeutralItem b);
 
     /**
      * Return the native max stack size for the given item.
-     * Core falls back to 64 when a loader does not override this.
      */
-    default int getMaxStackSize(NeutralItem item) {
-        return 64;
-    }
+    int getMaxStackSize(NeutralItem item);
 }

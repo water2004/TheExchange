@@ -125,7 +125,7 @@ public class FabricItemSerializer implements ItemSerializer {
             return false;
         }
         return Objects.equals(a.getItemId(), b.getItemId())
-                && Arrays.equals(canonicalStackKindData(a), canonicalStackKindData(b));
+                && Arrays.equals(normalizeExtra(a.getExtraData()), normalizeExtra(b.getExtraData()));
     }
 
     @Override
@@ -134,7 +134,7 @@ public class FabricItemSerializer implements ItemSerializer {
         if (stackObj instanceof ItemStack stack) {
             return stack.getMaxStackSize();
         }
-        return ItemSerializer.super.getMaxStackSize(item);
+        throw new IllegalArgumentException("Cannot resolve max stack size for " + item.getItemId());
     }
 
     private byte[] writeCanonical(CompoundTag tag) throws IOException {
@@ -145,21 +145,6 @@ public class FabricItemSerializer implements ItemSerializer {
         writeCompoundSorted(tag, out);
         out.flush();
         return bos.toByteArray();
-    }
-
-    private byte[] canonicalStackKindData(NeutralItem item) {
-        if (item == null || item.getExtraData() == null || item.getExtraData().length == 0) {
-            return new byte[0];
-        }
-        try {
-            ByteArrayInputStream bis = new ByteArrayInputStream(item.getExtraData());
-            DataInputStream dis = new DataInputStream(bis);
-            CompoundTag tag = NbtIo.read(dis);
-            tag.remove("count");
-            return writeCanonical(tag);
-        } catch (Exception e) {
-            return normalizeExtra(item.getExtraData());
-        }
     }
 
     private static byte[] normalizeExtra(byte[] data) {
