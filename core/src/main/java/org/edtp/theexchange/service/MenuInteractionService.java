@@ -6,9 +6,6 @@ import org.edtp.theexchange.model.MenuClickType;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.PlayerExchangeContext;
 
-import java.util.Arrays;
-import java.util.Objects;
-
 public class MenuInteractionService {
     private static final int EXCHANGE_SLOTS = 54;
     private final ExchangeService exchangeService;
@@ -109,7 +106,7 @@ public class MenuInteractionService {
         for (int i = 0; i < EXCHANGE_SLOTS; i++) {
             NeutralItem current = itemAt(input, i);
             if (!isEmpty(current) && sameStackKind(current, stack)
-                    && current.getCount() + stack.getCount() <= 64) {
+                    && current.getCount() + stack.getCount() <= exchangeService.getMaxStackSize(current)) {
                 return i;
             }
         }
@@ -125,9 +122,7 @@ public class MenuInteractionService {
     }
 
     private boolean sameStackKind(NeutralItem a, NeutralItem b) {
-        if (a == null || b == null) return false;
-        return Objects.equals(a.getItemId(), b.getItemId())
-                && Arrays.equals(a.getExtraData(), b.getExtraData());
+        return exchangeService != null && exchangeService.sameStackKind(a, b);
     }
 
     private boolean touchesIncompatibleItem(ExchangeInteraction input) {

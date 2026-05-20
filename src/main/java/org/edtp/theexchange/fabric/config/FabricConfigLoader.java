@@ -109,6 +109,12 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
         return configData.cache.offlineRetentionHours;
     }
 
+    @Override
+    public int getLocalInventoryCacheCapacity() {
+        if (configData == null) loadConfig();
+        return configData.cache.localInventoryCacheCapacity;
+    }
+
     public int getLogRetentionDays() {
         if (configData == null) loadConfig();
         return configData.logging.retentionDays;
@@ -176,6 +182,8 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
     public static class CacheConfig {
         @SerializedName("offline_retention_hours")
         public int offlineRetentionHours;
+        @SerializedName("local_inventory_cache_capacity")
+        public int localInventoryCacheCapacity;
     }
 
     public static class LoggingConfig {

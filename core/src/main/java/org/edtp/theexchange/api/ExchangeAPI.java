@@ -49,6 +49,11 @@ public interface ExchangeAPI {
         /** Get the path to the SQLite database file */
         String getDatabasePath();
 
+        /** Maximum number of authoritative local inventory scopes to keep in memory. */
+        default int getLocalInventoryCacheCapacity() {
+            return 32;
+        }
+
         /** Load the main configuration as a JSON string */
         String loadConfig();
 

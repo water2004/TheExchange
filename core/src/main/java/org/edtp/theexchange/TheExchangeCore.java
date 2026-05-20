@@ -33,6 +33,7 @@ public class TheExchangeCore {
     private RemoteCacheStore remoteCacheStore;
     private OperationLogger operationLogger;
     private ConfigStore configStore;
+    private LocalInventoryCacheManager localInventoryCacheManager;
 
     // Network
     private NetworkManager networkManager;
@@ -66,6 +67,7 @@ public class TheExchangeCore {
     public RemoteCacheStore getRemoteCacheStore() { return remoteCacheStore; }
     public OperationLogger getOperationLogger() { return operationLogger; }
     public ConfigStore getConfigStore() { return configStore; }
+    public LocalInventoryCacheManager getLocalInventoryCacheManager() { return localInventoryCacheManager; }
     public NetworkManager getNetworkManager() { return networkManager; }
     public ServerRegistry getServerRegistry() { return serverRegistry; }
     public CacheManager getCacheManager() { return cacheManager; }
@@ -202,6 +204,9 @@ public class TheExchangeCore {
         remoteCacheStore = new RemoteCacheStore(databaseManager);
         operationLogger = new OperationLogger(databaseManager);
         configStore = new ConfigStore(databaseManager);
+        localInventoryCacheManager = new LocalInventoryCacheManager(
+                localItemStore, api.getItemSerializer(), api.getConfigLoader().getLocalInventoryCacheCapacity());
+        localItemStore.setCacheManager(localInventoryCacheManager);
 
         // 3. TLS
         String configDir = api.getConfigLoader().getConfigDir();
@@ -308,6 +313,7 @@ public class TheExchangeCore {
 
                 if (heartbeatManager != null) heartbeatManager.stop();
                 if (networkManager != null) networkManager.shutdown();
+                if (localInventoryCacheManager != null) localInventoryCacheManager.flushAll();
                 if (databaseManager != null) databaseManager.close();
 
                 instance = null;

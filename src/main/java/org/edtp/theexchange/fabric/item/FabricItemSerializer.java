@@ -5,17 +5,25 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.util.BinaryIO;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * Fabric-specific ItemStack ↔ NeutralItem serialization.
@@ -35,11 +43,7 @@ public class FabricItemSerializer implements ItemSerializer {
         try {
             CompoundTag tag = (CompoundTag) ItemStack.CODEC.encodeStart(NbtOps.INSTANCE, stack)
                     .getOrThrow();
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(bos);
-            NbtIo.write(tag, dos);
-            dos.flush();
-            extraData = bos.toByteArray();
+            extraData = writeCanonical(tag);
         } catch (Exception e) {
             extraData = new byte[0];
         }
@@ -83,5 +87,56 @@ public class FabricItemSerializer implements ItemSerializer {
         ItemStack barrier = new ItemStack(Items.BARRIER, 1);
         barrier.set(DataComponents.CUSTOM_NAME, Component.literal("不兼容 - " + item.getItemId()));
         return barrier;
+    }
+
+    @Override
+    public boolean sameStackKind(NeutralItem a, NeutralItem b) {
+        if (a == null || b == null || a.isEmpty() || b.isEmpty()) {
+            return false;
+        }
+        return Objects.equals(a.getItemId(), b.getItemId())
+                && Arrays.equals(a.getExtraData(), b.getExtraData());
+    }
+
+    @Override
+    public int getMaxStackSize(NeutralItem item) {
+        Object stackObj = deserialize(item);
+        if (stackObj instanceof ItemStack stack) {
+            return stack.getMaxStackSize();
+        }
+        return ItemSerializer.super.getMaxStackSize(item);
+    }
+
+    private byte[] writeCanonical(CompoundTag tag) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bos);
+        out.writeByte(10);
+        BinaryIO.writeString(out, "");
+        writeCompoundSorted(tag, out);
+        out.flush();
+        return bos.toByteArray();
+    }
+
+    private void writeCompoundSorted(CompoundTag tag, DataOutputStream out) throws IOException {
+        List<String> keys = new ArrayList<>(tag.keySet());
+        keys.sort(Comparator.naturalOrder());
+        for (String key : keys) {
+            Tag child = tag.get(key);
+            if (child == null) continue;
+            out.writeByte(child.getId());
+            if (child.getId() != 0) {
+                BinaryIO.writeString(out, key);
+                writeTag(child, out);
+            }
+        }
+        out.writeByte(0);
+    }
+
+    private void writeTag(Tag tag, DataOutputStream out) throws IOException {
+        if (tag instanceof CompoundTag compound) {
+            writeCompoundSorted(compound, out);
+            return;
+        }
+        tag.write(out);
     }
 }

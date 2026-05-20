@@ -43,8 +43,20 @@ public class ExchangeService {
         this.itemSerializer = itemSerializer;
     }
 
+    public boolean sameStackKind(NeutralItem a, NeutralItem b) {
+        return itemSerializer != null ? itemSerializer.sameStackKind(a, b)
+                : a != null && a.sameStackKind(b);
+    }
+
+    public int getMaxStackSize(NeutralItem item) {
+        return itemSerializer != null ? itemSerializer.getMaxStackSize(item) : 64;
+    }
+
     public CompletableFuture<PutResult> putItemAsync(String serverName, int slot, String playerUuid,
                                                      String playerName, Object itemStack) {
+        if (itemSerializer == null) {
+            return CompletableFuture.completedFuture(PutResult.fail("物品序列化器未初始化"));
+        }
         NeutralItem item = itemSerializer.serialize(itemStack);
         return putNeutralItemAsync(serverName, slot, playerUuid, playerName, item);
     }
@@ -189,10 +201,14 @@ public class ExchangeService {
 
         try {
             NeutralItem item = request.getItem();
+            LocalItemStore.ItemRecord existingRecord = localItemStore.getItem(request.getSlot());
+            debugPut("incoming", request, item, existingRecord, null, null);
             compatibilityChecker.checkAndMark(item);
+            debugPut("afterCompat", request, item, existingRecord, null, null);
 
             LocalItemStore.PutResult result = localItemStore.putItem(
                     request.getSlot(), item, request.getExpectedVersion(), request.getPlayerUuid());
+            debugPut("storeResult", request, item, existingRecord, result, null);
 
             if (result.isSuccess()) {
                 operationLogger.log(request.getRequestId(), OperationType.PUT,
@@ -216,6 +232,7 @@ public class ExchangeService {
                     result.getFailReason(), localItemStore.getLastModifiedTimestamp(),
                     current != null ? current.version() : 0);
         } catch (Exception e) {
+            debugPut("exception", request, request.getItem(), null, null, e);
             operationLogger.log(request.getRequestId(), OperationType.PUT,
                     request.getPlayerUuid(), request.getPlayerName(),
                     "local", request.getItem().getItemId(), request.getItem().getCount(),
@@ -272,6 +289,57 @@ public class ExchangeService {
             return new TakeItemResponse(false, request.getSlot(), null,
                     "INTERNAL_ERROR: " + e.getMessage(), 0, 0, null);
         }
+    }
+
+    private void debugPut(String stage, PutItemRequest request, NeutralItem item,
+                          LocalItemStore.ItemRecord existing,
+                          LocalItemStore.PutResult result, Throwable error) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || core.getApi() == null || core.getApi().getLogger() == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("[Exchange|Debug][PUT][").append(stage).append("] ")
+                .append("slot=").append(request.getSlot())
+                .append(" expectedVersion=").append(request.getExpectedVersion())
+                .append(" reqId=").append(request.getRequestId())
+                .append(" player=").append(request.getPlayerName())
+                .append(" item=").append(describeItem(item));
+        if (existing != null) {
+            sb.append(" existing=").append(describeRecord(existing));
+            sb.append(" sameKind=").append(existing.item() != null && item != null
+                    && sameStackKind(existing.item(), item));
+        }
+        if (result != null) {
+            sb.append(" resultSuccess=").append(result.isSuccess())
+                    .append(" failReason=").append(result.getFailReason())
+                    .append(" newVersion=").append(result.getNewVersion());
+        }
+        if (error != null) {
+            sb.append(" error=").append(error.getClass().getSimpleName())
+                    .append(": ").append(error.getMessage());
+        }
+        core.getApi().getLogger().info(sb.toString());
+    }
+
+    private String describeRecord(LocalItemStore.ItemRecord record) {
+        if (record == null) return "null";
+        return "slot=" + record.slot()
+                + ",version=" + record.version()
+                + ",item=" + describeItem(record.item());
+    }
+
+    private String describeItem(NeutralItem item) {
+        if (item == null) return "null";
+        byte[] extra = item.getExtraData();
+        return "{id=" + item.getItemId()
+                + ",count=" + item.getCount()
+                + ",incompatible=" + item.isIncompatible()
+                + ",extraLen=" + (extra == null ? -1 : extra.length)
+                + ",extraHash=" + java.util.Arrays.hashCode(extra)
+                + ",source=" + item.getSourceVersion()
+                + ",version=" + item.getVersion()
+                + "}";
     }
 
     // ========== Message routing ==========

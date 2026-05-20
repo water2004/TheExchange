@@ -12,6 +12,8 @@ import java.util.Objects;
  */
 public class NeutralItem {
 
+    private static final byte[] EMPTY_BYTES = new byte[0];
+
     private String itemId;
     private int count;
     private String displayName;
@@ -55,6 +57,23 @@ public class NeutralItem {
 
     public boolean isEmpty() {
         return itemId == null || count <= 0;
+    }
+
+    public NeutralItem copy() {
+        byte[] extraCopy = extraData != null ? Arrays.copyOf(extraData, extraData.length) : null;
+        NeutralItem copy = new NeutralItem(itemId, count, displayName, extraCopy, incompatible, sourceVersion);
+        copy.setVersion(version);
+        return copy;
+    }
+
+    public boolean sameStackKind(NeutralItem other) {
+        if (other == null) return false;
+        return Objects.equals(itemId, other.itemId)
+                && Arrays.equals(normalizeExtra(extraData), normalizeExtra(other.extraData));
+    }
+
+    private static byte[] normalizeExtra(byte[] data) {
+        return data == null || data.length == 0 ? EMPTY_BYTES : data;
     }
 
     public void writeTo(DataOutput out) throws IOException {
