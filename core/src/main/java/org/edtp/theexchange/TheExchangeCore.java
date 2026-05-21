@@ -124,16 +124,39 @@ public class TheExchangeCore {
     }
 
     public CompletableFuture<ExchangeViewState> openRemoteViewAsync(String serverName) {
-        return submit(() -> remoteFromCache(serverName, false));
+        return submit(() -> {
+            boolean online = networkManager != null
+                    && networkManager.getConnection(serverName) != null
+                    && networkManager.getConnection(serverName).isRunning();
+            if (!online || syncEngine == null) {
+                return CompletableFuture.completedFuture(remoteFromCache(serverName, online));
+            }
+            return syncEngine.refreshChangedSlotsAsync(serverName)
+                    .handle((ignored, error) -> null)
+                    .thenCompose(ignored -> submit(() -> remoteFromCache(serverName, true)));
+        }).thenCompose(future -> future);
+    }
+
+    public CompletableFuture<ExchangeViewState> openRemoteCachedViewAsync(String serverName) {
+        return submit(() -> {
+            boolean online = networkManager != null
+                    && networkManager.getConnection(serverName) != null
+                    && networkManager.getConnection(serverName).isRunning();
+            return remoteFromCache(serverName, online);
+        });
     }
 
     public CompletableFuture<Void> refreshRemoteViewAsync(String serverName) {
-        return submit(() -> {
+        CompletableFuture<CompletableFuture<Void>> future = submit(() -> {
+            if (syncEngine != null) {
+                return syncEngine.refreshChangedSlotsAsync(serverName);
+            }
             if (cacheManager != null) {
                 cacheManager.getCache(serverName);
             }
-            return null;
+            return CompletableFuture.completedFuture(null);
         });
+        return future.thenCompose(inner -> inner);
     }
 
     public CompletableFuture<Void> applyLocalSnapshotAsync(java.util.List<NeutralItem> before,

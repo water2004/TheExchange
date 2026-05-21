@@ -42,6 +42,9 @@ public interface ExchangeAPI {
     /** Refresh open exchange views after remote inventory changes */
     void refreshRemoteInventoryView(String serverName);
 
+    /** Redraw open exchange views from already-updated memory cache. */
+    void redrawRemoteInventoryView(String serverName);
+
     interface ConfigLoader {
         /** Get the path to the mod's config directory */
         String getConfigDir();

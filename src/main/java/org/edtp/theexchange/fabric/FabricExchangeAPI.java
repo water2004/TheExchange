@@ -79,4 +79,16 @@ public class FabricExchangeAPI implements ExchangeAPI {
             }
         });
     }
+
+    @Override
+    public void redrawRemoteInventoryView(String serverName) {
+        server.execute(() -> {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                if (player.containerMenu instanceof RefreshableExchangeView menu
+                        && menu.isViewingServer(serverName)) {
+                    menu.refreshFromMemory();
+                }
+            }
+        });
+    }
 }

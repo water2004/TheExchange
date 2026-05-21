@@ -55,6 +55,28 @@ public class CacheManager {
         return cache != null ? cache.getVersion(slot) : 0;
     }
 
+    public Map<Integer, Integer> getVersions(String serverName, InventoryScope scope) {
+        CachedInventory cache = getOrLoad(RemoteScopeKey.of(serverName, scope));
+        return cache != null ? cache.versionMap() : Map.of();
+    }
+
+    public List<Integer> changedSlots(String serverName, InventoryScope scope, Map<Integer, Integer> remoteVersions) {
+        CachedInventory cache = getOrLoad(RemoteScopeKey.of(serverName, scope));
+        Map<Integer, Integer> versions = remoteVersions != null ? remoteVersions : Map.of();
+        return cache != null ? cache.changedSlots(versions) : new ArrayList<>(versions.keySet());
+    }
+
+    public void updateCacheSlots(String serverName, InventoryScope scope,
+                                 List<org.edtp.theexchange.network.protocol.messages.SlotStateResponse> slots) {
+        if (slots == null || slots.isEmpty()) {
+            return;
+        }
+        for (org.edtp.theexchange.network.protocol.messages.SlotStateResponse slot : slots) {
+            if (slot == null) continue;
+            updateCacheSlot(serverName, scope, slot.getSlot(), slot.getItem(), slot.getVersion());
+        }
+    }
+
     public void loadScope(String serverName, InventoryScope scope) {
         RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
         lock.lock();
@@ -164,6 +186,7 @@ public class CacheManager {
         }
         CachedInventory loaded = new CachedInventory(key.scope());
         loaded.markLoaded(convertSnapshots(snapshots), System.currentTimeMillis());
+        List<Map.Entry<RemoteScopeKey, CachedInventory>> evicted;
         lock.lock();
         try {
             CachedInventory existing = caches.get(key);
@@ -171,11 +194,14 @@ public class CacheManager {
                 return existing;
             }
             caches.put(key, loaded);
-            evictIfNeededLocked();
-            return loaded;
+            evicted = evictIfNeededLocked();
         } finally {
             lock.unlock();
         }
+        for (Map.Entry<RemoteScopeKey, CachedInventory> entry : evicted) {
+            flush(entry.getKey(), entry.getValue());
+        }
+        return loaded;
     }
 
     private CachedInventory getCached(RemoteScopeKey key) {

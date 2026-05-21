@@ -93,6 +93,21 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         loadViewAsync();
     }
 
+    @Override
+    public void refreshFromMemory() {
+        if (refreshing) return;
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) {
+            return;
+        }
+        core.openRemoteCachedViewAsync(serverName).whenComplete((state, error) ->
+                core.getApi().runOnMainThread(() -> {
+                    if (error == null && state != null && isViewingServer(state.getServerName())) {
+                        applyViewState(state);
+                    }
+                }));
+    }
+
     private void loadViewAsync() {
         if (refreshing) return;
         refreshing = true;
@@ -247,7 +262,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                                 ? "放入失败: " + rootMessage(error)
                                 : result.getFailReason() != null ? result.getFailReason() : "放入失败"));
                     }
-                    refreshFromCache();
+                    refreshFromMemory();
                 }));
     }
 
@@ -306,11 +321,11 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                         player.sendSystemMessage(Component.literal(error != null
                                 ? "取出失败: " + rootMessage(error)
                                 : result.getFailReason() != null ? result.getFailReason() : "取出失败"));
-                        refreshFromCache();
+                        refreshFromMemory();
                         return;
                     }
                     applyTakenItem(result, buttonNum, containerInput, player);
-                    refreshFromCache();
+                    refreshFromMemory();
                 }));
     }
 

@@ -77,7 +77,7 @@ public class FrameDecoder {
         }
         headerRead = false;
 
-        Frame frame = new Frame(expectedType, sequence, timestamp, payload.length > 0 ? payload : null);
+        Frame frame = new Frame(expectedType, sequence, timestamp, payload);
         return frame;
     }
 

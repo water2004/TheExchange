@@ -4,4 +4,6 @@ public interface RefreshableExchangeView {
     boolean isViewingServer(String serverName);
 
     void refreshFromCache();
+
+    void refreshFromMemory();
 }

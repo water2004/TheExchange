@@ -11,7 +11,9 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class MessageCodec {
 
@@ -31,6 +33,10 @@ public final class MessageCodec {
             else if (msg instanceof QuerySlotVersionResponse m) encodeQuerySlotVersionResponse(out, m);
             else if (msg instanceof QuerySlotStateRequest m) encodeQuerySlotStateRequest(out, m);
             else if (msg instanceof SlotStateResponse m) encodeSlotStateResponse(out, m);
+            else if (msg instanceof QuerySlotVersionsRequest m) encodeQuerySlotVersionsRequest(out, m);
+            else if (msg instanceof SlotVersionsResponse m) encodeSlotVersionsResponse(out, m);
+            else if (msg instanceof QuerySlotsRequest m) encodeQuerySlotsRequest(out, m);
+            else if (msg instanceof SlotsStateResponse m) encodeSlotsStateResponse(out, m);
             else if (msg instanceof PutItemRequest m) encodePutItemRequest(out, m);
             else if (msg instanceof PutItemResponse m) encodePutItemResponse(out, m);
             else if (msg instanceof TakeItemRequest m) encodeTakeItemRequest(out, m);
@@ -46,7 +52,7 @@ public final class MessageCodec {
     }
 
     public static Object decodeMessage(FrameType type, byte[] payload) {
-        if (payload == null || payload.length == 0) return null;
+        if (payload == null) return null;
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload))) {
             return switch (type) {
                 case AUTH_REQUEST -> decodeAuthRequest(in);
@@ -60,6 +66,10 @@ public final class MessageCodec {
                 case SLOT_VERSION_RESPONSE -> decodeQuerySlotVersionResponse(in);
                 case QUERY_SLOT_STATE -> decodeQuerySlotStateRequest(in);
                 case SLOT_STATE_RESPONSE -> decodeSlotStateResponse(in);
+                case QUERY_SLOT_VERSIONS -> decodeQuerySlotVersionsRequest(in);
+                case SLOT_VERSIONS_RESPONSE -> decodeSlotVersionsResponse(in);
+                case QUERY_SLOTS -> decodeQuerySlotsRequest(in);
+                case SLOTS_STATE_RESPONSE -> decodeSlotsStateResponse(in);
                 case PUT_ITEM -> decodePutItemRequest(in);
                 case PUT_ITEM_RESPONSE -> decodePutItemResponse(in);
                 case TAKE_ITEM -> decodeTakeItemRequest(in);
@@ -138,6 +148,40 @@ public final class MessageCodec {
         out.writeInt(m.getVersion());
     }
 
+    private static void encodeQuerySlotVersionsRequest(DataOutputStream out, QuerySlotVersionsRequest m) {
+    }
+
+    private static void encodeSlotVersionsResponse(DataOutputStream out, SlotVersionsResponse m) throws IOException {
+        Map<Integer, Integer> versions = m.getVersions();
+        out.writeInt(versions != null ? versions.size() : 0);
+        if (versions != null) {
+            for (Map.Entry<Integer, Integer> entry : versions.entrySet()) {
+                out.writeInt(entry.getKey());
+                out.writeInt(entry.getValue());
+            }
+        }
+    }
+
+    private static void encodeQuerySlotsRequest(DataOutputStream out, QuerySlotsRequest m) throws IOException {
+        List<Integer> slots = m.getSlots();
+        out.writeInt(slots != null ? slots.size() : 0);
+        if (slots != null) {
+            for (int slot : slots) {
+                out.writeInt(slot);
+            }
+        }
+    }
+
+    private static void encodeSlotsStateResponse(DataOutputStream out, SlotsStateResponse m) throws IOException {
+        List<SlotStateResponse> slots = m.getSlots();
+        out.writeInt(slots != null ? slots.size() : 0);
+        if (slots != null) {
+            for (SlotStateResponse slot : slots) {
+                encodeSlotStateResponse(out, slot);
+            }
+        }
+    }
+
     private static void encodePutItemRequest(DataOutputStream out, PutItemRequest m) throws IOException {
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getItem());
@@ -145,6 +189,7 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
+        out.writeInt(m.getRemoteVersion());
     }
 
     private static void encodePutItemResponse(DataOutputStream out, PutItemResponse m) throws IOException {
@@ -154,6 +199,7 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getFailReason());
         out.writeLong(m.getNewTimestamp());
         out.writeInt(m.getNewVersion());
+        out.writeInt(m.getRemoteVersion());
     }
 
     private static void encodeTakeItemRequest(DataOutputStream out, TakeItemRequest m) throws IOException {
@@ -164,6 +210,7 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
+        out.writeInt(m.getRemoteVersion());
     }
 
     private static void encodeTakeItemResponse(DataOutputStream out, TakeItemResponse m) throws IOException {
@@ -173,6 +220,7 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getFailReason());
         out.writeLong(m.getNewTimestamp());
         out.writeInt(m.getNewVersion());
+        out.writeInt(m.getRemoteVersion());
         BinaryIO.writeNullableNeutralItem(out, m.getItemsToGive());
     }
 
@@ -246,6 +294,37 @@ public final class MessageCodec {
         return new SlotStateResponse(in.readInt(), BinaryIO.readNullableNeutralItem(in), in.readInt());
     }
 
+    private static QuerySlotVersionsRequest decodeQuerySlotVersionsRequest(DataInputStream in) {
+        return new QuerySlotVersionsRequest();
+    }
+
+    private static SlotVersionsResponse decodeSlotVersionsResponse(DataInputStream in) throws IOException {
+        int size = in.readInt();
+        Map<Integer, Integer> versions = new LinkedHashMap<>(Math.max(0, size));
+        for (int i = 0; i < size; i++) {
+            versions.put(in.readInt(), in.readInt());
+        }
+        return new SlotVersionsResponse(versions);
+    }
+
+    private static QuerySlotsRequest decodeQuerySlotsRequest(DataInputStream in) throws IOException {
+        int size = in.readInt();
+        List<Integer> slots = new ArrayList<>(Math.max(0, size));
+        for (int i = 0; i < size; i++) {
+            slots.add(in.readInt());
+        }
+        return new QuerySlotsRequest(slots);
+    }
+
+    private static SlotsStateResponse decodeSlotsStateResponse(DataInputStream in) throws IOException {
+        int size = in.readInt();
+        List<SlotStateResponse> slots = new ArrayList<>(Math.max(0, size));
+        for (int i = 0; i < size; i++) {
+            slots.add(decodeSlotStateResponse(in));
+        }
+        return new SlotsStateResponse(slots);
+    }
+
     private static PutItemRequest decodePutItemRequest(DataInputStream in) throws IOException {
         PutItemRequest request = new PutItemRequest();
         request.setSlot(in.readInt());
@@ -254,6 +333,7 @@ public final class MessageCodec {
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));
+        request.setRemoteVersion(in.readInt());
         return request;
     }
 
@@ -265,6 +345,7 @@ public final class MessageCodec {
         response.setFailReason(BinaryIO.readString(in));
         response.setNewTimestamp(in.readLong());
         response.setNewVersion(in.readInt());
+        response.setRemoteVersion(in.readInt());
         return response;
     }
 
@@ -277,6 +358,7 @@ public final class MessageCodec {
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));
+        request.setRemoteVersion(in.readInt());
         return request;
     }
 
@@ -288,6 +370,7 @@ public final class MessageCodec {
         response.setFailReason(BinaryIO.readString(in));
         response.setNewTimestamp(in.readLong());
         response.setNewVersion(in.readInt());
+        response.setRemoteVersion(in.readInt());
         response.setItemsToGive(BinaryIO.readNullableNeutralItem(in));
         return response;
     }

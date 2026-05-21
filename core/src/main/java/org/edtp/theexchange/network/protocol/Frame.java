@@ -38,6 +38,6 @@ public class Frame {
     public void setPayload(byte[] payload) { this.payload = payload; }
 
     public boolean hasPayload() {
-        return payload != null && payload.length > 0;
+        return payload != null;
     }
 }
