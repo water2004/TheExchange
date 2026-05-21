@@ -121,3 +121,6 @@ runs/
 
 # reference file
 ref
+
+# claude code settings
+.claude
