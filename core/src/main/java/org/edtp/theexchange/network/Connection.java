@@ -34,6 +34,7 @@ public class Connection {
     private final SequenceWindow recvWindow = new SequenceWindow();
     private volatile boolean running;
     private volatile boolean authenticated;
+    private volatile boolean inbound;
     private volatile String peerServerName;
     private volatile long lastRecvTime;
     private Thread readThread;
@@ -78,6 +79,14 @@ public class Connection {
 
     public void setAuthenticated(boolean authenticated) {
         this.authenticated = authenticated;
+    }
+
+    public boolean isInbound() {
+        return inbound;
+    }
+
+    public void setInbound(boolean inbound) {
+        this.inbound = inbound;
     }
 
     public String getPeerServerName() {

@@ -8,6 +8,7 @@ import org.edtp.theexchange.network.protocol.messages.*;
 import org.edtp.theexchange.network.tls.TlsContext;
 
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -28,6 +29,7 @@ public class NetworkManager {
     private String localServerName;
     private String localPassword;
     private MessageHandler messageRouter;
+    private volatile boolean acceptingInbound;
 
     @FunctionalInterface
     public interface MessageHandler {
@@ -56,6 +58,15 @@ public class NetworkManager {
     }
 
     public void start() {
+        startInbound();
+    }
+
+    public void startInbound() {
+        if (tcpServer.isRunning()) {
+            acceptingInbound = true;
+            return;
+        }
+        acceptingInbound = true;
         System.out.println(TAG + "Starting TCP server...");
         tcpServer.start(conn -> {
             System.out.println(TAG + "Inbound connection from " + conn.getRemoteName());
@@ -79,7 +90,25 @@ public class NetworkManager {
         System.out.println(TAG + "TCP server started");
     }
 
+    public void stopInbound() {
+        acceptingInbound = false;
+        tcpServer.shutdown();
+        for (String name : new java.util.ArrayList<>(connections.keySet())) {
+            Connection conn = connections.get(name);
+            if (conn != null && isInboundConnection(conn)) {
+                disconnect(name);
+            }
+        }
+        System.out.println(TAG + "TCP server stopped");
+    }
+
     private void handleInboundAuth(Connection conn, AuthRequest request) {
+        if (!acceptingInbound) {
+            conn.send(FrameType.AUTH_RESPONSE,
+                    new AuthResponse(false, "Inbound connections disabled", null, null, 0));
+            conn.close();
+            return;
+        }
         System.out.println(TAG + "AUTH from " + request.getServerName()
                 + " mcVer=" + request.getMcVersion()
                 + " pwdLen=" + (request.getPassword() != null ? request.getPassword().length() : 0));
@@ -97,12 +126,15 @@ public class NetworkManager {
             serverStatus.put(request.getServerName(), ServerStatus.ONLINE);
             connections.put(request.getServerName(), conn);
             conn.setAuthenticated(true);
+            conn.setInbound(true);
             conn.setPeerServerName(request.getServerName());
 
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(true, "OK",
                             localServerName != null ? localServerName : "local",
-                            "26.1.2",
+                            TheExchangeCore.getInstance() != null
+                                    ? TheExchangeCore.getInstance().getApi().getServerVersion()
+                                    : "26.1.2",
                             System.currentTimeMillis()));
 
             notifyStatusChange(request.getServerName(), ServerStatus.ONLINE);
@@ -149,6 +181,7 @@ public class NetworkManager {
                         + " msg=" + resp.getMessage());
                 if (resp.isSuccess()) {
                     conn.setAuthenticated(true);
+                    conn.setInbound(false);
                     conn.setPeerServerName(server.getName());
                     serverStatus.put(server.getName(), ServerStatus.ONLINE);
                     notifyStatusChange(server.getName(), ServerStatus.ONLINE);
@@ -182,6 +215,16 @@ public class NetworkManager {
         if (conn != null) conn.close();
         serverStatus.put(serverName, ServerStatus.OFFLINE);
         notifyStatusChange(serverName, ServerStatus.OFFLINE);
+    }
+
+    public void disconnectOutboundNotIn(Set<String> allowedServerNames) {
+        for (String serverName : new java.util.ArrayList<>(connections.keySet())) {
+            Connection conn = connections.get(serverName);
+            if (conn != null && !conn.isInbound()
+                    && (allowedServerNames == null || !allowedServerNames.contains(serverName))) {
+                disconnect(serverName);
+            }
+        }
     }
 
     public Connection getConnection(String serverName) {
@@ -221,6 +264,11 @@ public class NetworkManager {
     }
 
     public int getLocalPort() { return tcpServer.getPort(); }
+    public boolean isInboundRunning() { return tcpServer.isRunning(); }
+
+    private boolean isInboundConnection(Connection conn) {
+        return conn != null && conn.isInbound();
+    }
 
     public void shutdown() {
         tcpServer.shutdown();

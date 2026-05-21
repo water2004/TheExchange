@@ -24,6 +24,9 @@ public class TcpServer {
     }
 
     public void start(Consumer<Connection> handler) {
+        if (running) {
+            return;
+        }
         this.connectionHandler = handler;
         try {
             serverSocket = (SSLServerSocket) tlsContext.getServerSocketFactory()
@@ -64,6 +67,7 @@ public class TcpServer {
 
     public int getPort() { return port; }
     public int getConnectionCount() { return connections.size(); }
+    public boolean isRunning() { return running; }
 
     public void removeConnection(Connection conn) {
         connections.remove(conn);
@@ -72,6 +76,9 @@ public class TcpServer {
     public void shutdown() {
         running = false;
         try { if (serverSocket != null) serverSocket.close(); } catch (IOException ignored) {}
+        if (acceptThread != null) {
+            acceptThread.interrupt();
+        }
         for (Connection conn : connections) conn.close();
         connections.clear();
     }

@@ -41,14 +41,6 @@ public class DatabaseManager {
                     "version     INTEGER NOT NULL," +
                     "PRIMARY KEY (scope_type, scope_id, slot))");
 
-            // Remote server config
-            stmt.execute("CREATE TABLE IF NOT EXISTS remote_servers (" +
-                    "name        TEXT PRIMARY KEY," +
-                    "address     TEXT    NOT NULL," +
-                    "port        INTEGER NOT NULL," +
-                    "password_hash TEXT  NOT NULL," +
-                    "enabled     INTEGER NOT NULL)");
-
             // Remote inventory cache
             stmt.execute("CREATE TABLE IF NOT EXISTS remote_cache (" +
                     "server_name      TEXT    NOT NULL," +
@@ -82,11 +74,6 @@ public class DatabaseManager {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_server    ON operation_log(server_name)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_request   ON operation_log(request_id)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_scope     ON operation_log(scope_type, scope_id)");
-
-            // Config key-value store
-            stmt.execute("CREATE TABLE IF NOT EXISTS exchange_config (" +
-                    "key   TEXT PRIMARY KEY," +
-                    "value TEXT NOT NULL)");
 
             stmt.execute("CREATE TABLE IF NOT EXISTS exchange_metadata (" +
                     "key   TEXT PRIMARY KEY," +

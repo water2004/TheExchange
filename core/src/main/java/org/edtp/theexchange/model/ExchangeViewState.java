@@ -8,6 +8,8 @@ public class ExchangeViewState {
     private boolean local;
     private boolean online;
     private long timestamp;
+    private int rows = 6;
+    private String titleTemplate = "{server_name} 的共享空间";
     private List<NeutralItem> items = new ArrayList<>();
 
     public static ExchangeViewState local(String serverName, List<NeutralItem> items, long timestamp) {
@@ -34,6 +36,8 @@ public class ExchangeViewState {
     public boolean isLocal() { return local; }
     public boolean isOnline() { return online; }
     public long getTimestamp() { return timestamp; }
+    public int getRows() { return rows; }
+    public String getTitleTemplate() { return titleTemplate; }
     public List<NeutralItem> getItems() { return items; }
 
     public String getTitle(String localDisplayName) {

@@ -2,42 +2,56 @@ package org.edtp.theexchange;
 
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.compat.CompatibilityChecker;
+import org.edtp.theexchange.config.ExchangeConfigManager;
 import org.edtp.theexchange.model.ExchangeMutationResult;
 import org.edtp.theexchange.model.ExchangeViewState;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.PlayerExchangeContext;
 import org.edtp.theexchange.network.NetworkManager;
-import org.edtp.theexchange.service.*;
-import org.edtp.theexchange.storage.*;
+import org.edtp.theexchange.service.CacheManager;
+import org.edtp.theexchange.service.ExchangeService;
+import org.edtp.theexchange.service.HeartbeatManager;
+import org.edtp.theexchange.service.MenuInteractionService;
+import org.edtp.theexchange.service.ServerRegistry;
+import org.edtp.theexchange.service.SyncEngine;
+import org.edtp.theexchange.storage.DatabaseManager;
+import org.edtp.theexchange.storage.LocalInventoryCacheManager;
+import org.edtp.theexchange.storage.LocalItemStore;
+import org.edtp.theexchange.storage.OperationLogger;
+import org.edtp.theexchange.storage.RemoteCacheStore;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class TheExchangeCore {
 
     private static TheExchangeCore instance;
+
     private final ExchangeAPI api;
     private final ExecutorService coreExecutor;
+    private final ReentrantReadWriteLock reloadBarrier = new ReentrantReadWriteLock(true);
+    private final AtomicLong generation = new AtomicLong();
+
     private volatile boolean initialized;
     private volatile boolean shuttingDown;
     private CompletableFuture<Void> startupFuture;
+    private ExchangeConfigManager configManager;
+    private ExchangeAPI.RuntimeConfig runtimeConfig;
 
-    // Storage
     private DatabaseManager databaseManager;
     private LocalItemStore localItemStore;
     private RemoteCacheStore remoteCacheStore;
     private OperationLogger operationLogger;
-    private ConfigStore configStore;
     private LocalInventoryCacheManager localInventoryCacheManager;
 
-    // Network
     private NetworkManager networkManager;
-
-    // Services
     private ServerRegistry serverRegistry;
     private CacheManager cacheManager;
     private SyncEngine syncEngine;
@@ -50,25 +64,26 @@ public class TheExchangeCore {
         this.coreExecutor = Executors.newFixedThreadPool(
                 Math.max(4, Runtime.getRuntime().availableProcessors()),
                 new ThreadFactory() {
-            private final java.util.concurrent.atomic.AtomicInteger index = new java.util.concurrent.atomic.AtomicInteger();
+                    private final java.util.concurrent.atomic.AtomicInteger index = new java.util.concurrent.atomic.AtomicInteger();
 
-            @Override
-            public Thread newThread(Runnable runnable) {
-                Thread thread = new Thread(runnable, "exchange-core-" + index.incrementAndGet());
-                thread.setDaemon(true);
-                return thread;
-            }
-        });
+                    @Override
+                    public Thread newThread(Runnable runnable) {
+                        Thread thread = new Thread(runnable, "exchange-core-" + index.incrementAndGet());
+                        thread.setDaemon(true);
+                        return thread;
+                    }
+                });
         instance = this;
     }
 
     public static TheExchangeCore getInstance() { return instance; }
     public ExchangeAPI getApi() { return api; }
+    public ExchangeConfigManager getConfigManager() { return configManager; }
+    public ExchangeAPI.RuntimeConfig getRuntimeConfig() { return runtimeConfig; }
     public DatabaseManager getDatabaseManager() { return databaseManager; }
     public LocalItemStore getLocalItemStore() { return localItemStore; }
     public RemoteCacheStore getRemoteCacheStore() { return remoteCacheStore; }
     public OperationLogger getOperationLogger() { return operationLogger; }
-    public ConfigStore getConfigStore() { return configStore; }
     public LocalInventoryCacheManager getLocalInventoryCacheManager() { return localInventoryCacheManager; }
     public NetworkManager getNetworkManager() { return networkManager; }
     public ServerRegistry getServerRegistry() { return serverRegistry; }
@@ -79,9 +94,7 @@ public class TheExchangeCore {
     public boolean isInitialized() { return initialized; }
 
     public CompletableFuture<Void> startAsync() {
-        if (startupFuture != null) {
-            return startupFuture;
-        }
+        if (startupFuture != null) return startupFuture;
         startupFuture = submit(() -> {
             initialize();
             return null;
@@ -94,11 +107,19 @@ public class TheExchangeCore {
             return CompletableFuture.failedFuture(new IllegalStateException("TheExchange core is shutting down"));
         }
         CompletableFuture<T> future = new CompletableFuture<>();
+        long taskGeneration = generation.get();
         coreExecutor.execute(() -> {
+            reloadBarrier.readLock().lock();
             try {
+                if (taskGeneration != generation.get()) {
+                    future.completeExceptionally(new IllegalStateException("Exchange runtime reloaded; operation interrupted"));
+                    return;
+                }
                 future.complete(task.call());
             } catch (Throwable t) {
                 future.completeExceptionally(t);
+            } finally {
+                reloadBarrier.readLock().unlock();
             }
         });
         return future;
@@ -118,6 +139,7 @@ public class TheExchangeCore {
     }
 
     public CompletableFuture<ExchangeViewState> openRemoteViewAsync(String serverName) {
+        long opGeneration = generation.get();
         return submit(() -> {
             boolean online = networkManager != null
                     && networkManager.getConnection(serverName) != null
@@ -127,7 +149,7 @@ public class TheExchangeCore {
             }
             return syncEngine.refreshChangedSlotsAsync(serverName)
                     .handle((ignored, error) -> null)
-                    .thenCompose(ignored -> submit(() -> remoteFromCache(serverName, true)));
+                    .thenCompose(ignored -> submitIfCurrent(opGeneration, () -> remoteFromCache(serverName, true)));
         }).thenCompose(future -> future);
     }
 
@@ -141,9 +163,11 @@ public class TheExchangeCore {
     }
 
     public CompletableFuture<Void> refreshRemoteViewAsync(String serverName) {
+        long opGeneration = generation.get();
         CompletableFuture<CompletableFuture<Void>> future = submit(() -> {
             if (syncEngine != null) {
-                return syncEngine.refreshChangedSlotsAsync(serverName);
+                return syncEngine.refreshChangedSlotsAsync(serverName)
+                        .thenCompose(ignored -> ensureCurrent(opGeneration));
             }
             if (cacheManager != null) {
                 cacheManager.getCache(serverName);
@@ -153,8 +177,8 @@ public class TheExchangeCore {
         return future.thenCompose(inner -> inner);
     }
 
-    public CompletableFuture<Void> applyLocalSnapshotAsync(java.util.List<NeutralItem> before,
-                                                           java.util.List<NeutralItem> after,
+    public CompletableFuture<Void> applyLocalSnapshotAsync(List<NeutralItem> before,
+                                                           List<NeutralItem> after,
                                                            PlayerExchangeContext player) {
         return executeCore(() -> menuInteractionService.applyLocalSnapshot(before, after, player));
     }
@@ -162,9 +186,11 @@ public class TheExchangeCore {
     public CompletableFuture<ExchangeMutationResult> putRemoteAsync(String serverName, int slot,
                                                                     NeutralItem item,
                                                                     PlayerExchangeContext player) {
+        long opGeneration = generation.get();
         return submit(() -> exchangeService.putNeutralItemAsync(
                         serverName, slot, player.uuid(), player.name(), item))
                 .thenCompose(future -> future)
+                .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
                         ? ExchangeMutationResult.success()
                         : ExchangeMutationResult.fail(result.getFailReason()));
@@ -173,12 +199,52 @@ public class TheExchangeCore {
     public CompletableFuture<ExchangeMutationResult> takeRemoteAsync(String serverName, int slot,
                                                                      int count,
                                                                      PlayerExchangeContext player) {
+        long opGeneration = generation.get();
         return submit(() -> exchangeService.takeItemAsync(
                         serverName, slot, count, player.uuid(), player.name()))
                 .thenCompose(future -> future)
+                .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
                         ? ExchangeMutationResult.success(result.getItemsToGive())
                         : ExchangeMutationResult.fail(result.getFailReason()));
+    }
+
+    public CompletableFuture<ExchangeAPI.RuntimeConfig> reloadConfigAsync() {
+        if (shuttingDown) {
+            return CompletableFuture.failedFuture(new IllegalStateException("TheExchange core is shutting down"));
+        }
+        CompletableFuture<ExchangeAPI.RuntimeConfig> future = new CompletableFuture<>();
+        coreExecutor.execute(() -> {
+            try {
+                reloadConfigInternal();
+                future.complete(runtimeConfig);
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            }
+        });
+        return future;
+    }
+
+    public long currentGeneration() {
+        return generation.get();
+    }
+
+    public <T> CompletableFuture<T> submitIfGeneration(long expectedGeneration, Callable<T> task) {
+        if (expectedGeneration != generation.get()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Exchange runtime reloaded; operation interrupted"));
+        }
+        return submit(task);
+    }
+
+    private <T> CompletableFuture<T> submitIfCurrent(long expectedGeneration, Callable<T> task) {
+        return submitIfGeneration(expectedGeneration, task);
+    }
+
+    private CompletableFuture<Void> ensureCurrent(long expectedGeneration) {
+        if (expectedGeneration != generation.get()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Exchange runtime reloaded; operation interrupted"));
+        }
+        return CompletableFuture.completedFuture(null);
     }
 
     private ExchangeViewState remoteFromCache(String serverName, boolean online) {
@@ -188,140 +254,187 @@ public class TheExchangeCore {
                 0);
     }
 
-    /**
-     * Initialize with config values provided by the adapter layer.
-     * This ensures config is available before database/network setup.
-     */
-    public void initialize(int localPort, String localPassword) {
+    private void initialize() {
         if (initialized) {
             api.getLogger().warn("TheExchange core already initialized");
             return;
         }
         api.getLogger().info("Initializing TheExchange core...");
+        configManager = new ExchangeConfigManager(api.getConfigLoader());
+        runtimeConfig = configManager.current();
 
-        // 1. Database
         databaseManager = new DatabaseManager(api.getConfigLoader().getDatabasePath());
         databaseManager.initialize();
         api.getLogger().info("Database initialized");
 
-        // 2. Stores
         localItemStore = new LocalItemStore(databaseManager);
         remoteCacheStore = new RemoteCacheStore(databaseManager);
         operationLogger = new OperationLogger(databaseManager);
-        configStore = new ConfigStore(databaseManager);
-        localInventoryCacheManager = new LocalInventoryCacheManager(
-                localItemStore, api.getItemSerializer(), api.getConfigLoader().getLocalInventoryCacheCapacity());
-        localItemStore.setCacheManager(localInventoryCacheManager);
 
-        // 3. TLS
-        String configDir = api.getConfigLoader().getConfigDir();
-        Path keystorePath = Path.of(configDir, "tls", "keystore.jks");
-        String cn = api.getServerName();
-        char[] keystorePass = "theexchange".toCharArray();
-
-        // 4. Network
-        try {
-            networkManager = new NetworkManager(localPort, keystorePath, cn, keystorePass);
-            networkManager.setLocalServerName(api.getServerName());
-            networkManager.setLocalPassword(localPassword);
-            networkManager.start();
-            api.getLogger().info("Network started on port " + localPort);
-        } catch (Exception e) {
-            String cause = e.getMessage();
-            if (e.getCause() != null) cause = e.getCause().getMessage();
-            if (cause != null && cause.contains("Address already in use")) {
-                api.getLogger().error("Port " + localPort + " is already in use — "
-                        + "change 'server.port' in config/theexchange/theexchange.json");
-            } else if (cause != null && cause.contains("Permission denied")) {
-                api.getLogger().error("No permission to bind port " + localPort
-                        + " (ports < 1024 need root on Linux)");
-            } else {
-                api.getLogger().error("Failed to start network on port " + localPort
-                        + ": " + (cause != null ? cause : "unknown"), e);
-            }
-            networkManager = null;
-        }
-
-        // 5. Services (work even without network)
-        serverRegistry = new ServerRegistry(databaseManager, networkManager);
-        serverRegistry.loadFromDatabase();
-
-        cacheManager = new CacheManager(remoteCacheStore,
-                api.getConfigLoader().getRemoteInventoryCacheCapacity());
-
-        CompatibilityChecker compatibilityChecker = new CompatibilityChecker(
-                api.getItemSerializer());
-        syncEngine = networkManager != null
-                ? new SyncEngine(networkManager, cacheManager, compatibilityChecker)
-                : null;
-
-        exchangeService = new ExchangeService(networkManager, localItemStore,
-                operationLogger, cacheManager, compatibilityChecker,
-                api.getItemSerializer(), syncEngine);
-        menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
-
-        // 6. Heartbeat (only if network is up)
-        if (networkManager != null) {
-            heartbeatManager = new HeartbeatManager(networkManager, serverRegistry);
-            heartbeatManager.start();
-            networkManager.setMessageRouter((conn, type, msg) ->
-                    exchangeService.routeMessage(conn, type, msg));
-            for (var server : serverRegistry.getAllServers()) {
-                if (server.isEnabled()) {
-                    networkManager.connectToRemote(server);
-                }
-            }
-        }
+        buildRuntime(runtimeConfig);
 
         initialized = true;
+        api.getLogger().info("TheExchange configured. Port: " + runtimeConfig.getPort()
+                + ", inbound=" + runtimeConfig.getNetwork().isInboundEnabled()
+                + ", Servers: " + serverRegistry.getAllServers().size());
         api.getLogger().info("TheExchange core initialized");
     }
 
-    public void initialize() {
-        api.getConfigLoader().loadConfig();
-        ExchangeAPI.RuntimeConfig config = api.getConfigLoader().getRuntimeConfig();
-        initialize(config.getPort(), config.getPassword());
+    private void reloadConfigInternal() {
+        api.getLogger().info("Reloading TheExchange config...");
+        reloadBarrier.writeLock().lock();
+        try {
+            generation.incrementAndGet();
+            ExchangeAPI.RuntimeConfig oldConfig = runtimeConfig;
+            ExchangeAPI.RuntimeConfig reloaded = configManager.reload();
+            stopReloadableServices(true, oldConfig, reloaded);
+            runtimeConfig = reloaded;
+            buildRuntime(reloaded, oldConfig);
+            api.getLogger().info("TheExchange config reloaded. Port: " + reloaded.getPort()
+                    + ", inbound=" + reloaded.getNetwork().isInboundEnabled()
+                    + ", Servers: " + serverRegistry.getAllServers().size());
+        } finally {
+            reloadBarrier.writeLock().unlock();
+        }
+    }
 
-        configStore.set("server.display_name", config.getDisplayName());
-        configStore.set("server.password", config.getPassword());
-        configStore.set("server.port", String.valueOf(config.getPort()));
-        if (serverRegistry.getAllServers().isEmpty()) {
-            for (var remote : config.getRemoteServers()) {
-                try {
-                    serverRegistry.addServer(remote.getName(), remote.getAddress(),
-                            remote.getPort(), remote.getPassword());
-                } catch (Exception e) {
-                    api.getLogger().error("Failed to import configured server: " + remote.getName(), e);
-                }
+    private void buildRuntime(ExchangeAPI.RuntimeConfig config) {
+        buildRuntime(config, null);
+    }
+
+    private void buildRuntime(ExchangeAPI.RuntimeConfig config, ExchangeAPI.RuntimeConfig oldConfig) {
+        localInventoryCacheManager = new LocalInventoryCacheManager(
+                localItemStore, api.getItemSerializer(), config.getCache().getLocalInventoryCacheCapacity());
+        localItemStore.setCacheManager(localInventoryCacheManager);
+        cacheManager = new CacheManager(remoteCacheStore, config.getCache().getRemoteInventoryCacheCapacity());
+
+        Path keystorePath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "keystore.jks");
+        boolean reuseNetwork = networkManager != null
+                && oldConfig != null
+                && oldConfig.getPort() == config.getPort();
+        if (!reuseNetwork) {
+            if (networkManager != null) {
+                networkManager.shutdown();
+            }
+            try {
+                networkManager = new NetworkManager(config.getPort(), keystorePath,
+                        config.getDisplayName(), "theexchange".toCharArray());
+            } catch (Exception e) {
+                logNetworkStartFailure(config.getPort(), e);
+                networkManager = null;
             }
         }
-        api.getLogger().info("TheExchange configured. Port: " + config.getPort()
-                + ", Servers: " + serverRegistry.getAllServers().size());
+        if (networkManager != null) {
+            networkManager.setLocalServerName(config.getDisplayName());
+            networkManager.setLocalPassword(config.getPassword());
+            applyInboundConfig(config);
+        }
+
+        serverRegistry = new ServerRegistry(networkManager, config.getRemoteServers());
+        CompatibilityChecker compatibilityChecker = new CompatibilityChecker(api.getItemSerializer());
+        syncEngine = networkManager != null ? new SyncEngine(networkManager, cacheManager, compatibilityChecker) : null;
+        exchangeService = new ExchangeService(networkManager, localItemStore,
+                operationLogger, cacheManager, compatibilityChecker, api.getItemSerializer(), syncEngine);
+        menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
+
+        if (networkManager != null) {
+            networkManager.setMessageRouter((conn, type, msg) ->
+                    submit(() -> {
+                        ExchangeService service = exchangeService;
+                        if (service != null) {
+                            service.routeMessage(conn, type, msg);
+                        }
+                        return null;
+                    }).whenComplete((ignored, error) -> {
+                        if (error != null) {
+                            api.getLogger().warn("Dropped inbound exchange message during reload: " + error.getMessage());
+                        }
+            }));
+            heartbeatManager = new HeartbeatManager(networkManager, serverRegistry, config.getNetwork());
+            heartbeatManager.start();
+            networkManager.disconnectOutboundNotIn(config.getRemoteServers().stream()
+                    .map(ExchangeAPI.RemoteServerConfig::getName)
+                    .collect(java.util.stream.Collectors.toSet()));
+            serverRegistry.connectAllEnabled();
+        }
+    }
+
+    private void applyInboundConfig(ExchangeAPI.RuntimeConfig config) {
+        if (config.getNetwork().isInboundEnabled()) {
+            networkManager.startInbound();
+            api.getLogger().info("Inbound Exchange listener started on port " + config.getPort());
+        } else {
+            networkManager.stopInbound();
+            api.getLogger().info("Inbound Exchange listener disabled");
+        }
+    }
+
+    private void stopRuntimeServices(boolean flush) {
+        stopReloadableServices(flush, runtimeConfig, null);
+        if (networkManager != null) {
+            networkManager.shutdown();
+            networkManager = null;
+        }
+    }
+
+    private void stopReloadableServices(boolean flush, ExchangeAPI.RuntimeConfig oldConfig,
+                                        ExchangeAPI.RuntimeConfig nextConfig) {
+        if (heartbeatManager != null) {
+            heartbeatManager.stop();
+            heartbeatManager = null;
+        }
+        boolean keepNetwork = networkManager != null
+                && oldConfig != null
+                && nextConfig != null
+                && oldConfig.getPort() == nextConfig.getPort();
+        if (networkManager != null && !keepNetwork) {
+            networkManager.shutdown();
+            networkManager = null;
+        }
+        if (flush && localInventoryCacheManager != null) {
+            localInventoryCacheManager.flushAll();
+        }
+        if (flush && cacheManager != null) {
+            cacheManager.shutdown();
+        }
+        localInventoryCacheManager = null;
+        cacheManager = null;
+        syncEngine = null;
+        exchangeService = null;
+        menuInteractionService = null;
+        serverRegistry = null;
+    }
+
+    private void logNetworkStartFailure(int port, Exception e) {
+        String cause = e.getMessage();
+        if (e.getCause() != null) cause = e.getCause().getMessage();
+        if (cause != null && cause.contains("Address already in use")) {
+            api.getLogger().error("Port " + port + " is already in use; change server.port and run /exchange config reload");
+        } else if (cause != null && cause.contains("Permission denied")) {
+            api.getLogger().error("No permission to bind port " + port + " (ports < 1024 need root on Linux)");
+        } else {
+            api.getLogger().error("Failed to start network on port " + port + ": "
+                    + (cause != null ? cause : "unknown"), e);
+        }
     }
 
     public void shutdown() {
         shuttingDown = true;
         CompletableFuture<Void> stopped = new CompletableFuture<>();
         coreExecutor.execute(() -> {
+            reloadBarrier.writeLock().lock();
             try {
-                if (!initialized) {
-                    stopped.complete(null);
-                    return;
-                }
                 api.getLogger().info("Shutting down TheExchange core...");
-
-                if (heartbeatManager != null) heartbeatManager.stop();
-                if (networkManager != null) networkManager.shutdown();
-                if (localInventoryCacheManager != null) localInventoryCacheManager.flushAll();
-                if (cacheManager != null) cacheManager.shutdown();
+                stopRuntimeServices(true);
                 if (databaseManager != null) databaseManager.close();
-
                 instance = null;
                 initialized = false;
                 api.getLogger().info("TheExchange core shut down");
                 stopped.complete(null);
             } catch (Throwable t) {
                 stopped.completeExceptionally(t);
+            } finally {
+                reloadBarrier.writeLock().unlock();
             }
         });
         stopped.join();

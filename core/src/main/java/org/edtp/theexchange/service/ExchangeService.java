@@ -83,12 +83,14 @@ public class ExchangeService {
         String requestId = UUID.randomUUID().toString();
         PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
                 requestId, playerUuid, playerName, expectedVersion);
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        long opGeneration = core != null ? core.currentGeneration() : -1L;
         return conn.<PutItemResponse>sendAsync(
                         FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
                 .handle((response, error) -> {
-                    TheExchangeCore core = TheExchangeCore.getInstance();
-                    if (core != null) {
-                        return core.submit(() -> finishRemotePut(serverName, slot, playerUuid,
+                    TheExchangeCore currentCore = TheExchangeCore.getInstance();
+                    if (currentCore != null) {
+                        return currentCore.submitIfGeneration(opGeneration, () -> finishRemotePut(serverName, slot, playerUuid,
                                 playerName, item, requestId, response, error));
                     }
                     return CompletableFuture.completedFuture(PutResult.fail("核心已停止"));
@@ -137,12 +139,14 @@ public class ExchangeService {
         TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
                 expectedVersion, requestCount, requestId, playerUuid, playerName, remoteVersion);
 
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        long opGeneration = core != null ? core.currentGeneration() : -1L;
         return conn.<TakeItemResponse>sendAsync(
                         FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
                 .handle((response, error) -> {
-                    TheExchangeCore core = TheExchangeCore.getInstance();
-                    if (core != null) {
-                        return core.submit(() -> finishRemoteTake(serverName, slot,
+                    TheExchangeCore currentCore = TheExchangeCore.getInstance();
+                    if (currentCore != null) {
+                        return currentCore.submitIfGeneration(opGeneration, () -> finishRemoteTake(serverName, slot,
                                 expectedItemId, requestCount, playerUuid, playerName,
                                 requestId, response, error));
                     }

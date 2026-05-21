@@ -11,28 +11,31 @@ import java.util.concurrent.*;
 
 public class HeartbeatManager {
 
-    private static final int HEARTBEAT_INTERVAL_SEC = 10;
-    private static final int HEARTBEAT_TIMEOUT_SEC = 30;
-    private static final int INITIAL_RECONNECT_DELAY_SEC = 5;
-    private static final int MAX_RECONNECT_DELAY_SEC = 30;
-
     private final NetworkManager networkManager;
     private final ServerRegistry serverRegistry;
+    private final int heartbeatIntervalSeconds;
+    private final int heartbeatTimeoutSeconds;
+    private final int reconnectInitialDelaySeconds;
+    private final int reconnectMaxDelaySeconds;
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
     private final ConcurrentHashMap<String, Integer> reconnectDelays = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> reconnectScheduled = new ConcurrentHashMap<>();
     private volatile boolean running;
 
-    public HeartbeatManager(NetworkManager networkManager, ServerRegistry serverRegistry) {
+    public HeartbeatManager(NetworkManager networkManager, ServerRegistry serverRegistry,
+                            org.edtp.theexchange.api.ExchangeAPI.NetworkConfig config) {
         this.networkManager = networkManager;
         this.serverRegistry = serverRegistry;
+        this.heartbeatIntervalSeconds = config.getHeartbeatIntervalSeconds();
+        this.heartbeatTimeoutSeconds = config.getHeartbeatTimeoutSeconds();
+        this.reconnectInitialDelaySeconds = config.getReconnectInitialDelaySeconds();
+        this.reconnectMaxDelaySeconds = config.getReconnectMaxDelaySeconds();
     }
 
     public void start() {
         running = true;
-        // Send heartbeats every 10 seconds
-        scheduler.scheduleAtFixedRate(this::sendHeartbeats, HEARTBEAT_INTERVAL_SEC,
-                HEARTBEAT_INTERVAL_SEC, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::sendHeartbeats, heartbeatIntervalSeconds,
+                heartbeatIntervalSeconds, TimeUnit.SECONDS);
         // Check timeouts every 5 seconds
         scheduler.scheduleAtFixedRate(this::checkTimeouts, 5, 5, TimeUnit.SECONDS);
         scheduler.execute(this::connectAllMissing);
@@ -61,7 +64,7 @@ public class HeartbeatManager {
 
     private void checkTimeouts() {
         long now = System.currentTimeMillis();
-        long timeoutMs = (long) HEARTBEAT_TIMEOUT_SEC * 1000;
+        long timeoutMs = (long) heartbeatTimeoutSeconds * 1000;
 
         for (RemoteServer server : serverRegistry.getAllServers()) {
             Connection conn = networkManager.getConnection(server.getName());
@@ -84,7 +87,7 @@ public class HeartbeatManager {
         if (reconnectScheduled.putIfAbsent(server.getName(), Boolean.TRUE) != null) {
             return;
         }
-        int delay = reconnectDelays.getOrDefault(server.getName(), INITIAL_RECONNECT_DELAY_SEC);
+        int delay = reconnectDelays.getOrDefault(server.getName(), reconnectInitialDelaySeconds);
         scheduler.schedule(() -> {
             try {
                 boolean success = networkManager.connectToRemote(server);
@@ -92,7 +95,7 @@ public class HeartbeatManager {
                     reconnectDelays.remove(server.getName());
                 } else {
                     // Exponential backoff
-                    int nextDelay = Math.min(delay * 2, MAX_RECONNECT_DELAY_SEC);
+                    int nextDelay = Math.min(delay * 2, reconnectMaxDelaySeconds);
                     reconnectDelays.put(server.getName(), nextDelay);
                 }
             } finally {

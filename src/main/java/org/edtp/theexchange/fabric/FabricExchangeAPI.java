@@ -3,6 +3,7 @@ package org.edtp.theexchange.fabric;
 import com.mojang.logging.LogUtils;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.api.RefreshableExchangeView;
 import org.edtp.theexchange.compat.ItemSerializer;
@@ -53,7 +54,11 @@ public class FabricExchangeAPI implements ExchangeAPI {
 
     @Override
     public String getServerName() {
-        return configLoader.getDisplayName();
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core != null && core.getRuntimeConfig() != null) {
+            return core.getRuntimeConfig().getDisplayName();
+        }
+        return "Default Server";
     }
 
     @Override
