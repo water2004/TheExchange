@@ -32,5 +32,9 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        if (!project.hasProperty('bench')) {
+            excludeTags 'bench'
+        }
+    }
 }
