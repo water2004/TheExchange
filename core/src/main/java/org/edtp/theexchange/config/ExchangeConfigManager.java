@@ -98,6 +98,7 @@ public final class ExchangeConfigManager {
                         data.network.requestTimeoutSeconds, data.network.inboundEnabled),
                 new ExchangeAPI.CacheConfig(data.cache.offlineRetentionHours, data.cache.localInventoryCacheCapacity,
                         data.cache.remoteInventoryCacheCapacity),
+                new ExchangeAPI.PerformanceConfig(data.performance.coreThreads),
                 new ExchangeAPI.LoggingConfig(data.logging.retentionDays, data.logging.cleanupIntervalHours),
                 new ExchangeAPI.ContainerConfig(data.container.rows, data.container.titleTemplate),
                 remotes);
@@ -109,6 +110,7 @@ public final class ExchangeConfigManager {
         if (data.server == null) throw new IllegalArgumentException("Missing config section: server");
         if (data.network == null) throw new IllegalArgumentException("Missing config section: network");
         if (data.cache == null) throw new IllegalArgumentException("Missing config section: cache");
+        if (data.performance == null) throw new IllegalArgumentException("Missing config section: performance");
         if (data.logging == null) throw new IllegalArgumentException("Missing config section: logging");
         if (data.container == null) throw new IllegalArgumentException("Missing config section: container");
         if (data.remoteServers == null) throw new IllegalArgumentException("Missing config section: remoteServers");
@@ -127,6 +129,7 @@ public final class ExchangeConfigManager {
         requirePositive("cache.offline_retention_hours", data.cache.offlineRetentionHours);
         requirePositive("cache.local_inventory_cache_capacity", data.cache.localInventoryCacheCapacity);
         requirePositive("cache.remote_inventory_cache_capacity", data.cache.remoteInventoryCacheCapacity);
+        requirePositive("performance.core_threads", data.performance.coreThreads);
         requirePositive("logging.retention_days", data.logging.retentionDays);
         requirePositive("logging.cleanup_interval_hours", data.logging.cleanupIntervalHours);
         if (data.container.rows != 6) {
@@ -194,6 +197,7 @@ public final class ExchangeConfigManager {
             case "cache.offline_retention_hours" -> data.cache.offlineRetentionHours = parsePositive(path, rawValue);
             case "cache.local_inventory_cache_capacity" -> data.cache.localInventoryCacheCapacity = parsePositive(path, rawValue);
             case "cache.remote_inventory_cache_capacity" -> data.cache.remoteInventoryCacheCapacity = parsePositive(path, rawValue);
+            case "performance.core_threads" -> data.performance.coreThreads = parsePositive(path, rawValue);
             case "logging.retention_days" -> data.logging.retentionDays = parsePositive(path, rawValue);
             case "logging.cleanup_interval_hours" -> data.logging.cleanupIntervalHours = parsePositive(path, rawValue);
             case "container.rows" -> data.container.rows = parsePositive(path, rawValue);
@@ -249,6 +253,7 @@ public final class ExchangeConfigManager {
         ServerData server;
         NetworkData network;
         CacheData cache;
+        PerformanceData performance;
         LoggingData logging;
         ContainerData container;
         List<RemoteServerData> remoteServers;
@@ -283,6 +288,11 @@ public final class ExchangeConfigManager {
         int localInventoryCacheCapacity;
         @com.google.gson.annotations.SerializedName("remote_inventory_cache_capacity")
         int remoteInventoryCacheCapacity;
+    }
+
+    private static final class PerformanceData {
+        @com.google.gson.annotations.SerializedName("core_threads")
+        int coreThreads;
     }
 
     private static final class LoggingData {

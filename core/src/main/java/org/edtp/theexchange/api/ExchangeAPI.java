@@ -66,6 +66,7 @@ public interface ExchangeAPI {
         private final ServerConfig server;
         private final NetworkConfig network;
         private final CacheConfig cache;
+        private final PerformanceConfig performance;
         private final LoggingConfig logging;
         private final ContainerConfig container;
         private final String displayName;
@@ -74,11 +75,12 @@ public interface ExchangeAPI {
         private final List<RemoteServerConfig> remoteServers;
 
         public RuntimeConfig(ServerConfig server, NetworkConfig network,
-                             CacheConfig cache, LoggingConfig logging,
+                             CacheConfig cache, PerformanceConfig performance, LoggingConfig logging,
                              ContainerConfig container, List<RemoteServerConfig> remoteServers) {
             this.server = server;
             this.network = network;
             this.cache = cache;
+            this.performance = performance;
             this.logging = logging;
             this.container = container;
             this.displayName = server != null ? server.getDisplayName() : null;
@@ -90,6 +92,7 @@ public interface ExchangeAPI {
         public ServerConfig getServer() { return server; }
         public NetworkConfig getNetwork() { return network; }
         public CacheConfig getCache() { return cache; }
+        public PerformanceConfig getPerformance() { return performance; }
         public LoggingConfig getLogging() { return logging; }
         public ContainerConfig getContainer() { return container; }
         public String getDisplayName() { return displayName; }
@@ -156,6 +159,16 @@ public interface ExchangeAPI {
         public int getOfflineRetentionHours() { return offlineRetentionHours; }
         public int getLocalInventoryCacheCapacity() { return localInventoryCacheCapacity; }
         public int getRemoteInventoryCacheCapacity() { return remoteInventoryCacheCapacity; }
+    }
+
+    class PerformanceConfig {
+        private final int coreThreads;
+
+        public PerformanceConfig(int coreThreads) {
+            this.coreThreads = coreThreads;
+        }
+
+        public int getCoreThreads() { return coreThreads; }
     }
 
     class LoggingConfig {

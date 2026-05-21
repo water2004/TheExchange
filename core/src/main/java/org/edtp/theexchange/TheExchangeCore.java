@@ -26,18 +26,25 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class TheExchangeCore {
 
     private static TheExchangeCore instance;
 
     private final ExchangeAPI api;
-    private final ExecutorService coreExecutor;
-    private final ReentrantReadWriteLock reloadBarrier = new ReentrantReadWriteLock(true);
+    private final ExecutorService lifecycleExecutor;
     private final AtomicLong generation = new AtomicLong();
+    private final Object taskMonitor = new Object();
+    private final Object executorLock = new Object();
+    private volatile ExecutorService coreExecutor;
+    private volatile boolean acceptingTasks;
+    private volatile boolean reloading;
+    private int inFlightTasks;
 
     private volatile boolean initialized;
     private volatile boolean shuttingDown;
@@ -61,19 +68,21 @@ public class TheExchangeCore {
 
     public TheExchangeCore(ExchangeAPI api) {
         this.api = api;
-        this.coreExecutor = Executors.newFixedThreadPool(
-                Math.max(4, Runtime.getRuntime().availableProcessors()),
-                new ThreadFactory() {
-                    private final java.util.concurrent.atomic.AtomicInteger index = new java.util.concurrent.atomic.AtomicInteger();
-
-                    @Override
-                    public Thread newThread(Runnable runnable) {
-                        Thread thread = new Thread(runnable, "exchange-core-" + index.incrementAndGet());
-                        thread.setDaemon(true);
-                        return thread;
-                    }
-                });
+        this.lifecycleExecutor = Executors.newSingleThreadExecutor(namedThreadFactory("exchange-core-lifecycle"));
         instance = this;
+    }
+
+    private ThreadFactory namedThreadFactory(String prefix) {
+        return new ThreadFactory() {
+            private final AtomicInteger index = new AtomicInteger();
+
+            @Override
+            public Thread newThread(Runnable runnable) {
+                Thread thread = new Thread(runnable, prefix + "-" + index.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            }
+        };
     }
 
     public static TheExchangeCore getInstance() { return instance; }
@@ -95,9 +104,10 @@ public class TheExchangeCore {
 
     public CompletableFuture<Void> startAsync() {
         if (startupFuture != null) return startupFuture;
-        startupFuture = submit(() -> {
+        startupFuture = new CompletableFuture<>();
+        lifecycleExecutor.execute(() -> {
             initialize();
-            return null;
+            startupFuture.complete(null);
         });
         return startupFuture;
     }
@@ -108,20 +118,34 @@ public class TheExchangeCore {
         }
         CompletableFuture<T> future = new CompletableFuture<>();
         long taskGeneration = generation.get();
-        coreExecutor.execute(() -> {
-            reloadBarrier.readLock().lock();
-            try {
-                if (taskGeneration != generation.get()) {
-                    future.completeExceptionally(new IllegalStateException("Exchange runtime reloaded; operation interrupted"));
-                    return;
-                }
-                future.complete(task.call());
-            } catch (Throwable t) {
-                future.completeExceptionally(t);
-            } finally {
-                reloadBarrier.readLock().unlock();
+        ExecutorService executor = coreExecutor;
+        if (executor == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("TheExchange core executor is not running"));
+        }
+        synchronized (taskMonitor) {
+            if (!acceptingTasks || reloading) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Exchange runtime reloading"));
             }
-        });
+            inFlightTasks++;
+        }
+        try {
+            executor.execute(() -> {
+                try {
+                    if (taskGeneration != generation.get()) {
+                        future.completeExceptionally(new IllegalStateException("Exchange runtime reloaded; operation interrupted"));
+                        return;
+                    }
+                    future.complete(task.call());
+                } catch (Throwable t) {
+                    future.completeExceptionally(t);
+                } finally {
+                    completeTask();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            completeTask();
+            return CompletableFuture.failedFuture(e);
+        }
         return future;
     }
 
@@ -214,7 +238,7 @@ public class TheExchangeCore {
             return CompletableFuture.failedFuture(new IllegalStateException("TheExchange core is shutting down"));
         }
         CompletableFuture<ExchangeAPI.RuntimeConfig> future = new CompletableFuture<>();
-        coreExecutor.execute(() -> {
+        lifecycleExecutor.execute(() -> {
             try {
                 reloadConfigInternal();
                 future.complete(runtimeConfig);
@@ -262,6 +286,7 @@ public class TheExchangeCore {
         api.getLogger().info("Initializing TheExchange core...");
         configManager = new ExchangeConfigManager(api.getConfigLoader());
         runtimeConfig = configManager.current();
+        startCoreExecutor(runtimeConfig);
 
         databaseManager = new DatabaseManager(api.getConfigLoader().getDatabasePath());
         databaseManager.initialize();
@@ -282,19 +307,27 @@ public class TheExchangeCore {
 
     private void reloadConfigInternal() {
         api.getLogger().info("Reloading TheExchange config...");
-        reloadBarrier.writeLock().lock();
         try {
-            generation.incrementAndGet();
+            beginReload();
             ExchangeAPI.RuntimeConfig oldConfig = runtimeConfig;
             ExchangeAPI.RuntimeConfig reloaded = configManager.reload();
-            stopReloadableServices(true, oldConfig, reloaded);
+            stopReloadableServices(false, oldConfig, reloaded);
+            if (localInventoryCacheManager != null) {
+                localInventoryCacheManager.flushAll();
+            }
+            if (cacheManager != null) {
+                cacheManager.shutdown();
+            }
+            stopCoreExecutor();
+            swapCoreExecutor(reloaded);
+            generation.incrementAndGet();
             runtimeConfig = reloaded;
             buildRuntime(reloaded, oldConfig);
             api.getLogger().info("TheExchange config reloaded. Port: " + reloaded.getPort()
                     + ", inbound=" + reloaded.getNetwork().isInboundEnabled()
                     + ", Servers: " + serverRegistry.getAllServers().size());
         } finally {
-            reloadBarrier.writeLock().unlock();
+            endReload();
         }
     }
 
@@ -376,6 +409,7 @@ public class TheExchangeCore {
             networkManager.shutdown();
             networkManager = null;
         }
+        stopCoreExecutor();
     }
 
     private void stopReloadableServices(boolean flush, ExchangeAPI.RuntimeConfig oldConfig,
@@ -422,8 +456,7 @@ public class TheExchangeCore {
     public void shutdown() {
         shuttingDown = true;
         CompletableFuture<Void> stopped = new CompletableFuture<>();
-        coreExecutor.execute(() -> {
-            reloadBarrier.writeLock().lock();
+        lifecycleExecutor.execute(() -> {
             try {
                 api.getLogger().info("Shutting down TheExchange core...");
                 stopRuntimeServices(true);
@@ -434,11 +467,105 @@ public class TheExchangeCore {
                 stopped.complete(null);
             } catch (Throwable t) {
                 stopped.completeExceptionally(t);
-            } finally {
-                reloadBarrier.writeLock().unlock();
             }
         });
         stopped.join();
-        coreExecutor.shutdownNow();
+        lifecycleExecutor.shutdownNow();
+    }
+
+    private void beginReload() {
+        synchronized (taskMonitor) {
+            reloading = true;
+            acceptingTasks = false;
+        }
+        waitForTasksToDrain();
+    }
+
+    private void endReload() {
+        synchronized (taskMonitor) {
+            reloading = false;
+            acceptingTasks = true;
+        }
+    }
+
+    private void waitForTasksToDrain() {
+        synchronized (taskMonitor) {
+            while (inFlightTasks > 0) {
+                try {
+                    taskMonitor.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted while waiting for core tasks to drain", e);
+                }
+            }
+        }
+    }
+
+    private void completeTask() {
+        synchronized (taskMonitor) {
+            if (inFlightTasks > 0) {
+                inFlightTasks--;
+            }
+            if (inFlightTasks == 0) {
+                taskMonitor.notifyAll();
+            }
+        }
+    }
+
+    private void startCoreExecutor(ExchangeAPI.RuntimeConfig config) {
+        synchronized (executorLock) {
+            coreExecutor = newCoreExecutor(config);
+        }
+        synchronized (taskMonitor) {
+            acceptingTasks = true;
+            reloading = false;
+        }
+    }
+
+    private void swapCoreExecutor(ExchangeAPI.RuntimeConfig config) {
+        ExecutorService oldExecutor;
+        synchronized (executorLock) {
+            oldExecutor = coreExecutor;
+            coreExecutor = newCoreExecutor(config);
+        }
+        shutdownExecutor(oldExecutor);
+    }
+
+    private void stopCoreExecutor() {
+        ExecutorService oldExecutor;
+        synchronized (executorLock) {
+            oldExecutor = coreExecutor;
+            coreExecutor = null;
+        }
+        shutdownExecutor(oldExecutor);
+    }
+
+    private ExecutorService newCoreExecutor(ExchangeAPI.RuntimeConfig config) {
+        int configured = config != null && config.getPerformance() != null
+                ? config.getPerformance().getCoreThreads()
+                : 4;
+        int threads = Math.max(1, Math.min(configured, Runtime.getRuntime().availableProcessors()));
+        AtomicLong index = new AtomicLong();
+        return Executors.newFixedThreadPool(threads, runnable -> {
+            Thread thread = new Thread(runnable, "exchange-core-" + index.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    private void shutdownExecutor(ExecutorService executor) {
+        if (executor == null) {
+            return;
+        }
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+                executor.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            executor.shutdownNow();
+        }
     }
 }

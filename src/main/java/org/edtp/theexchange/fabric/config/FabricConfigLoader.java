@@ -55,6 +55,9 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
                         "local_inventory_cache_capacity": 32,
                         "remote_inventory_cache_capacity": 64
                       },
+                      "performance": {
+                        "core_threads": 4
+                      },
                       "logging": {
                         "retention_days": 30,
                         "cleanup_interval_hours": 1
