@@ -2,7 +2,7 @@ package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
 
-public class PutItemRequest {
+public class PutItemRequest implements CorrelatedMessage {
     private int slot;
     private NeutralItem item;
     private int expectedVersion;

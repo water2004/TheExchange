@@ -2,7 +2,7 @@ package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
 
-public class PutItemResponse {
+public class PutItemResponse implements CorrelatedMessage {
     private boolean success;
     private int slot;
     private NeutralItem currentItem;
@@ -10,6 +10,7 @@ public class PutItemResponse {
     private long newTimestamp;
     private int newVersion;
     private int remoteVersion;
+    private String requestId;
 
     public PutItemResponse() {}
 
@@ -20,6 +21,12 @@ public class PutItemResponse {
 
     public PutItemResponse(boolean success, int slot, NeutralItem currentItem,
                            String failReason, long newTimestamp, int newVersion, int remoteVersion) {
+        this(success, slot, currentItem, failReason, newTimestamp, newVersion, remoteVersion, null);
+    }
+
+    public PutItemResponse(boolean success, int slot, NeutralItem currentItem,
+                           String failReason, long newTimestamp, int newVersion, int remoteVersion,
+                           String requestId) {
         this.success = success;
         this.slot = slot;
         this.currentItem = currentItem;
@@ -27,6 +34,7 @@ public class PutItemResponse {
         this.newTimestamp = newTimestamp;
         this.newVersion = newVersion;
         this.remoteVersion = remoteVersion;
+        this.requestId = requestId;
     }
 
     public boolean isSuccess() { return success; }
@@ -49,4 +57,10 @@ public class PutItemResponse {
 
     public int getRemoteVersion() { return remoteVersion; }
     public void setRemoteVersion(int remoteVersion) { this.remoteVersion = remoteVersion; }
+
+    @Override
+    public String getRequestId() { return requestId; }
+
+    @Override
+    public void setRequestId(String requestId) { this.requestId = requestId; }
 }

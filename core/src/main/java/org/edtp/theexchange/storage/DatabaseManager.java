@@ -1,10 +1,12 @@
 package org.edtp.theexchange.storage;
 
 import java.sql.*;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class DatabaseManager {
 
     private final String databasePath;
+    private final ReentrantLock dbLock = new ReentrantLock(true);
     private Connection connection;
 
     public DatabaseManager(String databasePath) {
@@ -102,12 +104,51 @@ public class DatabaseManager {
         return connection;
     }
 
+    public void lock() {
+        dbLock.lock();
+    }
+
+    public void unlock() {
+        dbLock.unlock();
+    }
+
+    public <T> T withLock(SqlWork<T> work) throws SQLException {
+        dbLock.lock();
+        try {
+            return work.run();
+        } finally {
+            dbLock.unlock();
+        }
+    }
+
+    public void withLock(SqlRunnable work) throws SQLException {
+        dbLock.lock();
+        try {
+            work.run();
+        } finally {
+            dbLock.unlock();
+        }
+    }
+
     public void close() {
+        dbLock.lock();
         try {
             if (connection != null && !connection.isClosed()) {
                 connection.close();
             }
         } catch (SQLException ignored) {
+        } finally {
+            dbLock.unlock();
         }
+    }
+
+    @FunctionalInterface
+    public interface SqlWork<T> {
+        T run() throws SQLException;
+    }
+
+    @FunctionalInterface
+    public interface SqlRunnable {
+        void run() throws SQLException;
     }
 }

@@ -18,6 +18,7 @@ public class RemoteCacheStore {
     }
 
     public RemoteSlotSnapshot loadSlot(String serverName, InventoryScope scope, int slot) {
+        db.lock();
         String sql = "SELECT items_blob, version FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, serverName);
@@ -35,6 +36,8 @@ public class RemoteCacheStore {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to load remote slot", e);
+        } finally {
+            db.unlock();
         }
         return new RemoteSlotSnapshot(slot, null, 0);
     }
@@ -44,6 +47,7 @@ public class RemoteCacheStore {
     }
 
     public void saveSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, int version) {
+        db.lock();
         String sql = "INSERT OR REPLACE INTO remote_cache (server_name, scope_type, scope_id, slot, items_blob, version, synced_at) " +
                 "VALUES (?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -57,10 +61,13 @@ public class RemoteCacheStore {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to save remote slot", e);
+        } finally {
+            db.unlock();
         }
     }
 
     public void removeSlot(String serverName, InventoryScope scope, int slot) {
+        db.lock();
         String sql = "DELETE FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, serverName);
@@ -70,10 +77,13 @@ public class RemoteCacheStore {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to remove remote slot", e);
+        } finally {
+            db.unlock();
         }
     }
 
     public List<RemoteSlotSnapshot> loadScope(String serverName, InventoryScope scope) {
+        db.lock();
         List<RemoteSlotSnapshot> result = new ArrayList<>();
         String sql = "SELECT slot, items_blob, version FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? ORDER BY slot";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -92,6 +102,8 @@ public class RemoteCacheStore {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to load remote scope", e);
+        } finally {
+            db.unlock();
         }
         return result;
     }

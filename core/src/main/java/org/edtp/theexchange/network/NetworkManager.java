@@ -64,8 +64,11 @@ public class NetworkManager {
                         + (msg != null ? msg.getClass().getSimpleName() : "null"));
                 if (type == FrameType.AUTH_REQUEST) {
                     handleInboundAuth(conn, (AuthRequest) msg);
-                } else if (conn.isAuthenticated() && messageRouter != null) {
-                    messageRouter.handle(conn, type, msg);
+                } else if (conn.isAuthenticated()) {
+                    conn.onResponse(type, msg);
+                    if (messageRouter != null) {
+                        messageRouter.handle(conn, type, msg);
+                    }
                 }
             });
             conn.setDisconnectHandler((c, graceful) -> {
@@ -138,7 +141,6 @@ public class NetworkManager {
             System.out.println(TAG + "Response from " + server.getName()
                     + ": type=" + type + " msg="
                     + (msg != null ? msg.getClass().getSimpleName() : "null"));
-            // Route to any pending sendAndWait future first
             conn.onResponse(type, msg);
             if (type == FrameType.AUTH_RESPONSE) {
                 AuthResponse resp = (AuthResponse) msg;

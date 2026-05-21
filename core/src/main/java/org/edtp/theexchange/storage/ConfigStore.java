@@ -16,6 +16,7 @@ public class ConfigStore {
     }
 
     public String get(String key) {
+        db.lock();
         String sql = "SELECT value FROM exchange_config WHERE key = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, key);
@@ -24,10 +25,13 @@ public class ConfigStore {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to get config " + key, e);
+        } finally {
+            db.unlock();
         }
     }
 
     public void set(String key, String value) {
+        db.lock();
         String sql = "INSERT OR REPLACE INTO exchange_config (key, value) VALUES (?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, key);
@@ -35,6 +39,8 @@ public class ConfigStore {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to set config " + key, e);
+        } finally {
+            db.unlock();
         }
     }
 

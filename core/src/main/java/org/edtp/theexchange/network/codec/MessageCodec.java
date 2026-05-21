@@ -128,28 +128,34 @@ public final class MessageCodec {
     }
 
     private static void encodeQuerySlotVersionRequest(DataOutputStream out, QuerySlotVersionRequest m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
     }
 
     private static void encodeQuerySlotVersionResponse(DataOutputStream out, QuerySlotVersionResponse m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
         out.writeInt(m.getVersion());
     }
 
     private static void encodeQuerySlotStateRequest(DataOutputStream out, QuerySlotStateRequest m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
     }
 
     private static void encodeSlotStateResponse(DataOutputStream out, SlotStateResponse m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getItem());
         out.writeInt(m.getVersion());
     }
 
-    private static void encodeQuerySlotVersionsRequest(DataOutputStream out, QuerySlotVersionsRequest m) {
+    private static void encodeQuerySlotVersionsRequest(DataOutputStream out, QuerySlotVersionsRequest m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
     }
 
     private static void encodeSlotVersionsResponse(DataOutputStream out, SlotVersionsResponse m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
         List<Integer> versions = m.getVersions();
         out.writeInt(versions != null ? versions.size() : 0);
         if (versions != null) {
@@ -160,6 +166,7 @@ public final class MessageCodec {
     }
 
     private static void encodeQuerySlotsRequest(DataOutputStream out, QuerySlotsRequest m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
         List<Integer> slots = m.getSlots();
         out.writeInt(slots != null ? slots.size() : 0);
         if (slots != null) {
@@ -170,6 +177,7 @@ public final class MessageCodec {
     }
 
     private static void encodeSlotsStateResponse(DataOutputStream out, SlotsStateResponse m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
         List<SlotStateResponse> slots = m.getSlots();
         out.writeInt(slots != null ? slots.size() : 0);
         if (slots != null) {
@@ -197,6 +205,7 @@ public final class MessageCodec {
         out.writeLong(m.getNewTimestamp());
         out.writeInt(m.getNewVersion());
         out.writeInt(m.getRemoteVersion());
+        BinaryIO.writeString(out, m.getRequestId());
     }
 
     private static void encodeTakeItemRequest(DataOutputStream out, TakeItemRequest m) throws IOException {
@@ -219,6 +228,7 @@ public final class MessageCodec {
         out.writeInt(m.getNewVersion());
         out.writeInt(m.getRemoteVersion());
         BinaryIO.writeNullableNeutralItem(out, m.getItemsToGive());
+        BinaryIO.writeString(out, m.getRequestId());
     }
 
     private static void encodePushUpdate(DataOutputStream out, PushUpdate m) throws IOException {
@@ -276,50 +286,53 @@ public final class MessageCodec {
     }
 
     private static QuerySlotVersionRequest decodeQuerySlotVersionRequest(DataInputStream in) throws IOException {
-        return new QuerySlotVersionRequest(in.readInt());
+        return new QuerySlotVersionRequest(BinaryIO.readString(in), in.readInt());
     }
 
     private static QuerySlotVersionResponse decodeQuerySlotVersionResponse(DataInputStream in) throws IOException {
-        return new QuerySlotVersionResponse(in.readInt(), in.readInt());
+        return new QuerySlotVersionResponse(BinaryIO.readString(in), in.readInt(), in.readInt());
     }
 
     private static QuerySlotStateRequest decodeQuerySlotStateRequest(DataInputStream in) throws IOException {
-        return new QuerySlotStateRequest(in.readInt());
+        return new QuerySlotStateRequest(BinaryIO.readString(in), in.readInt());
     }
 
     private static SlotStateResponse decodeSlotStateResponse(DataInputStream in) throws IOException {
-        return new SlotStateResponse(in.readInt(), BinaryIO.readNullableNeutralItem(in), in.readInt());
+        return new SlotStateResponse(BinaryIO.readString(in), in.readInt(), BinaryIO.readNullableNeutralItem(in), in.readInt());
     }
 
-    private static QuerySlotVersionsRequest decodeQuerySlotVersionsRequest(DataInputStream in) {
-        return new QuerySlotVersionsRequest();
+    private static QuerySlotVersionsRequest decodeQuerySlotVersionsRequest(DataInputStream in) throws IOException {
+        return new QuerySlotVersionsRequest(BinaryIO.readString(in));
     }
 
     private static SlotVersionsResponse decodeSlotVersionsResponse(DataInputStream in) throws IOException {
+        String requestId = BinaryIO.readString(in);
         int size = in.readInt();
         List<Integer> versions = new ArrayList<>(Math.max(0, size));
         for (int i = 0; i < size; i++) {
             versions.add(in.readInt());
         }
-        return new SlotVersionsResponse(versions);
+        return new SlotVersionsResponse(requestId, versions);
     }
 
     private static QuerySlotsRequest decodeQuerySlotsRequest(DataInputStream in) throws IOException {
+        String requestId = BinaryIO.readString(in);
         int size = in.readInt();
         List<Integer> slots = new ArrayList<>(Math.max(0, size));
         for (int i = 0; i < size; i++) {
             slots.add(in.readInt());
         }
-        return new QuerySlotsRequest(slots);
+        return new QuerySlotsRequest(requestId, slots);
     }
 
     private static SlotsStateResponse decodeSlotsStateResponse(DataInputStream in) throws IOException {
+        String requestId = BinaryIO.readString(in);
         int size = in.readInt();
         List<SlotStateResponse> slots = new ArrayList<>(Math.max(0, size));
         for (int i = 0; i < size; i++) {
             slots.add(decodeSlotStateResponse(in));
         }
-        return new SlotsStateResponse(slots);
+        return new SlotsStateResponse(requestId, slots);
     }
 
     private static PutItemRequest decodePutItemRequest(DataInputStream in) throws IOException {
@@ -343,6 +356,7 @@ public final class MessageCodec {
         response.setNewTimestamp(in.readLong());
         response.setNewVersion(in.readInt());
         response.setRemoteVersion(in.readInt());
+        response.setRequestId(BinaryIO.readString(in));
         return response;
     }
 
@@ -369,6 +383,7 @@ public final class MessageCodec {
         response.setNewVersion(in.readInt());
         response.setRemoteVersion(in.readInt());
         response.setItemsToGive(BinaryIO.readNullableNeutralItem(in));
+        response.setRequestId(BinaryIO.readString(in));
         return response;
     }
 

@@ -15,7 +15,9 @@ import org.edtp.theexchange.storage.OperationLogger;
 
 import java.util.UUID;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Core business logic for item exchange operations.
@@ -32,6 +34,7 @@ public class ExchangeService {
     private final CompatibilityChecker compatibilityChecker;
     private final ItemSerializer itemSerializer;
     private final SyncEngine syncEngine;
+    private final ConcurrentHashMap<Integer, ReentrantLock> localSlotLocks = new ConcurrentHashMap<>();
 
     public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
                            OperationLogger operationLogger, CacheManager cacheManager,
@@ -216,6 +219,16 @@ public class ExchangeService {
     }
 
     public PutItemResponse handleRemotePut(PutItemRequest request) {
+        ReentrantLock slotLock = localSlotLock(request.getSlot());
+        slotLock.lock();
+        try {
+            return handleRemotePutLocked(request);
+        } finally {
+            slotLock.unlock();
+        }
+    }
+
+    private PutItemResponse handleRemotePutLocked(PutItemRequest request) {
         OperationLogger.LogEntry existing = operationLogger.findByRequestId(request.getRequestId());
         if (existing != null) {
             LocalItemStore.ItemRecord r = localItemStore.getItem(request.getSlot());
@@ -223,7 +236,8 @@ public class ExchangeService {
                     r != null ? r.item() : null,
                     existing.failReason(), localItemStore.getLastModifiedTimestamp(),
                     r != null ? r.version() : 0,
-                    r != null ? r.version() : 0);
+                    r != null ? r.version() : 0,
+                    request.getRequestId());
         }
 
         try {
@@ -248,7 +262,8 @@ public class ExchangeService {
                         after != null ? after.item() : result.getItem(),
                         null, timestamp,
                         after != null ? after.version() : result.getNewVersion(),
-                        after != null ? after.version() : result.getNewVersion());
+                        after != null ? after.version() : result.getNewVersion(),
+                        request.getRequestId());
             }
 
             operationLogger.log(request.getRequestId(), OperationType.PUT,
@@ -259,7 +274,8 @@ public class ExchangeService {
                     current != null ? current.item() : null,
                     result.getFailReason(), localItemStore.getLastModifiedTimestamp(),
                     current != null ? current.version() : 0,
-                    current != null ? current.version() : 0);
+                    current != null ? current.version() : 0,
+                    request.getRequestId());
         } catch (Exception e) {
             debugPut("exception", request, request.getItem(), null, null, e);
             operationLogger.log(request.getRequestId(), OperationType.PUT,
@@ -267,11 +283,21 @@ public class ExchangeService {
                     "local", request.getItem().getItemId(), request.getItem().getCount(),
                     false, e.getMessage());
             return new PutItemResponse(false, request.getSlot(), null,
-                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0, 0);
+                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0, 0, request.getRequestId());
         }
     }
 
     public TakeItemResponse handleRemoteTake(TakeItemRequest request) {
+        ReentrantLock slotLock = localSlotLock(request.getSlot());
+        slotLock.lock();
+        try {
+            return handleRemoteTakeLocked(request);
+        } finally {
+            slotLock.unlock();
+        }
+    }
+
+    private TakeItemResponse handleRemoteTakeLocked(TakeItemRequest request) {
         OperationLogger.LogEntry existing = operationLogger.findByRequestId(request.getRequestId());
         if (existing != null) {
             LocalItemStore.ItemRecord r = localItemStore.getItem(request.getSlot());
@@ -279,7 +305,7 @@ public class ExchangeService {
                         r != null ? r.item() : null,
                         existing.failReason(), localItemStore.getLastModifiedTimestamp(),
                         r != null ? r.version() : 0,
-                        r != null ? r.version() : 0, null);
+                        r != null ? r.version() : 0, null, request.getRequestId());
         }
 
         try {
@@ -294,7 +320,7 @@ public class ExchangeService {
                 return new TakeItemResponse(false, request.getSlot(), null,
                         "ITEM_NOT_FOUND", localItemStore.getLastModifiedTimestamp(),
                         before != null ? before.version() : 0,
-                        before != null ? before.version() : 0, null);
+                        before != null ? before.version() : 0, null, request.getRequestId());
             }
             if (before.item().isIncompatible()) {
                 debugTake("rejectIncompatible", "local", request.getSlot(), request.getExpectedItemId(),
@@ -304,7 +330,8 @@ public class ExchangeService {
                         "local", request.getExpectedItemId(), request.getRequestCount(),
                         false, "INCOMPATIBLE");
                 return new TakeItemResponse(false, request.getSlot(), before.item(),
-                        "INCOMPATIBLE", localItemStore.getLastModifiedTimestamp(), before.version(), before.version(), null);
+                        "INCOMPATIBLE", localItemStore.getLastModifiedTimestamp(), before.version(), before.version(), null,
+                        request.getRequestId());
             }
             LocalItemStore.TakeResult result = localItemStore.takeItem(
                     request.getSlot(), request.getExpectedItemId(),
@@ -326,7 +353,7 @@ public class ExchangeService {
                         null, timestamp,
                         updated != null ? updated.version() : result.getNewVersion(),
                         updated != null ? updated.version() : result.getNewVersion(),
-                        result.getItem());
+                        result.getItem(), request.getRequestId());
             } else {
                 operationLogger.log(request.getRequestId(), OperationType.TAKE,
                         request.getPlayerUuid(), request.getPlayerName(),
@@ -338,7 +365,7 @@ public class ExchangeService {
                         r != null ? r.item() : null,
                         result.getFailReason(), localItemStore.getLastModifiedTimestamp(),
                         r != null ? r.version() : 0,
-                        r != null ? r.version() : 0, null);
+                        r != null ? r.version() : 0, null, request.getRequestId());
             }
         } catch (Exception e) {
             operationLogger.log(request.getRequestId(), OperationType.TAKE,
@@ -346,7 +373,7 @@ public class ExchangeService {
                     "local", request.getExpectedItemId(), request.getRequestCount(),
                     false, e.getMessage());
             return new TakeItemResponse(false, request.getSlot(), null,
-                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0, 0, null);
+                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0, 0, null, request.getRequestId());
         }
     }
 
@@ -446,19 +473,20 @@ public class ExchangeService {
                 LocalItemStore.ItemRecord record = localItemStore.getItem(req.getSlot());
                 int version = record != null ? record.version() : 0;
                 conn.send(FrameType.SLOT_VERSION_RESPONSE,
-                        new QuerySlotVersionResponse(req.getSlot(), version));
+                        new QuerySlotVersionResponse(req.getRequestId(), req.getSlot(), version));
             }
             case QUERY_SLOT_STATE -> {
                 QuerySlotStateRequest req = (QuerySlotStateRequest) message;
                 LocalItemStore.ItemRecord record = localItemStore.getItem(req.getSlot());
                 conn.send(FrameType.SLOT_STATE_RESPONSE,
-                        new SlotStateResponse(req.getSlot(),
+                        new SlotStateResponse(req.getRequestId(), req.getSlot(),
                                 record != null ? record.item() : null,
                                 record != null ? record.version() : 0));
             }
             case QUERY_SLOT_VERSIONS -> {
+                QuerySlotVersionsRequest req = (QuerySlotVersionsRequest) message;
                 conn.send(FrameType.SLOT_VERSIONS_RESPONSE,
-                        new SlotVersionsResponse(localSlotVersions()));
+                        new SlotVersionsResponse(req.getRequestId(), localSlotVersions()));
             }
             case QUERY_SLOTS -> {
                 QuerySlotsRequest req = (QuerySlotsRequest) message;
@@ -466,12 +494,12 @@ public class ExchangeService {
                 if (req.getSlots() != null) {
                     for (int slot : req.getSlots()) {
                         LocalItemStore.ItemRecord record = localItemStore.getItem(slot);
-                        slots.add(new SlotStateResponse(slot,
+                        slots.add(new SlotStateResponse(req.getRequestId(), slot,
                                 record != null ? record.item() : null,
                                 record != null ? record.version() : 0));
                     }
                 }
-                conn.send(FrameType.SLOTS_STATE_RESPONSE, new SlotsStateResponse(slots));
+                conn.send(FrameType.SLOTS_STATE_RESPONSE, new SlotsStateResponse(req.getRequestId(), slots));
             }
             case PUT_ITEM -> {
                 PutItemResponse resp = handleRemotePut((PutItemRequest) message);
@@ -526,6 +554,10 @@ public class ExchangeService {
 
     private String sourceServerName(Connection conn) {
         return conn.getPeerServerName() != null ? conn.getPeerServerName() : conn.getRemoteName();
+    }
+
+    private ReentrantLock localSlotLock(int slot) {
+        return localSlotLocks.computeIfAbsent(slot, ignored -> new ReentrantLock());
     }
 
     private java.util.List<Integer> localSlotVersions() {

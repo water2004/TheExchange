@@ -26,6 +26,7 @@ public class ServerRegistry {
     }
 
     public void loadFromDatabase() {
+        db.lock();
         String sql = "SELECT name, address, port, password_hash, enabled FROM remote_servers";
         try (Statement stmt = db.getConnection().createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
@@ -41,6 +42,8 @@ public class ServerRegistry {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to load servers from database", e);
+        } finally {
+            db.unlock();
         }
     }
 
@@ -61,6 +64,7 @@ public class ServerRegistry {
 
         String sql = "INSERT OR REPLACE INTO remote_servers (name, address, port, password_hash, enabled) " +
                 "VALUES (?, ?, ?, ?, 1)";
+        db.lock();
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, name);
             ps.setString(2, address);
@@ -69,6 +73,8 @@ public class ServerRegistry {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to add server " + name, e);
+        } finally {
+            db.unlock();
         }
 
         RemoteServer server = new RemoteServer(name, address, port, password, true);
@@ -90,11 +96,14 @@ public class ServerRegistry {
         }
 
         String sql = "DELETE FROM remote_servers WHERE name = ?";
+        db.lock();
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, name);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to remove server " + name, e);
+        } finally {
+            db.unlock();
         }
         return true;
     }

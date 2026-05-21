@@ -115,8 +115,18 @@ public class LocalItemStore {
         persistScopeSnapshot(scope, slots, lastModifiedAt, revision, null);
     }
 
-    synchronized void persistScopeSnapshot(InventoryScope scope, List<LocalInventoryCache.SlotSnapshot> slots,
-                                           long lastModifiedAt, long revision, String defaultAddedBy) {
+    void persistScopeSnapshot(InventoryScope scope, List<LocalInventoryCache.SlotSnapshot> slots,
+                              long lastModifiedAt, long revision, String defaultAddedBy) {
+        db.lock();
+        try {
+            persistScopeSnapshotLocked(scope, slots, lastModifiedAt, revision, defaultAddedBy);
+        } finally {
+            db.unlock();
+        }
+    }
+
+    private void persistScopeSnapshotLocked(InventoryScope scope, List<LocalInventoryCache.SlotSnapshot> slots,
+                                            long lastModifiedAt, long revision, String defaultAddedBy) {
         int upperBound = Math.max(getMaxSlotFromDb(scope), maxSnapshotSlot(slots));
         if (upperBound < 0) {
             setLastModifiedTimestamp(scope, lastModifiedAt);
@@ -158,6 +168,7 @@ public class LocalItemStore {
     }
 
     private List<LocalInventoryCache.SlotSnapshot> readAllSlotsFromDb(InventoryScope scope) {
+        db.lock();
         List<LocalInventoryCache.SlotSnapshot> slots = new ArrayList<>();
         String sql = "SELECT slot, item_data, version FROM exchange_items WHERE scope_type = ? AND scope_id = ? ORDER BY slot";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -177,11 +188,14 @@ public class LocalItemStore {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to get all items", e);
+        } finally {
+            db.unlock();
         }
         return slots;
     }
 
     private ItemRecord readItemFromDb(InventoryScope scope, int slot) {
+        db.lock();
         String sql = "SELECT slot, item_data, added_by, added_at, updated_at, version " +
                 "FROM exchange_items WHERE scope_type = ? AND scope_id = ? AND slot = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -201,6 +215,8 @@ public class LocalItemStore {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to get item at slot " + slot, e);
+        } finally {
+            db.unlock();
         }
         return null;
     }
@@ -252,6 +268,7 @@ public class LocalItemStore {
     }
 
     private long readLastModifiedTimestampFromDb(InventoryScope scope) {
+        db.lock();
         String sql = "SELECT last_modified FROM inventory_metadata WHERE scope_type = ? AND scope_id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, scope.typeName());
@@ -262,11 +279,14 @@ public class LocalItemStore {
                 }
             }
         } catch (SQLException ignored) {
+        } finally {
+            db.unlock();
         }
         return 0;
     }
 
     private int getMaxSlotFromDb(InventoryScope scope) {
+        db.lock();
         String sql = "SELECT MAX(slot) FROM exchange_items WHERE scope_type = ? AND scope_id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, scope.typeName());
@@ -276,10 +296,13 @@ public class LocalItemStore {
             }
         } catch (SQLException e) {
             return -1;
+        } finally {
+            db.unlock();
         }
     }
 
     private void setLastModifiedTimestamp(InventoryScope scope, long timestamp) {
+        db.lock();
         String sql = "INSERT OR REPLACE INTO inventory_metadata (scope_type, scope_id, last_modified) VALUES (?, ?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, scope.typeName());
@@ -288,6 +311,8 @@ public class LocalItemStore {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to update inventory timestamp", e);
+        } finally {
+            db.unlock();
         }
     }
 

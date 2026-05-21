@@ -1,6 +1,6 @@
 package org.edtp.theexchange.network.protocol.messages;
 
-public class TakeItemRequest {
+public class TakeItemRequest implements CorrelatedMessage {
     private int slot;
     private String expectedItemId;
     private int expectedVersion;

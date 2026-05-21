@@ -2,7 +2,7 @@ package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
 
-public class TakeItemResponse {
+public class TakeItemResponse implements CorrelatedMessage {
     private boolean success;
     private int slot;
     private NeutralItem currentItem;
@@ -11,6 +11,7 @@ public class TakeItemResponse {
     private int newVersion;
     private int remoteVersion;
     private NeutralItem itemsToGive;
+    private String requestId;
 
     public TakeItemResponse() {}
 
@@ -23,6 +24,13 @@ public class TakeItemResponse {
     public TakeItemResponse(boolean success, int slot, NeutralItem currentItem,
                             String failReason, long newTimestamp, int newVersion,
                             int remoteVersion, NeutralItem itemsToGive) {
+        this(success, slot, currentItem, failReason, newTimestamp, newVersion,
+                remoteVersion, itemsToGive, null);
+    }
+
+    public TakeItemResponse(boolean success, int slot, NeutralItem currentItem,
+                            String failReason, long newTimestamp, int newVersion,
+                            int remoteVersion, NeutralItem itemsToGive, String requestId) {
         this.success = success;
         this.slot = slot;
         this.currentItem = currentItem;
@@ -31,6 +39,7 @@ public class TakeItemResponse {
         this.newVersion = newVersion;
         this.remoteVersion = remoteVersion;
         this.itemsToGive = itemsToGive;
+        this.requestId = requestId;
     }
 
     public boolean isSuccess() { return success; }
@@ -56,4 +65,10 @@ public class TakeItemResponse {
 
     public NeutralItem getItemsToGive() { return itemsToGive; }
     public void setItemsToGive(NeutralItem itemsToGive) { this.itemsToGive = itemsToGive; }
+
+    @Override
+    public String getRequestId() { return requestId; }
+
+    @Override
+    public void setRequestId(String requestId) { this.requestId = requestId; }
 }

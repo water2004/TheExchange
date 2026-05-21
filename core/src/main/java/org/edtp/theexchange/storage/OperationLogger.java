@@ -29,6 +29,7 @@ public class OperationLogger {
     public boolean log(InventoryScope scope, String requestId, OperationType opType,
                        String playerUuid, String playerName, String serverName,
                        String itemId, int quantity, boolean success, String failReason) {
+        db.lock();
         String sql = "INSERT INTO operation_log (timestamp, op_type, scope_type, scope_id, player_uuid, player_name, server_name, " +
                 "item_id, quantity, result, fail_reason, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -51,6 +52,8 @@ public class OperationLogger {
                 return false; // Idempotent: already logged
             }
             throw new RuntimeException("Failed to log operation", e);
+        } finally {
+            db.unlock();
         }
     }
 
@@ -58,6 +61,7 @@ public class OperationLogger {
      * Check if a requestId has already been processed (idempotency check).
      */
     public LogEntry findByRequestId(String requestId) {
+        db.lock();
         String sql = "SELECT * FROM operation_log WHERE request_id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, requestId);
@@ -68,11 +72,14 @@ public class OperationLogger {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to find log by requestId", e);
+        } finally {
+            db.unlock();
         }
         return null;
     }
 
     public List<LogEntry> queryLogs(long sinceTimestamp) {
+        db.lock();
         List<LogEntry> results = new ArrayList<>();
         String sql = "SELECT * FROM operation_log WHERE timestamp >= ? ORDER BY timestamp DESC";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -84,11 +91,14 @@ public class OperationLogger {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to query logs", e);
+        } finally {
+            db.unlock();
         }
         return results;
     }
 
     public int cleanupOldLogs(int retentionDays) {
+        db.lock();
         long cutoff = System.currentTimeMillis() - (long) retentionDays * 24 * 3600 * 1000;
         String sql = "DELETE FROM operation_log WHERE timestamp < ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -96,6 +106,8 @@ public class OperationLogger {
             return ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to cleanup old logs", e);
+        } finally {
+            db.unlock();
         }
     }
 

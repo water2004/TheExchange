@@ -55,10 +55,15 @@ public final class CachedInventory {
                     if (snapshot == null || snapshot.slot() < 0) continue;
                     ensureCapacity(snapshot.slot() + 1);
                     SlotState state = slots.get(snapshot.slot());
-                    state.item = snapshot.item() != null ? snapshot.item().copy() : null;
-                    state.version = snapshot.version();
-                    if (state.item != null) {
-                        state.item.setVersion(state.version);
+                    state.lock.lock();
+                    try {
+                        state.item = snapshot.item() != null ? snapshot.item().copy() : null;
+                        state.version = snapshot.version();
+                        if (state.item != null) {
+                            state.item.setVersion(state.version);
+                        }
+                    } finally {
+                        state.lock.unlock();
                     }
                 }
             }

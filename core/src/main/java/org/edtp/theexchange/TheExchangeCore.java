@@ -24,7 +24,6 @@ public class TheExchangeCore {
     private final ExecutorService coreExecutor;
     private volatile boolean initialized;
     private volatile boolean shuttingDown;
-    private volatile Thread coreThread;
     private CompletableFuture<Void> startupFuture;
 
     // Storage
@@ -48,12 +47,15 @@ public class TheExchangeCore {
 
     public TheExchangeCore(ExchangeAPI api) {
         this.api = api;
-        this.coreExecutor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+        this.coreExecutor = Executors.newFixedThreadPool(
+                Math.max(4, Runtime.getRuntime().availableProcessors()),
+                new ThreadFactory() {
+            private final java.util.concurrent.atomic.AtomicInteger index = new java.util.concurrent.atomic.AtomicInteger();
+
             @Override
             public Thread newThread(Runnable runnable) {
-                Thread thread = new Thread(runnable, "exchange-core");
+                Thread thread = new Thread(runnable, "exchange-core-" + index.incrementAndGet());
                 thread.setDaemon(true);
-                coreThread = thread;
                 return thread;
             }
         });
@@ -75,7 +77,6 @@ public class TheExchangeCore {
     public MenuInteractionService getMenuInteractionService() { return menuInteractionService; }
     public ExchangeService getExchangeService() { return exchangeService; }
     public boolean isInitialized() { return initialized; }
-    public boolean isOnCoreThread() { return Thread.currentThread() == coreThread; }
 
     public CompletableFuture<Void> startAsync() {
         if (startupFuture != null) {
@@ -91,13 +92,6 @@ public class TheExchangeCore {
     public <T> CompletableFuture<T> submit(Callable<T> task) {
         if (shuttingDown) {
             return CompletableFuture.failedFuture(new IllegalStateException("TheExchange core is shutting down"));
-        }
-        if (isOnCoreThread()) {
-            try {
-                return CompletableFuture.completedFuture(task.call());
-            } catch (Exception e) {
-                return CompletableFuture.failedFuture(e);
-            }
         }
         CompletableFuture<T> future = new CompletableFuture<>();
         coreExecutor.execute(() -> {
@@ -199,13 +193,6 @@ public class TheExchangeCore {
      * This ensures config is available before database/network setup.
      */
     public void initialize(int localPort, String localPassword) {
-        if (!isOnCoreThread()) {
-            submit(() -> {
-                initialize(localPort, localPassword);
-                return null;
-            }).join();
-            return;
-        }
         if (initialized) {
             api.getLogger().warn("TheExchange core already initialized");
             return;
@@ -291,13 +278,6 @@ public class TheExchangeCore {
     }
 
     public void initialize() {
-        if (!isOnCoreThread()) {
-            submit(() -> {
-                initialize();
-                return null;
-            }).join();
-            return;
-        }
         api.getConfigLoader().loadConfig();
         ExchangeAPI.RuntimeConfig config = api.getConfigLoader().getRuntimeConfig();
         initialize(config.getPort(), config.getPassword());
