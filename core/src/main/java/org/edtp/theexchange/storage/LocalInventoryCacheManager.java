@@ -213,8 +213,8 @@ public final class LocalInventoryCacheManager {
 
     private void flushCache(InventoryScope scope, LocalInventoryCache cache) {
         if (cache == null) return;
-        LocalInventoryCache.Snapshot snapshot = cache.snapshotForFlush();
-        store.persistScopeSnapshot(scope, snapshot.slots(), snapshot.lastModifiedAt(), snapshot.revision());
+        org.edtp.theexchange.model.AbstractSlotInventoryCache.FlushSnapshot snapshot = cache.snapshotForFlush();
+        store.persistScopeSnapshot(scope, snapshot.slots(), snapshot.metadataAt(), snapshot.revision());
         cache.markClean(snapshot.revision());
     }
 

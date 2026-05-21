@@ -1,6 +1,7 @@
 package org.edtp.theexchange.service;
 
 import org.edtp.theexchange.model.CachedInventory;
+import org.edtp.theexchange.model.AbstractSlotInventoryCache;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.storage.RemoteCacheStore;
@@ -287,7 +288,7 @@ public class CacheManager {
 
     private void flush(RemoteScopeKey key, CachedInventory cache) {
         if (cache == null) return;
-        CachedInventory.Snapshot snapshot = cache.snapshotForFlush();
+        AbstractSlotInventoryCache.FlushSnapshot snapshot = cache.snapshotForFlush();
         for (CachedInventory.SlotSnapshot slot : snapshot.slots()) {
             persistSlot(key, slot.slot(), slot.item(), slot.version());
         }
@@ -296,7 +297,7 @@ public class CacheManager {
 
     private void flushDirty(RemoteScopeKey key, CachedInventory cache) {
         if (cache == null) return;
-        CachedInventory.Snapshot snapshot = cache.snapshotForFlush();
+        AbstractSlotInventoryCache.FlushSnapshot snapshot = cache.snapshotForFlush();
         List<Integer> dirtySlots = cache.dirtySlots();
         if (dirtySlots.isEmpty()) {
             cache.markClean(snapshot.revision());
