@@ -55,15 +55,24 @@ public class CacheManager {
         return cache != null ? cache.getVersion(slot) : 0;
     }
 
-    public Map<Integer, Integer> getVersions(String serverName, InventoryScope scope) {
+    public List<Integer> getVersions(String serverName, InventoryScope scope) {
         CachedInventory cache = getOrLoad(RemoteScopeKey.of(serverName, scope));
-        return cache != null ? cache.versionMap() : Map.of();
+        return cache != null ? cache.versions() : List.of();
     }
 
-    public List<Integer> changedSlots(String serverName, InventoryScope scope, Map<Integer, Integer> remoteVersions) {
+    public List<Integer> changedSlots(String serverName, InventoryScope scope, List<Integer> remoteVersions) {
         CachedInventory cache = getOrLoad(RemoteScopeKey.of(serverName, scope));
-        Map<Integer, Integer> versions = remoteVersions != null ? remoteVersions : Map.of();
-        return cache != null ? cache.changedSlots(versions) : new ArrayList<>(versions.keySet());
+        List<Integer> versions = remoteVersions != null ? remoteVersions : List.of();
+        if (cache != null) {
+            return cache.changedSlots(versions);
+        }
+        List<Integer> changed = new ArrayList<>(versions.size());
+        for (int slot = 0; slot < versions.size(); slot++) {
+            if (versions.get(slot) != null && versions.get(slot) != 0) {
+                changed.add(slot);
+            }
+        }
+        return changed;
     }
 
     public void updateCacheSlots(String serverName, InventoryScope scope,
@@ -113,6 +122,8 @@ public class CacheManager {
         CachedInventory cache = getOrLoad(key);
         if (cache != null) {
             cache.removeSlot(slot);
+            persistSlotAsync(key, slot, null, cache.getVersion(slot));
+            return;
         }
         persistSlotAsync(key, slot, null, 0);
     }
@@ -240,10 +251,6 @@ public class CacheManager {
     }
 
     private void persistSlot(RemoteScopeKey key, int slot, NeutralItem item, int version) {
-        if (item == null || item.isEmpty()) {
-            cacheStore.removeSlot(key.serverName(), key.scope(), slot);
-            return;
-        }
         cacheStore.saveSlot(key.serverName(), key.scope(), slot, item, version);
     }
 

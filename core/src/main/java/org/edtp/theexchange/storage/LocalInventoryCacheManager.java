@@ -75,6 +75,10 @@ public final class LocalInventoryCacheManager {
         return getOrLoad(scope).get(slot);
     }
 
+    public int getVersion(InventoryScope scope, int slot) {
+        return getOrLoad(scope).getVersion(slot);
+    }
+
     public LocalItemStore.PutResult put(InventoryScope scope, int slot, NeutralItem item, int expectedVersion, String addedBy) {
         LocalInventoryCache cache = getOrLoad(scope);
         LocalInventoryCache.Result result = cache.put(slot, item, expectedVersion, addedBy,
@@ -142,7 +146,7 @@ public final class LocalInventoryCacheManager {
 
     private LocalInventoryCache load(InventoryScope scope) {
         LocalItemStore.ScopeSnapshot snapshot = store.loadScopeSnapshot(scope);
-        List<NeutralItem> items = snapshot.items();
+        List<LocalInventoryCache.SlotSnapshot> items = snapshot.slots();
         long ts = snapshot.lastModifiedAt();
         LocalInventoryCache cache = new LocalInventoryCache(scope, Math.max(54, items.size()));
         cache.markLoaded(items, ts);
@@ -210,7 +214,7 @@ public final class LocalInventoryCacheManager {
     private void flushCache(InventoryScope scope, LocalInventoryCache cache) {
         if (cache == null) return;
         LocalInventoryCache.Snapshot snapshot = cache.snapshotForFlush();
-        store.persistScopeSnapshot(scope, snapshot.items(), snapshot.lastModifiedAt(), snapshot.revision());
+        store.persistScopeSnapshot(scope, snapshot.slots(), snapshot.lastModifiedAt(), snapshot.revision());
         cache.markClean(snapshot.revision());
     }
 

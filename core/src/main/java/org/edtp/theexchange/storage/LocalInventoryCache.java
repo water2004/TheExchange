@@ -40,18 +40,35 @@ public final class LocalInventoryCache {
         return scope;
     }
 
-    public void markLoaded(List<NeutralItem> source, long lastModifiedAt) {
+    public void markLoaded(List<SlotSnapshot> source, long lastModifiedAt) {
         snapshotLock.writeLock().lock();
         try {
-            int targetSize = Math.max(slotCount(), source != null ? source.size() : 0);
+            int maxSlot = -1;
+            if (source != null) {
+                for (SlotSnapshot snapshot : source) {
+                    if (snapshot != null) {
+                        maxSlot = Math.max(maxSlot, snapshot.slot());
+                    }
+                }
+            }
+            int targetSize = Math.max(slotCount(), maxSlot + 1);
             ensureCapacity(targetSize);
             for (SlotState slot : slotSnapshot()) {
                 slot.item = null;
+                slot.version = 0;
                 slot.dirty = false;
             }
             if (source != null) {
-                for (int i = 0; i < source.size(); i++) {
-                    slots.get(i).item = copyOf(source.get(i));
+                for (SlotSnapshot snapshot : source) {
+                    if (snapshot == null || snapshot.slot() < 0) continue;
+                    ensureCapacity(snapshot.slot() + 1);
+                    NeutralItem item = copyOf(snapshot.item());
+                    SlotState slot = slots.get(snapshot.slot());
+                    slot.item = item;
+                    slot.version = snapshot.version();
+                    if (slot.item != null) {
+                        slot.item.setVersion(slot.version);
+                    }
                 }
             }
             dirty = false;
@@ -95,7 +112,7 @@ public final class LocalInventoryCache {
             List<SlotState> currentSlots = slotSnapshot();
             List<NeutralItem> copy = new ArrayList<>(currentSlots.size());
             for (SlotState slot : currentSlots) {
-                copy.add(copyOf(slot.item));
+                copy.add(slotCopy(slot).item());
             }
             return copy;
         } finally {
@@ -108,9 +125,10 @@ public final class LocalInventoryCache {
         try {
             touch();
             List<SlotState> currentSlots = slotSnapshot();
-            List<NeutralItem> copy = new ArrayList<>(currentSlots.size());
-            for (SlotState slot : currentSlots) {
-                copy.add(copyOf(slot.item));
+            List<SlotSnapshot> copy = new ArrayList<>(currentSlots.size());
+            for (int i = 0; i < currentSlots.size(); i++) {
+                SlotCopy slot = slotCopy(currentSlots.get(i));
+                copy.add(new SlotSnapshot(i, slot.item(), slot.version()));
             }
             return new Snapshot(copy, lastModifiedAt, revision.get());
         } finally {
@@ -126,7 +144,24 @@ public final class LocalInventoryCache {
             if (state == null) return null;
             state.lock.lock();
             try {
-                return copyOf(state.item);
+                return copyWithSlotVersion(state.item, state.version);
+            } finally {
+                state.lock.unlock();
+            }
+        } finally {
+            snapshotLock.readLock().unlock();
+        }
+    }
+
+    public int getVersion(int slot) {
+        snapshotLock.readLock().lock();
+        try {
+            touch();
+            SlotState state = existingSlot(slot);
+            if (state == null) return 0;
+            state.lock.lock();
+            try {
+                return state.version;
             } finally {
                 state.lock.unlock();
             }
@@ -156,17 +191,19 @@ public final class LocalInventoryCache {
                 return Result.fail("INCOMPATIBLE");
             }
             if (current == null || current.isEmpty()) {
-                if (expectedVersion != 0) {
+                if (state.version != expectedVersion) {
                     return Result.fail("VERSION_MISMATCH");
                 }
                 NeutralItem stored = copyOf(item);
-                stored.setVersion(1);
+                int newVersion = state.version + 1;
+                stored.setVersion(newVersion);
                 state.item = stored;
+                state.version = newVersion;
                 markDirty(state);
                 lastModifiedAt = System.currentTimeMillis();
-                return Result.success(stored.copy(), 1);
+                return Result.success(stored.copy(), newVersion);
             }
-            if (current.getVersion() != expectedVersion) {
+            if (state.version != expectedVersion) {
                 return Result.fail("VERSION_MISMATCH");
             }
             if (current.isIncompatible()) {
@@ -180,12 +217,14 @@ public final class LocalInventoryCache {
             if (mergedCount > maxStack) {
                 return Result.fail("STACK_OVERFLOW");
             }
+            int newVersion = state.version + 1;
             current.setCount(mergedCount);
-            current.setVersion(current.getVersion() + 1);
+            current.setVersion(newVersion);
             state.item = current;
+            state.version = newVersion;
             markDirty(state);
             lastModifiedAt = System.currentTimeMillis();
-            return Result.success(current.copy(), current.getVersion());
+            return Result.success(current.copy(), newVersion);
             } finally {
                 state.lock.unlock();
             }
@@ -208,7 +247,7 @@ public final class LocalInventoryCache {
             if (current == null || current.isEmpty()) {
                 return Result.fail("ITEM_NOT_FOUND");
             }
-            if (current.getVersion() != expectedVersion) {
+            if (state.version != expectedVersion) {
                 return Result.fail("VERSION_MISMATCH");
             }
             if (!Objects.equals(current.getItemId(), expectedItemId)) {
@@ -223,7 +262,8 @@ public final class LocalInventoryCache {
             NeutralItem taken = current.copy();
             taken.setCount(requestCount);
             int remaining = current.getCount() - requestCount;
-            int newVersion = current.getVersion() + 1;
+            int newVersion = state.version + 1;
+            state.version = newVersion;
             if (remaining > 0) {
                 current.setCount(remaining);
                 current.setVersion(newVersion);
@@ -254,7 +294,12 @@ public final class LocalInventoryCache {
             SlotState state = existingSlot(slot);
             state.lock.lock();
             try {
+                int newVersion = state.version + 1;
                 state.item = copyOf(item);
+                if (state.item != null) {
+                    state.item.setVersion(newVersion);
+                }
+                state.version = newVersion;
                 markDirty(state);
             } finally {
                 state.lock.unlock();
@@ -349,13 +394,38 @@ public final class LocalInventoryCache {
         return item == null ? null : item.copy();
     }
 
+    private static NeutralItem copyWithSlotVersion(NeutralItem item, int version) {
+        NeutralItem copy = copyOf(item);
+        if (copy != null) {
+            copy.setVersion(version);
+        }
+        return copy;
+    }
+
+    private static SlotCopy slotCopy(SlotState slot) {
+        if (slot == null) {
+            return new SlotCopy(null, 0);
+        }
+        slot.lock.lock();
+        try {
+            return new SlotCopy(copyWithSlotVersion(slot.item, slot.version), slot.version);
+        } finally {
+            slot.lock.unlock();
+        }
+    }
+
     private static final class SlotState {
         private final ReentrantLock lock = new ReentrantLock();
         private NeutralItem item;
+        private int version;
         private boolean dirty;
     }
 
-    public record Snapshot(List<NeutralItem> items, long lastModifiedAt, long revision) {}
+    public record SlotSnapshot(int slot, NeutralItem item, int version) {}
+
+    public record Snapshot(List<SlotSnapshot> slots, long lastModifiedAt, long revision) {}
+
+    private record SlotCopy(NeutralItem item, int version) {}
 
     public record Result(boolean success, String failReason, NeutralItem item, int newVersion) {
         public static Result success(NeutralItem item, int newVersion) {

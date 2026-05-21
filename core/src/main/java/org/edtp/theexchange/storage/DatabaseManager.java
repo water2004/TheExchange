@@ -32,7 +32,7 @@ public class DatabaseManager {
                     "scope_type  TEXT    NOT NULL," +
                     "scope_id    TEXT    NOT NULL," +
                     "slot        INTEGER NOT NULL," +
-                    "item_data   BLOB    NOT NULL," +
+                    "item_data   BLOB," +
                     "added_by    TEXT," +
                     "added_at    INTEGER NOT NULL," +
                     "updated_at  INTEGER NOT NULL," +
@@ -53,7 +53,7 @@ public class DatabaseManager {
                     "scope_type       TEXT    NOT NULL," +
                     "scope_id         TEXT    NOT NULL," +
                     "slot             INTEGER NOT NULL," +
-                    "items_blob       BLOB    NOT NULL," +
+                    "items_blob       BLOB," +
                     "version          INTEGER NOT NULL," +
                     "synced_at        INTEGER NOT NULL," +
                     "PRIMARY KEY (server_name, scope_type, scope_id, slot))");

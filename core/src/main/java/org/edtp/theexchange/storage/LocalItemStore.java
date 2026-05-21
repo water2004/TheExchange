@@ -51,11 +51,8 @@ public class LocalItemStore {
     public ItemRecord getItem(InventoryScope scope, int slot) {
         LocalInventoryCacheManager manager = requireCacheManager();
         NeutralItem item = manager.get(scope, slot);
-        if (item == null) {
-            return null;
-        }
         return new ItemRecord(slot, item, null, 0,
-                manager.getOrLoad(scope).getLastModifiedAt(), item.getVersion());
+                manager.getOrLoad(scope).getLastModifiedAt(), manager.getVersion(scope, slot));
     }
 
     public PutResult putItem(int slot, NeutralItem item, int expectedVersion, String addedBy) {
@@ -110,16 +107,17 @@ public class LocalItemStore {
     }
 
     ScopeSnapshot loadScopeSnapshot(InventoryScope scope) {
-        return new ScopeSnapshot(readAllItemsFromDb(scope), readLastModifiedTimestampFromDb(scope), getMaxSlotFromDb(scope));
+        return new ScopeSnapshot(readAllSlotsFromDb(scope), readLastModifiedTimestampFromDb(scope), getMaxSlotFromDb(scope));
     }
 
-    void persistScopeSnapshot(InventoryScope scope, List<NeutralItem> items, long lastModifiedAt, long revision) {
-        persistScopeSnapshot(scope, items, lastModifiedAt, revision, null);
+    void persistScopeSnapshot(InventoryScope scope, List<LocalInventoryCache.SlotSnapshot> slots,
+                              long lastModifiedAt, long revision) {
+        persistScopeSnapshot(scope, slots, lastModifiedAt, revision, null);
     }
 
-    synchronized void persistScopeSnapshot(InventoryScope scope, List<NeutralItem> items,
+    synchronized void persistScopeSnapshot(InventoryScope scope, List<LocalInventoryCache.SlotSnapshot> slots,
                                            long lastModifiedAt, long revision, String defaultAddedBy) {
-        int upperBound = Math.max(getMaxSlotFromDb(scope), items != null ? items.size() - 1 : -1);
+        int upperBound = Math.max(getMaxSlotFromDb(scope), maxSnapshotSlot(slots));
         if (upperBound < 0) {
             setLastModifiedTimestamp(scope, lastModifiedAt);
             return;
@@ -127,19 +125,28 @@ public class LocalItemStore {
         try {
             beginImmediate();
             for (int slot = 0; slot <= upperBound; slot++) {
-                NeutralItem item = items != null && slot < items.size() ? items.get(slot) : null;
+                LocalInventoryCache.SlotSnapshot snapshot = snapshotAt(slots, slot);
+                NeutralItem item = snapshot != null ? snapshot.item() : null;
+                int version = snapshot != null ? snapshot.version() : 0;
                 ItemRecord current = readItemFromDb(scope, slot);
                 if (item == null || item.isEmpty()) {
-                    if (current != null && current.item != null) {
-                        deleteItem(scope, slot);
+                    if (version == 0) {
+                        if (current != null) {
+                            deleteItem(scope, slot);
+                        }
+                    } else if (current == null) {
+                        insertItem(scope, slot, null, defaultAddedBy, System.currentTimeMillis(), version);
+                    } else {
+                        updateItem(scope, slot, null, version, System.currentTimeMillis());
                     }
                     continue;
                 }
                 NeutralItem copy = item.copy();
+                copy.setVersion(version);
                 if (current == null || current.item == null || current.item.isEmpty()) {
-                    insertItem(scope, slot, copy, defaultAddedBy, System.currentTimeMillis());
+                    insertItem(scope, slot, copy, defaultAddedBy, System.currentTimeMillis(), version);
                 } else {
-                    updateItem(scope, slot, copy, copy.getVersion(), System.currentTimeMillis());
+                    updateItem(scope, slot, copy, version, System.currentTimeMillis());
                 }
             }
             setLastModifiedTimestamp(scope, lastModifiedAt);
@@ -150,8 +157,8 @@ public class LocalItemStore {
         }
     }
 
-    private List<NeutralItem> readAllItemsFromDb(InventoryScope scope) {
-        List<NeutralItem> items = new ArrayList<>();
+    private List<LocalInventoryCache.SlotSnapshot> readAllSlotsFromDb(InventoryScope scope) {
+        List<LocalInventoryCache.SlotSnapshot> slots = new ArrayList<>();
         String sql = "SELECT slot, item_data, version FROM exchange_items WHERE scope_type = ? AND scope_id = ? ORDER BY slot";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, scope.typeName());
@@ -159,21 +166,19 @@ public class LocalItemStore {
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     int slot = rs.getInt("slot");
-                    while (items.size() <= slot) {
-                        items.add(null);
-                    }
                     byte[] blob = rs.getBytes("item_data");
                     NeutralItem item = NeutralItemBlobCodec.decode(blob);
+                    int version = rs.getInt("version");
                     if (item != null) {
-                        item.setVersion(rs.getInt("version"));
+                        item.setVersion(version);
                     }
-                    items.set(slot, item);
+                    slots.add(new LocalInventoryCache.SlotSnapshot(slot, item, version));
                 }
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to get all items", e);
         }
-        return items;
+        return slots;
     }
 
     private ItemRecord readItemFromDb(InventoryScope scope, int slot) {
@@ -200,7 +205,7 @@ public class LocalItemStore {
         return null;
     }
 
-    private void insertItem(InventoryScope scope, int slot, NeutralItem item, String addedBy, long now) {
+    private void insertItem(InventoryScope scope, int slot, NeutralItem item, String addedBy, long now, int version) {
         String sql = "INSERT OR REPLACE INTO exchange_items (scope_type, scope_id, slot, item_data, added_by, added_at, updated_at, version) " +
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -211,7 +216,7 @@ public class LocalItemStore {
             ps.setString(5, addedBy);
             ps.setLong(6, now);
             ps.setLong(7, now);
-            ps.setInt(8, item.getVersion());
+            ps.setInt(8, version);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to insert item at slot " + slot, e);
@@ -305,10 +310,32 @@ public class LocalItemStore {
         }
     }
 
+    private int maxSnapshotSlot(List<LocalInventoryCache.SlotSnapshot> snapshots) {
+        int max = -1;
+        if (snapshots != null) {
+            for (LocalInventoryCache.SlotSnapshot snapshot : snapshots) {
+                if (snapshot != null) {
+                    max = Math.max(max, snapshot.slot());
+                }
+            }
+        }
+        return max;
+    }
+
+    private LocalInventoryCache.SlotSnapshot snapshotAt(List<LocalInventoryCache.SlotSnapshot> snapshots, int slot) {
+        if (snapshots == null) return null;
+        for (LocalInventoryCache.SlotSnapshot snapshot : snapshots) {
+            if (snapshot != null && snapshot.slot() == slot) {
+                return snapshot;
+            }
+        }
+        return null;
+    }
+
     public record ItemRecord(int slot, NeutralItem item, String addedBy, long addedAt,
                              long updatedAt, int version) {}
 
-    record ScopeSnapshot(List<NeutralItem> items, long lastModifiedAt, int maxSlot) {}
+    record ScopeSnapshot(List<LocalInventoryCache.SlotSnapshot> slots, long lastModifiedAt, int maxSlot) {}
 
     public record PutResult(boolean success, NeutralItem item, String failReason, int newVersion) {
         public static PutResult success(NeutralItem item, int newVersion) {

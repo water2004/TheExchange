@@ -222,7 +222,8 @@ public class ExchangeService {
             return new PutItemResponse(existing.success(), request.getSlot(),
                     r != null ? r.item() : null,
                     existing.failReason(), localItemStore.getLastModifiedTimestamp(),
-                    r != null ? r.version() : 1);
+                    r != null ? r.version() : 0,
+                    r != null ? r.version() : 0);
         }
 
         try {
@@ -245,7 +246,8 @@ public class ExchangeService {
                 long timestamp = localItemStore.getLastModifiedTimestamp();
                 return new PutItemResponse(true, request.getSlot(),
                         after != null ? after.item() : result.getItem(),
-                        null, timestamp, after != null ? after.version() : result.getNewVersion(),
+                        null, timestamp,
+                        after != null ? after.version() : result.getNewVersion(),
                         after != null ? after.version() : result.getNewVersion());
             }
 
@@ -273,10 +275,11 @@ public class ExchangeService {
         OperationLogger.LogEntry existing = operationLogger.findByRequestId(request.getRequestId());
         if (existing != null) {
             LocalItemStore.ItemRecord r = localItemStore.getItem(request.getSlot());
-            return new TakeItemResponse(existing.success(), request.getSlot(),
-                    r != null ? r.item() : null,
-                    existing.failReason(), localItemStore.getLastModifiedTimestamp(),
-                    r != null ? r.version() : 0, null);
+                return new TakeItemResponse(existing.success(), request.getSlot(),
+                        r != null ? r.item() : null,
+                        existing.failReason(), localItemStore.getLastModifiedTimestamp(),
+                        r != null ? r.version() : 0,
+                        r != null ? r.version() : 0, null);
         }
 
         try {
@@ -289,7 +292,9 @@ public class ExchangeService {
                         "local", request.getExpectedItemId(), request.getRequestCount(),
                         false, "ITEM_NOT_FOUND");
                 return new TakeItemResponse(false, request.getSlot(), null,
-                        "ITEM_NOT_FOUND", localItemStore.getLastModifiedTimestamp(), 0, 0, null);
+                        "ITEM_NOT_FOUND", localItemStore.getLastModifiedTimestamp(),
+                        before != null ? before.version() : 0,
+                        before != null ? before.version() : 0, null);
             }
             if (before.item().isIncompatible()) {
                 debugTake("rejectIncompatible", "local", request.getSlot(), request.getExpectedItemId(),
@@ -438,9 +443,8 @@ public class ExchangeService {
             case QUERY_TIMESTAMP, QUERY_ITEMS -> {}
             case QUERY_SLOT_VERSION -> {
                 QuerySlotVersionRequest req = (QuerySlotVersionRequest) message;
-                int version = localItemStore.getItem(req.getSlot()) != null
-                        ? localItemStore.getItem(req.getSlot()).version()
-                        : 0;
+                LocalItemStore.ItemRecord record = localItemStore.getItem(req.getSlot());
+                int version = record != null ? record.version() : 0;
                 conn.send(FrameType.SLOT_VERSION_RESPONSE,
                         new QuerySlotVersionResponse(req.getSlot(), version));
             }
@@ -524,14 +528,12 @@ public class ExchangeService {
         return conn.getPeerServerName() != null ? conn.getPeerServerName() : conn.getRemoteName();
     }
 
-    private java.util.Map<Integer, Integer> localSlotVersions() {
-        java.util.LinkedHashMap<Integer, Integer> versions = new java.util.LinkedHashMap<>();
+    private java.util.List<Integer> localSlotVersions() {
+        java.util.ArrayList<Integer> versions = new java.util.ArrayList<>();
         List<NeutralItem> items = localItemStore.getAllItems();
         for (int slot = 0; slot < items.size(); slot++) {
             NeutralItem item = items.get(slot);
-            if (item != null && !item.isEmpty() && item.getVersion() > 0) {
-                versions.put(slot, item.getVersion());
-            }
+            versions.add(item != null ? item.getVersion() : 0);
         }
         return versions;
     }

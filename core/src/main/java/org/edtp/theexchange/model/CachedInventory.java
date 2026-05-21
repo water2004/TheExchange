@@ -1,9 +1,7 @@
 package org.edtp.theexchange.model;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -58,8 +56,9 @@ public final class CachedInventory {
                     ensureCapacity(snapshot.slot() + 1);
                     SlotState state = slots.get(snapshot.slot());
                     state.item = snapshot.item() != null ? snapshot.item().copy() : null;
+                    state.version = snapshot.version();
                     if (state.item != null) {
-                        state.item.setVersion(snapshot.version());
+                        state.item.setVersion(state.version);
                     }
                 }
             }
@@ -91,7 +90,11 @@ public final class CachedInventory {
         state.lock.lock();
         try {
             touch();
-            return state.item == null ? null : state.item.copy();
+            NeutralItem copy = state.item == null ? null : state.item.copy();
+            if (copy != null) {
+                copy.setVersion(state.version);
+            }
+            return copy;
         } finally {
             state.lock.unlock();
         }
@@ -103,7 +106,7 @@ public final class CachedInventory {
         state.lock.lock();
         try {
             touch();
-            return state.item == null ? 0 : state.item.getVersion();
+            return state.version;
         } finally {
             state.lock.unlock();
         }
@@ -121,6 +124,7 @@ public final class CachedInventory {
             if (state.item != null) {
                 state.item.setVersion(version);
             }
+            state.version = version;
             revision.incrementAndGet();
             touch();
         } finally {
@@ -129,7 +133,7 @@ public final class CachedInventory {
     }
 
     public void removeSlot(int slot) {
-        replaceSlot(slot, null, 0);
+        replaceSlot(slot, null, getVersion(slot));
     }
 
     public List<SlotSnapshot> snapshotSlots() {
@@ -148,16 +152,14 @@ public final class CachedInventory {
         }
     }
 
-    public Map<Integer, Integer> versionMap() {
+    public List<Integer> versions() {
         structureLock.lock();
         try {
             touch();
-            Map<Integer, Integer> versions = new LinkedHashMap<>();
+            List<Integer> versions = new ArrayList<>(slots.size());
             for (int i = 0; i < slots.size(); i++) {
                 SnapshotValue value = copyValue(slots.get(i));
-                if (value.version() > 0) {
-                    versions.put(i, value.version());
-                }
+                versions.add(value.version());
             }
             return versions;
         } finally {
@@ -165,20 +167,15 @@ public final class CachedInventory {
         }
     }
 
-    public List<Integer> changedSlots(Map<Integer, Integer> remoteVersions) {
-        Map<Integer, Integer> localVersions = versionMap();
-        Map<Integer, Integer> remote = remoteVersions != null ? remoteVersions : Map.of();
+    public List<Integer> changedSlots(List<Integer> remoteVersions) {
+        List<Integer> localVersions = versions();
+        List<Integer> remote = remoteVersions != null ? remoteVersions : List.of();
         List<Integer> changed = new ArrayList<>();
-        for (Map.Entry<Integer, Integer> entry : remote.entrySet()) {
-            int slot = entry.getKey();
-            int remoteVersion = entry.getValue() != null ? entry.getValue() : 0;
-            if (localVersions.getOrDefault(slot, 0) != remoteVersion) {
-                changed.add(slot);
-            }
-        }
-        for (Map.Entry<Integer, Integer> entry : localVersions.entrySet()) {
-            int slot = entry.getKey();
-            if (!remote.containsKey(slot) && entry.getValue() > 0) {
+        int max = Math.max(localVersions.size(), remote.size());
+        for (int slot = 0; slot < max; slot++) {
+            int localVersion = slot < localVersions.size() && localVersions.get(slot) != null ? localVersions.get(slot) : 0;
+            int remoteVersion = slot < remote.size() && remote.get(slot) != null ? remote.get(slot) : 0;
+            if (localVersion != remoteVersion) {
                 changed.add(slot);
             }
         }
@@ -233,7 +230,10 @@ public final class CachedInventory {
         state.lock.lock();
         try {
             NeutralItem item = state.item == null ? null : state.item.copy();
-            return new SnapshotValue(item, item != null ? item.getVersion() : 0);
+            if (item != null) {
+                item.setVersion(state.version);
+            }
+            return new SnapshotValue(item, state.version);
         } finally {
             state.lock.unlock();
         }
@@ -242,6 +242,7 @@ public final class CachedInventory {
     private static final class SlotState {
         private final ReentrantLock lock = new ReentrantLock();
         private NeutralItem item;
+        private int version;
     }
 
     public record SlotSnapshot(int slot, NeutralItem item, int version) {}

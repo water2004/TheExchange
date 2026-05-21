@@ -51,7 +51,7 @@ public class RemoteCacheStore {
             ps.setString(2, scope.typeName());
             ps.setString(3, scope.getScopeId());
             ps.setInt(4, slot);
-            ps.setBytes(5, item != null ? NeutralItemBlobCodec.encode(item) : new byte[0]);
+            ps.setBytes(5, item != null && !item.isEmpty() ? NeutralItemBlobCodec.encode(item) : null);
             ps.setInt(6, version);
             ps.setLong(7, System.currentTimeMillis());
             ps.executeUpdate();

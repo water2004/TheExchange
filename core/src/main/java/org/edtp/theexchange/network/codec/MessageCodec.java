@@ -11,9 +11,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 public final class MessageCodec {
 
@@ -152,12 +150,11 @@ public final class MessageCodec {
     }
 
     private static void encodeSlotVersionsResponse(DataOutputStream out, SlotVersionsResponse m) throws IOException {
-        Map<Integer, Integer> versions = m.getVersions();
+        List<Integer> versions = m.getVersions();
         out.writeInt(versions != null ? versions.size() : 0);
         if (versions != null) {
-            for (Map.Entry<Integer, Integer> entry : versions.entrySet()) {
-                out.writeInt(entry.getKey());
-                out.writeInt(entry.getValue());
+            for (Integer version : versions) {
+                out.writeInt(version != null ? version : 0);
             }
         }
     }
@@ -300,9 +297,9 @@ public final class MessageCodec {
 
     private static SlotVersionsResponse decodeSlotVersionsResponse(DataInputStream in) throws IOException {
         int size = in.readInt();
-        Map<Integer, Integer> versions = new LinkedHashMap<>(Math.max(0, size));
+        List<Integer> versions = new ArrayList<>(Math.max(0, size));
         for (int i = 0; i < size; i++) {
-            versions.put(in.readInt(), in.readInt());
+            versions.add(in.readInt());
         }
         return new SlotVersionsResponse(versions);
     }

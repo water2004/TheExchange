@@ -15,7 +15,6 @@ import org.edtp.theexchange.network.protocol.messages.SlotVersionsResponse;
 import org.edtp.theexchange.network.protocol.messages.SlotsStateResponse;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 public class SyncEngine {
@@ -42,7 +41,7 @@ public class SyncEngine {
                         FrameType.QUERY_SLOT_VERSIONS, new QuerySlotVersionsRequest(),
                         FrameType.SLOT_VERSIONS_RESPONSE, SYNC_TIMEOUT_MS)
                 .thenCompose(response -> {
-                    Map<Integer, Integer> remoteVersions = response != null ? response.getVersions() : Map.of();
+                    List<Integer> remoteVersions = response != null ? response.getVersions() : List.of();
                     List<Integer> changed = cacheManager.changedSlots(serverName, InventoryScope.server(), remoteVersions);
                     if (changed.isEmpty()) {
                         return CompletableFuture.completedFuture(null);
