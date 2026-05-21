@@ -6,12 +6,12 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.StampedLock;
 import java.util.function.ToIntFunction;
 
 public abstract class AbstractSlotInventoryCache {
 
-    private final ReentrantReadWriteLock structureLock = new ReentrantReadWriteLock();
+    private final StampedLock structureLock = new StampedLock();
     private final List<SlotState> slots = new ArrayList<>();
     private final AtomicLong revision = new AtomicLong();
     private final AtomicBoolean flushQueued = new AtomicBoolean();
@@ -168,7 +168,7 @@ public abstract class AbstractSlotInventoryCache {
     }
 
     protected final void loadFromSnapshots(List<SlotSnapshot> source, long metadataAt) {
-        structureLock.writeLock().lock();
+        long stamp = structureLock.writeLock();
         try {
             int maxSlot = -1;
             if (source != null) {
@@ -215,7 +215,7 @@ public abstract class AbstractSlotInventoryCache {
             onLoaded(metadataAt);
             touch();
         } finally {
-            structureLock.writeLock().unlock();
+            structureLock.unlockWrite(stamp);
         }
     }
 
@@ -379,14 +379,16 @@ public abstract class AbstractSlotInventoryCache {
         if (slot < 0) {
             return null;
         }
-        structureLock.readLock().lock();
+        long stamp = structureLock.tryOptimisticRead();
+        SlotState state = slot < slots.size() ? slots.get(slot) : null;
+        if (structureLock.validate(stamp)) {
+            return state;
+        }
+        stamp = structureLock.readLock();
         try {
-            if (slot >= slots.size()) {
-                return null;
-            }
-            return slots.get(slot);
+            return slot < slots.size() ? slots.get(slot) : null;
         } finally {
-            structureLock.readLock().unlock();
+            structureLock.unlockRead(stamp);
         }
     }
 
@@ -394,20 +396,17 @@ public abstract class AbstractSlotInventoryCache {
         if (slot < 0) {
             return null;
         }
-        structureLock.readLock().lock();
-        try {
-            if (slot < slots.size()) {
-                return slots.get(slot);
-            }
-        } finally {
-            structureLock.readLock().unlock();
+        long stamp = structureLock.tryOptimisticRead();
+        SlotState state = slot < slots.size() ? slots.get(slot) : null;
+        if (state != null && structureLock.validate(stamp)) {
+            return state;
         }
-        structureLock.writeLock().lock();
+        stamp = structureLock.writeLock();
         try {
             ensureCapacity(slot + 1);
             return slots.get(slot);
         } finally {
-            structureLock.writeLock().unlock();
+            structureLock.unlockWrite(stamp);
         }
     }
 
@@ -432,11 +431,11 @@ public abstract class AbstractSlotInventoryCache {
     }
 
     private List<SlotState> slotRefs() {
-        structureLock.readLock().lock();
+        long stamp = structureLock.readLock();
         try {
             return new ArrayList<>(slots);
         } finally {
-            structureLock.readLock().unlock();
+            structureLock.unlockRead(stamp);
         }
     }
 
