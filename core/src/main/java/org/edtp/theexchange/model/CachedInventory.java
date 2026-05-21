@@ -40,9 +40,8 @@ public final class CachedInventory extends AbstractSlotInventoryCache {
     }
 
     public Result put(int slot, NeutralItem item, int expectedVersion,
-                      java.util.function.BiPredicate<NeutralItem, NeutralItem> sameStackKind,
                       java.util.function.ToIntFunction<NeutralItem> maxStackSizeProvider) {
-        return putIntoSlot(slot, item, expectedVersion, sameStackKind, maxStackSizeProvider);
+        return putIntoSlot(slot, item, expectedVersion, maxStackSizeProvider);
     }
 
     @Override

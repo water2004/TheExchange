@@ -39,9 +39,8 @@ public final class LocalInventoryCache extends AbstractSlotInventoryCache {
     }
 
     public Result put(int slot, NeutralItem item, int expectedVersion, String addedBy,
-                      java.util.function.BiPredicate<NeutralItem, NeutralItem> sameStackKind,
                       java.util.function.ToIntFunction<NeutralItem> maxStackSizeProvider) {
-        return putIntoSlot(slot, item, expectedVersion, sameStackKind, maxStackSizeProvider);
+        return putIntoSlot(slot, item, expectedVersion, maxStackSizeProvider);
     }
 
     public Result take(int slot, String expectedItemId, int expectedVersion, int requestCount) {

@@ -72,6 +72,10 @@ public class NeutralItem {
                 && Arrays.equals(normalizeExtra(extraData), normalizeExtra(other.extraData));
     }
 
+    public static boolean sameStackKind(NeutralItem a, NeutralItem b) {
+        return a != null && a.sameStackKind(b);
+    }
+
     private static byte[] normalizeExtra(byte[] data) {
         return data == null || data.length == 0 ? EMPTY_BYTES : data;
     }

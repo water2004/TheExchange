@@ -7,7 +7,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.function.BiPredicate;
 import java.util.function.ToIntFunction;
 
 public abstract class AbstractSlotInventoryCache {
@@ -221,7 +220,6 @@ public abstract class AbstractSlotInventoryCache {
     }
 
     protected final Result putIntoSlot(int slot, NeutralItem item, int expectedVersion,
-                                       BiPredicate<NeutralItem, NeutralItem> sameStackKind,
                                        ToIntFunction<NeutralItem> maxStackSizeProvider) {
         if (slot < 0) {
             return Result.fail("INVALID_SLOT");
@@ -259,7 +257,7 @@ public abstract class AbstractSlotInventoryCache {
             if (current.isIncompatible()) {
                 return Result.fail("INCOMPATIBLE");
             }
-            if (sameStackKind == null || !sameStackKind.test(current, item)) {
+            if (!current.sameStackKind(item)) {
                 return Result.fail("SLOT_OCCUPIED");
             }
             int maxStack = maxStackSizeProvider != null

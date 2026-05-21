@@ -19,10 +19,9 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
+import java.util.Arrays;
 
 /**
  * Fabric-specific ItemStack ↔ NeutralItem serialization.
@@ -120,15 +119,6 @@ public class FabricItemSerializer implements ItemSerializer {
     }
 
     @Override
-    public boolean sameStackKind(NeutralItem a, NeutralItem b) {
-        if (a == null || b == null || a.isEmpty() || b.isEmpty()) {
-            return false;
-        }
-        return Objects.equals(a.getItemId(), b.getItemId())
-                && Arrays.equals(normalizeExtra(a.getExtraData()), normalizeExtra(b.getExtraData()));
-    }
-
-    @Override
     public int getMaxStackSize(NeutralItem item) {
         Object stackObj = deserialize(item);
         if (stackObj instanceof ItemStack stack) {
@@ -145,10 +135,6 @@ public class FabricItemSerializer implements ItemSerializer {
         writeCompoundSorted(tag, out);
         out.flush();
         return bos.toByteArray();
-    }
-
-    private static byte[] normalizeExtra(byte[] data) {
-        return data == null || data.length == 0 ? new byte[0] : data;
     }
 
     private void writeCompoundSorted(CompoundTag tag, DataOutputStream out) throws IOException {

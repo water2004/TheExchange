@@ -28,12 +28,6 @@ public interface ItemSerializer {
     boolean canDeserialize(NeutralItem item);
 
     /**
-     * Compare two neutral items by stack-kind identity.
-     * Count, server source version and display-only names are intentionally ignored.
-     */
-    boolean sameStackKind(NeutralItem a, NeutralItem b);
-
-    /**
      * Return the native max stack size for the given item.
      */
     int getMaxStackSize(NeutralItem item);

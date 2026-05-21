@@ -3,7 +3,6 @@ package org.edtp.theexchange.storage;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.compat.ItemSerializer;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -82,7 +81,6 @@ public final class LocalInventoryCacheManager {
     public LocalItemStore.PutResult put(InventoryScope scope, int slot, NeutralItem item, int expectedVersion, String addedBy) {
         LocalInventoryCache cache = getOrLoad(scope);
         LocalInventoryCache.Result result = cache.put(slot, item, expectedVersion, addedBy,
-                itemSerializer::sameStackKind,
                 itemSerializer::getMaxStackSize);
         if (!result.success()) {
             return LocalItemStore.PutResult.fail(result.failReason());

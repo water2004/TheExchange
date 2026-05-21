@@ -26,11 +26,6 @@ class CompatibilityCheckerTest {
             }
 
             @Override
-            public boolean sameStackKind(NeutralItem a, NeutralItem b) {
-                return false;
-            }
-
-            @Override
             public int getMaxStackSize(NeutralItem item) {
                 return 64;
             }

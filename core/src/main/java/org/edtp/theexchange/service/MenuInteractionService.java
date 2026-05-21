@@ -105,7 +105,7 @@ public class MenuInteractionService {
         if (isEmpty(stack)) return -1;
         for (int i = 0; i < EXCHANGE_SLOTS; i++) {
             NeutralItem current = itemAt(input, i);
-            if (!isEmpty(current) && sameStackKind(current, stack)
+            if (!isEmpty(current) && current.sameStackKind(stack)
                     && current.getCount() + stack.getCount() <= exchangeService.getMaxStackSize(current)) {
                 return i;
             }
@@ -119,10 +119,6 @@ public class MenuInteractionService {
     private NeutralItem itemAt(ExchangeInteraction input, int slot) {
         if (slot < 0 || slot >= input.getExchangeItems().size()) return null;
         return input.getExchangeItems().get(slot);
-    }
-
-    private boolean sameStackKind(NeutralItem a, NeutralItem b) {
-        return exchangeService != null && exchangeService.sameStackKind(a, b);
     }
 
     private boolean touchesIncompatibleItem(ExchangeInteraction input) {
@@ -172,7 +168,7 @@ public class MenuInteractionService {
     private boolean sameItemState(NeutralItem a, NeutralItem b) {
         if (isEmpty(a) && isEmpty(b)) return true;
         if (isEmpty(a) || isEmpty(b)) return false;
-        return a.getCount() == b.getCount() && sameStackKind(a, b);
+        return a.getCount() == b.getCount() && a.sameStackKind(b);
     }
 
 }

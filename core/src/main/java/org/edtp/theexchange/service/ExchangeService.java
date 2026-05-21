@@ -49,18 +49,14 @@ public class ExchangeService {
         this.syncEngine = syncEngine;
     }
 
-    public boolean sameStackKind(NeutralItem a, NeutralItem b) {
-        return itemSerializer.sameStackKind(a, b);
-    }
-
-    public int getMaxStackSize(NeutralItem item) {
-        return itemSerializer.getMaxStackSize(item);
-    }
-
     public CompletableFuture<PutResult> putItemAsync(String serverName, int slot, String playerUuid,
                                                      String playerName, Object itemStack) {
         NeutralItem item = itemSerializer.serialize(itemStack);
         return putNeutralItemAsync(serverName, slot, playerUuid, playerName, item);
+    }
+
+    public int getMaxStackSize(NeutralItem item) {
+        return itemSerializer.getMaxStackSize(item);
     }
 
     public CompletableFuture<PutResult> putNeutralItemAsync(String serverName, int slot,
@@ -427,7 +423,7 @@ public class ExchangeService {
         if (existing != null) {
             sb.append(" existing=").append(describeRecord(existing));
             sb.append(" sameKind=").append(existing.item() != null && item != null
-                    && sameStackKind(existing.item(), item));
+                    && existing.item().sameStackKind(item));
         }
         if (result != null) {
             sb.append(" resultSuccess=").append(result.isSuccess())
