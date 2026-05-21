@@ -9,6 +9,7 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.permissions.Permissions;
 import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.fabric.container.ExchangeMenu;
@@ -87,10 +88,7 @@ public class ExchangeCommand {
     }
 
     private static boolean isAdmin(CommandSourceStack src) {
-        if (src.getServer().isSingleplayer()) return true;
-        var player = src.getPlayer();
-        if (player == null) return true;
-        return src.getServer().getPlayerList().isOp(new net.minecraft.server.players.NameAndId(player.getGameProfile()));
+        return src.permissions().hasPermission(Permissions.COMMANDS_ADMIN);
     }
 
     private static int configShow(CommandContext<CommandSourceStack> ctx) {
