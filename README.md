@@ -142,9 +142,28 @@ src/                          Fabric 适配层
 
 测试机器：Intel Ultra 9 285H (6P+8E)，JDK 21.0.8，Windows 11
 
-### 测试方法
+### 生产环境线程模型
 
-对 `LocalInventoryCache`（54 槽 × 64 堆叠上限）施加 3 种竞争模式，50K 次操作/线程：
+所有业务操作（玩家点击、远端 PUT/TAKE 请求、同步查询）统一走 `TheExchangeCore.submit()` → `coreExecutor`。`coreExecutor` 是固定大小线程池，线程数由 `performance.core_threads` 控制（默认 4，上限为 CPU 核心数）。网络 I/O 由 `Connection` 内部的独立 daemon 线程处理，不占用 coreExecutor。
+
+```
+玩家点击 / 远端请求
+      │
+      ▼
+  TheExchangeCore.submit()
+      │
+      ▼
+  coreExecutor (core_threads 个线程)
+      │
+      ▼
+  ExchangeService → LocalInventoryCacheManager → LocalInventoryCache
+```
+
+### 基准测试方法
+
+测试**跳过整个生产链路**（不经过 submit、不经过 ExchangeService、无网络、无 DB），直接对 `LocalInventoryCache` 实例并发读写，测量缓存数据结构本身的吞吐上限。
+
+测试代码对每个线程数创建一个独立 `Executors.newFixedThreadPool(N)`，N 个线程同时调用同一个 cache 实例的 `take()` / `put()`。每线程执行 50K 次 take+put 操作。
 
 | 场景 | 说明 |
 |------|------|
@@ -154,9 +173,11 @@ src/                          Fabric 适配层
 
 ### 结果
 
+横轴 `N` 是测试线程池中**同时访问 cache 的线程数**（1 到 CPU 核心数），不是 `core_threads`。生产环境的实际并发度由 `core_threads` 固定。
+
 ![](bench_report.png)
 
-| 线程 | 零竞争 (M ops/s) | 随机竞争 (M ops/s) | 完全竞争 (M ops/s) |
+| N (压测线程数) | 零竞争 (M ops/s) | 随机竞争 (M ops/s) | 完全竞争 (M ops/s) |
 |------|-----------------|-------------------|-------------------|
 | 1 | 3.3 | 5.0 | 16.7 |
 | 2 | 6.5 | 3.3 | 5.9 |
