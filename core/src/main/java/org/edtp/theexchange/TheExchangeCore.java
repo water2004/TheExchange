@@ -309,6 +309,7 @@ public class TheExchangeCore {
         cacheManager = new CacheManager(remoteCacheStore, config.getCache().getRemoteInventoryCacheCapacity());
 
         Path keystorePath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "keystore.jks");
+        Path pinnedPeerKeysPath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "known-peers.properties");
         boolean reuseNetwork = networkManager != null
                 && oldConfig != null
                 && oldConfig.getPort() == config.getPort();
@@ -317,7 +318,7 @@ public class TheExchangeCore {
                 networkManager.shutdown();
             }
             try {
-                networkManager = new NetworkManager(config.getPort(), keystorePath,
+                networkManager = new NetworkManager(config.getPort(), keystorePath, pinnedPeerKeysPath,
                         config.getDisplayName(), "theexchange".toCharArray());
             } catch (Exception e) {
                 logNetworkStartFailure(config.getPort(), e);

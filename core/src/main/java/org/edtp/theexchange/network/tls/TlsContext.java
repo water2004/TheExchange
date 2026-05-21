@@ -9,7 +9,7 @@ import java.security.cert.X509Certificate;
 /**
  * TLS context with split trust model:
  * - Server side: uses self-signed certificate from keystore
- * - Client side: trusts all certificates (identity verified by password auth, not PKI)
+ * - Client side: permissive handshake, with peer identity pinned after handshake
  */
 public class TlsContext {
 
@@ -24,7 +24,7 @@ public class TlsContext {
     public static TlsContext create(Path keystorePath, String cn, char[] keystorePassword) {
         try {
             SSLContext serverCtx = SelfSignedCert.createSSLContext(keystorePath, cn, keystorePassword);
-            SSLContext clientCtx = createTrustAllContext();
+            SSLContext clientCtx = createPermissiveClientContext();
             return new TlsContext(serverCtx, clientCtx);
         } catch (Exception e) {
             throw new RuntimeException("Failed to create TLS context", e);
@@ -39,7 +39,7 @@ public class TlsContext {
         return clientContext.getSocketFactory();
     }
 
-    private static SSLContext createTrustAllContext()
+    private static SSLContext createPermissiveClientContext()
             throws NoSuchAlgorithmException, KeyManagementException {
         TrustManager[] trustAll = new TrustManager[] {
             new X509TrustManager() {

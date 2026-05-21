@@ -5,6 +5,7 @@ import org.edtp.theexchange.model.RemoteServer;
 import org.edtp.theexchange.model.ServerStatus;
 import org.edtp.theexchange.network.protocol.FrameType;
 import org.edtp.theexchange.network.protocol.messages.*;
+import org.edtp.theexchange.network.tls.PinnedPeerKeyStore;
 import org.edtp.theexchange.network.tls.TlsContext;
 
 import java.nio.file.Path;
@@ -20,6 +21,7 @@ public class NetworkManager {
     private static final String TAG = "[Exchange|Net] ";
 
     private final TlsContext tlsContext;
+    private final PinnedPeerKeyStore pinnedPeerKeyStore;
     private final TcpServer tcpServer;
     private final TcpClient tcpClient;
     private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
@@ -36,10 +38,12 @@ public class NetworkManager {
         void handle(Connection conn, FrameType type, Object message);
     }
 
-    public NetworkManager(int localPort, Path keystorePath, String cn, char[] keystorePassword) {
+    public NetworkManager(int localPort, Path keystorePath, Path pinnedPeerKeyPath,
+                          String cn, char[] keystorePassword) {
         this.tlsContext = TlsContext.create(keystorePath, cn, keystorePassword);
+        this.pinnedPeerKeyStore = new PinnedPeerKeyStore(pinnedPeerKeyPath);
         this.tcpServer = new TcpServer(localPort, tlsContext);
-        this.tcpClient = new TcpClient(tlsContext);
+        this.tcpClient = new TcpClient(tlsContext, pinnedPeerKeyStore);
         System.out.println(TAG + "Created, local port=" + localPort);
     }
 
