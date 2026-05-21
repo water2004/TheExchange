@@ -52,10 +52,12 @@ public class DatabaseManager {
                     "server_name      TEXT    NOT NULL," +
                     "scope_type       TEXT    NOT NULL," +
                     "scope_id         TEXT    NOT NULL," +
+                    "slot             INTEGER NOT NULL," +
                     "items_blob       BLOB    NOT NULL," +
+                    "version          INTEGER NOT NULL," +
                     "synced_at        INTEGER NOT NULL," +
-                    "remote_timestamp INTEGER NOT NULL," +
-                    "PRIMARY KEY (server_name, scope_type, scope_id))");
+                    "PRIMARY KEY (server_name, scope_type, scope_id, slot))");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_remote_cache_scope ON remote_cache(server_name, scope_type, scope_id)");
 
             // Operation log with idempotency support
             stmt.execute("CREATE TABLE IF NOT EXISTS operation_log (" +

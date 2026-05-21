@@ -124,21 +124,16 @@ public class TheExchangeCore {
     }
 
     public CompletableFuture<ExchangeViewState> openRemoteViewAsync(String serverName) {
-        if (syncEngine == null) {
-            return submit(() -> remoteFromCache(serverName, false));
-        }
-        return syncEngine.syncIfNeededAsync(serverName)
-                .thenCompose(result -> submit(() -> result != null
-                        ? ExchangeViewState.remote(serverName, result.isOnline(),
-                        result.getItems(), result.getRemoteTimestamp())
-                        : remoteFromCache(serverName, false)));
+        return submit(() -> remoteFromCache(serverName, false));
     }
 
     public CompletableFuture<Void> refreshRemoteViewAsync(String serverName) {
-        if (syncEngine == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        return syncEngine.syncIfNeededAsync(serverName).thenApply(ignored -> null);
+        return submit(() -> {
+            if (cacheManager != null) {
+                cacheManager.getCache(serverName);
+            }
+            return null;
+        });
     }
 
     public CompletableFuture<Void> applyLocalSnapshotAsync(java.util.List<NeutralItem> before,
@@ -172,8 +167,8 @@ public class TheExchangeCore {
     private ExchangeViewState remoteFromCache(String serverName, boolean online) {
         var cache = cacheManager.getCache(serverName);
         return ExchangeViewState.remote(serverName, online,
-                cache != null ? cache.getItems() : null,
-                cache != null ? cache.getRemoteTimestamp() : 0);
+                cache != null ? cache.snapshot() : null,
+                0);
     }
 
     /**
@@ -252,7 +247,7 @@ public class TheExchangeCore {
 
         exchangeService = new ExchangeService(networkManager, localItemStore,
                 operationLogger, cacheManager, compatibilityChecker,
-                api.getItemSerializer());
+                api.getItemSerializer(), syncEngine);
         menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
 
         // 6. Heartbeat (only if network is up)

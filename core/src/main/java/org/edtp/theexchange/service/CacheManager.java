@@ -22,8 +22,7 @@ public class CacheManager {
     private final RemoteCacheStore cacheStore;
     private final int capacity;
     private final ReentrantLock lock = new ReentrantLock();
-    private final LinkedHashMap<RemoteScopeKey, CachedInventory> caches =
-            new LinkedHashMap<>(16, 0.75f, true);
+    private final LinkedHashMap<RemoteScopeKey, CachedInventory> caches = new LinkedHashMap<>(16, 0.75f, true);
     private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "exchange-remote-cache-writer");
         thread.setDaemon(true);
@@ -42,61 +41,58 @@ public class CacheManager {
 
     public CachedInventory getCache(String serverName, InventoryScope scope) {
         RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
-        CachedInventory cached = getCached(key);
-        if (cached == null) {
-            cached = cacheStore.getCache(serverName, scope);
-            if (cached == null) return null;
-            putCached(key, cached);
-        }
-        if (cached.isStale(CACHE_EXPIRY_MS)) {
-            clearCache(serverName, scope);
-            return null;
-        }
-        return cached.copy();
+        CachedInventory cache = getOrLoad(key);
+        return cache == null ? null : cache;
     }
 
-    public void updateCache(String serverName, List<NeutralItem> items, long remoteTimestamp) {
-        updateCache(serverName, InventoryScope.server(), items, remoteTimestamp);
+    public NeutralItem getSlot(String serverName, InventoryScope scope, int slot) {
+        CachedInventory cache = getOrLoad(RemoteScopeKey.of(serverName, scope));
+        return cache != null ? cache.getItem(slot) : null;
     }
 
-    public void updateCache(String serverName, InventoryScope scope, List<NeutralItem> items, long remoteTimestamp) {
-        CachedInventory cache = new CachedInventory(copyItems(items),
-                items != null ? items.size() : 0, System.currentTimeMillis(), remoteTimestamp);
+    public int getSlotVersion(String serverName, InventoryScope scope, int slot) {
+        CachedInventory cache = getOrLoad(RemoteScopeKey.of(serverName, scope));
+        return cache != null ? cache.getVersion(slot) : 0;
+    }
+
+    public void loadScope(String serverName, InventoryScope scope) {
         RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
+        lock.lock();
+        try {
+            if (caches.containsKey(key)) {
+                return;
+            }
+        } finally {
+            lock.unlock();
+        }
+        List<RemoteCacheStore.RemoteSlotSnapshot> snapshots = cacheStore.loadScope(serverName, scope);
+        CachedInventory cache = new CachedInventory(scope);
+        cache.markLoaded(convertSnapshots(snapshots), System.currentTimeMillis());
         putCached(key, cache);
-        persistAsync(key, cache);
     }
 
-    public void updateCacheSlot(String serverName, int slot, NeutralItem item, long remoteTimestamp) {
-        updateCacheSlot(serverName, InventoryScope.server(), slot, item, remoteTimestamp);
+    public void updateCacheSlot(String serverName, int slot, NeutralItem item, int version) {
+        updateCacheSlot(serverName, InventoryScope.server(), slot, item, version);
     }
 
-    public void updateCacheSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, long remoteTimestamp) {
+    public void updateCacheSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, int version) {
         RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
-        CachedInventory cache = getCached(key);
+        CachedInventory cache = getOrLoad(key);
         if (cache == null) {
-            cache = cacheStore.getCache(serverName, scope);
+            cache = new CachedInventory(scope);
+            putCached(key, cache);
         }
-        if (cache == null) return;
-        List<NeutralItem> items = copyItems(cache.getItems());
-        while (items.size() <= slot) {
-            items.add(null);
-        }
-        items.set(slot, copyOf(item));
-        CachedInventory updated = new CachedInventory(items, Math.max(cache.getTotalSlots(), items.size()),
-                System.currentTimeMillis(), remoteTimestamp);
-        putCached(key, updated);
-        persistAsync(key, updated);
+        cache.replaceSlot(slot, item, version);
+        persistSlotAsync(key, slot, item, version);
     }
 
-    public long getRemoteTimestamp(String serverName) {
-        CachedInventory cache = getCache(serverName);
-        return cache != null ? cache.getRemoteTimestamp() : 0;
-    }
-
-    public boolean needsSync(String serverName, long remoteTimestamp) {
-        long localTs = getRemoteTimestamp(serverName);
-        return localTs != remoteTimestamp;
+    public void removeCacheSlot(String serverName, InventoryScope scope, int slot) {
+        RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
+        CachedInventory cache = getOrLoad(key);
+        if (cache != null) {
+            cache.removeSlot(slot);
+        }
+        persistSlotAsync(key, slot, null, 0);
     }
 
     public void clearCache(String serverName) {
@@ -111,29 +107,41 @@ public class CacheManager {
         } finally {
             lock.unlock();
         }
-        removeAsync(key);
     }
 
     public void cleanupExpired() {
-        List<RemoteScopeKey> staleKeys = new ArrayList<>();
+        List<RemoteScopeKey> stale = new ArrayList<>();
         lock.lock();
         try {
             for (Map.Entry<RemoteScopeKey, CachedInventory> entry : caches.entrySet()) {
-                if (entry.getValue().isStale(CACHE_EXPIRY_MS)) {
-                    staleKeys.add(entry.getKey());
+                if (System.currentTimeMillis() - entry.getValue().getLastAccessAt() > CACHE_EXPIRY_MS) {
+                    stale.add(entry.getKey());
                 }
             }
-            for (RemoteScopeKey key : staleKeys) {
+            for (RemoteScopeKey key : stale) {
                 caches.remove(key);
             }
         } finally {
             lock.unlock();
         }
-        cleanupExpiredAsync();
+    }
+
+    public void flushAll() {
+        List<Map.Entry<RemoteScopeKey, CachedInventory>> entries;
+        lock.lock();
+        try {
+            entries = new ArrayList<>(caches.entrySet());
+        } finally {
+            lock.unlock();
+        }
+        for (Map.Entry<RemoteScopeKey, CachedInventory> entry : entries) {
+            flush(entry.getKey(), entry.getValue());
+        }
     }
 
     public void shutdown() {
         closed = true;
+        flushAll();
         writer.shutdown();
         try {
             if (!writer.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -145,11 +153,35 @@ public class CacheManager {
         }
     }
 
+    private CachedInventory getOrLoad(RemoteScopeKey key) {
+        CachedInventory cache = getCached(key);
+        if (cache != null) {
+            return cache;
+        }
+        List<RemoteCacheStore.RemoteSlotSnapshot> snapshots = cacheStore.loadScope(key.serverName(), key.scope());
+        if (snapshots == null) {
+            return null;
+        }
+        CachedInventory loaded = new CachedInventory(key.scope());
+        loaded.markLoaded(convertSnapshots(snapshots), System.currentTimeMillis());
+        lock.lock();
+        try {
+            CachedInventory existing = caches.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            caches.put(key, loaded);
+            evictIfNeededLocked();
+            return loaded;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private CachedInventory getCached(RemoteScopeKey key) {
         lock.lock();
         try {
-            CachedInventory cache = caches.get(key);
-            return cache != null ? cache.copy() : null;
+            return caches.get(key);
         } finally {
             lock.unlock();
         }
@@ -159,77 +191,65 @@ public class CacheManager {
         List<Map.Entry<RemoteScopeKey, CachedInventory>> evicted = new ArrayList<>();
         lock.lock();
         try {
-            caches.put(key, cache.copy());
-            while (caches.size() > capacity) {
-                RemoteScopeKey eldest = caches.keySet().iterator().next();
-                CachedInventory removed = caches.remove(eldest);
-                if (removed != null) {
-                    evicted.add(Map.entry(eldest, removed.copy()));
-                }
-            }
+            caches.put(key, cache);
+            evicted.addAll(evictIfNeededLocked());
         } finally {
             lock.unlock();
         }
         for (Map.Entry<RemoteScopeKey, CachedInventory> entry : evicted) {
-            persistAsync(entry.getKey(), entry.getValue());
+            flush(entry.getKey(), entry.getValue());
         }
     }
 
-    private void persistAsync(RemoteScopeKey key, CachedInventory cache) {
+    private void persistSlotAsync(RemoteScopeKey key, int slot, NeutralItem item, int version) {
         if (closed) {
-            persist(key, cache);
+            persistSlot(key, slot, item, version);
             return;
         }
         try {
-            writer.execute(() -> persist(key, cache));
+            writer.execute(() -> persistSlot(key, slot, item, version));
         } catch (RejectedExecutionException e) {
-            persist(key, cache);
+            persistSlot(key, slot, item, version);
         }
     }
 
-    private void persist(RemoteScopeKey key, CachedInventory cache) {
-        cacheStore.putCache(key.serverName(), key.scope(), cache.getItems(), cache.getRemoteTimestamp());
-    }
-
-    private void removeAsync(RemoteScopeKey key) {
-        if (closed) {
-            remove(key);
+    private void persistSlot(RemoteScopeKey key, int slot, NeutralItem item, int version) {
+        if (item == null || item.isEmpty()) {
+            cacheStore.removeSlot(key.serverName(), key.scope(), slot);
             return;
         }
-        try {
-            writer.execute(() -> remove(key));
-        } catch (RejectedExecutionException e) {
-            remove(key);
+        cacheStore.saveSlot(key.serverName(), key.scope(), slot, item, version);
+    }
+
+    private void flush(RemoteScopeKey key, CachedInventory cache) {
+        if (cache == null) return;
+        for (CachedInventory.SlotSnapshot snapshot : cache.snapshotSlots()) {
+            persistSlot(key, snapshot.slot(), snapshot.item(), snapshot.version());
         }
     }
 
-    private void cleanupExpiredAsync() {
-        if (closed) {
-            cacheStore.cleanupExpired(CACHE_EXPIRY_MS);
-            return;
+    private List<CachedInventory.SlotSnapshot> convertSnapshots(List<RemoteCacheStore.RemoteSlotSnapshot> snapshots) {
+        List<CachedInventory.SlotSnapshot> converted = new ArrayList<>();
+        if (snapshots == null) {
+            return converted;
         }
-        try {
-            writer.execute(() -> cacheStore.cleanupExpired(CACHE_EXPIRY_MS));
-        } catch (RejectedExecutionException e) {
-            cacheStore.cleanupExpired(CACHE_EXPIRY_MS);
+        for (RemoteCacheStore.RemoteSlotSnapshot snapshot : snapshots) {
+            if (snapshot == null) continue;
+            converted.add(new CachedInventory.SlotSnapshot(snapshot.slot(), snapshot.item(), snapshot.version()));
         }
+        return converted;
     }
 
-    private void remove(RemoteScopeKey key) {
-        cacheStore.removeCache(key.serverName(), key.scope());
-    }
-
-    private static List<NeutralItem> copyItems(List<NeutralItem> source) {
-        List<NeutralItem> copy = new ArrayList<>();
-        if (source == null) return copy;
-        for (NeutralItem item : source) {
-            copy.add(copyOf(item));
+    private List<Map.Entry<RemoteScopeKey, CachedInventory>> evictIfNeededLocked() {
+        List<Map.Entry<RemoteScopeKey, CachedInventory>> evicted = new ArrayList<>();
+        while (caches.size() > capacity) {
+            RemoteScopeKey eldest = caches.keySet().iterator().next();
+            CachedInventory removed = caches.remove(eldest);
+            if (removed != null) {
+                evicted.add(Map.entry(eldest, removed));
+            }
         }
-        return copy;
-    }
-
-    private static NeutralItem copyOf(NeutralItem item) {
-        return item == null ? null : item.copy();
+        return evicted;
     }
 
     private record RemoteScopeKey(String serverName, InventoryScope scope) {

@@ -27,6 +27,10 @@ public final class MessageCodec {
             else if (msg instanceof QueryTimestampResponse m) encodeQueryTimestampResponse(out, m);
             else if (msg instanceof QueryItemsRequest m) encodeQueryItemsRequest(out, m);
             else if (msg instanceof QueryItemsResponse m) encodeQueryItemsResponse(out, m);
+            else if (msg instanceof QuerySlotVersionRequest m) encodeQuerySlotVersionRequest(out, m);
+            else if (msg instanceof QuerySlotVersionResponse m) encodeQuerySlotVersionResponse(out, m);
+            else if (msg instanceof QuerySlotStateRequest m) encodeQuerySlotStateRequest(out, m);
+            else if (msg instanceof SlotStateResponse m) encodeSlotStateResponse(out, m);
             else if (msg instanceof PutItemRequest m) encodePutItemRequest(out, m);
             else if (msg instanceof PutItemResponse m) encodePutItemResponse(out, m);
             else if (msg instanceof TakeItemRequest m) encodeTakeItemRequest(out, m);
@@ -52,6 +56,10 @@ public final class MessageCodec {
                 case TIMESTAMP_RESPONSE -> decodeQueryTimestampResponse(in);
                 case QUERY_ITEMS -> decodeQueryItemsRequest(in);
                 case ITEMS_RESPONSE -> decodeQueryItemsResponse(in);
+                case QUERY_SLOT_VERSION -> decodeQuerySlotVersionRequest(in);
+                case SLOT_VERSION_RESPONSE -> decodeQuerySlotVersionResponse(in);
+                case QUERY_SLOT_STATE -> decodeQuerySlotStateRequest(in);
+                case SLOT_STATE_RESPONSE -> decodeSlotStateResponse(in);
                 case PUT_ITEM -> decodePutItemRequest(in);
                 case PUT_ITEM_RESPONSE -> decodePutItemResponse(in);
                 case TAKE_ITEM -> decodeTakeItemRequest(in);
@@ -109,6 +117,25 @@ public final class MessageCodec {
                 BinaryIO.writeNullableNeutralItem(out, item);
             }
         }
+    }
+
+    private static void encodeQuerySlotVersionRequest(DataOutputStream out, QuerySlotVersionRequest m) throws IOException {
+        out.writeInt(m.getSlot());
+    }
+
+    private static void encodeQuerySlotVersionResponse(DataOutputStream out, QuerySlotVersionResponse m) throws IOException {
+        out.writeInt(m.getSlot());
+        out.writeInt(m.getVersion());
+    }
+
+    private static void encodeQuerySlotStateRequest(DataOutputStream out, QuerySlotStateRequest m) throws IOException {
+        out.writeInt(m.getSlot());
+    }
+
+    private static void encodeSlotStateResponse(DataOutputStream out, SlotStateResponse m) throws IOException {
+        out.writeInt(m.getSlot());
+        BinaryIO.writeNullableNeutralItem(out, m.getItem());
+        out.writeInt(m.getVersion());
     }
 
     private static void encodePutItemRequest(DataOutputStream out, PutItemRequest m) throws IOException {
@@ -201,6 +228,22 @@ public final class MessageCodec {
             items.add(BinaryIO.readNullableNeutralItem(in));
         }
         return new QueryItemsResponse(items, totalSlots, timestamp, serverVersion);
+    }
+
+    private static QuerySlotVersionRequest decodeQuerySlotVersionRequest(DataInputStream in) throws IOException {
+        return new QuerySlotVersionRequest(in.readInt());
+    }
+
+    private static QuerySlotVersionResponse decodeQuerySlotVersionResponse(DataInputStream in) throws IOException {
+        return new QuerySlotVersionResponse(in.readInt(), in.readInt());
+    }
+
+    private static QuerySlotStateRequest decodeQuerySlotStateRequest(DataInputStream in) throws IOException {
+        return new QuerySlotStateRequest(in.readInt());
+    }
+
+    private static SlotStateResponse decodeSlotStateResponse(DataInputStream in) throws IOException {
+        return new SlotStateResponse(in.readInt(), BinaryIO.readNullableNeutralItem(in), in.readInt());
     }
 
     private static PutItemRequest decodePutItemRequest(DataInputStream in) throws IOException {

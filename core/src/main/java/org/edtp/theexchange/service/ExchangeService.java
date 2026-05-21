@@ -31,16 +31,19 @@ public class ExchangeService {
     private final CacheManager cacheManager;
     private final CompatibilityChecker compatibilityChecker;
     private final ItemSerializer itemSerializer;
+    private final SyncEngine syncEngine;
 
     public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
                            OperationLogger operationLogger, CacheManager cacheManager,
-                           CompatibilityChecker compatibilityChecker, ItemSerializer itemSerializer) {
+                           CompatibilityChecker compatibilityChecker, ItemSerializer itemSerializer,
+                           SyncEngine syncEngine) {
         this.networkManager = networkManager;
         this.localItemStore = localItemStore;
         this.operationLogger = operationLogger;
         this.cacheManager = cacheManager;
         this.compatibilityChecker = compatibilityChecker;
         this.itemSerializer = itemSerializer;
+        this.syncEngine = syncEngine;
     }
 
     public boolean sameStackKind(NeutralItem a, NeutralItem b) {
@@ -70,53 +73,71 @@ public class ExchangeService {
         if (item == null || item.isEmpty()) {
             return CompletableFuture.completedFuture(PutResult.fail("物品为空"));
         }
-
-        int expectedVersion = 0;
-        var cache = cacheManager.getCache(serverName, InventoryScope.server());
-        if (cache != null) {
-            NeutralItem cached = cache.getItem(slot);
-            expectedVersion = cached != null && !cached.isEmpty() ? cached.getVersion() : 0;
+        if (syncEngine == null) {
+            return CompletableFuture.completedFuture(PutResult.fail("同步引擎未初始化"));
         }
-
-        String requestId = UUID.randomUUID().toString();
-        PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
-                requestId, playerUuid, playerName);
-
-        return conn.<PutItemResponse>sendAsync(
-                        FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
-                .handle((response, error) -> {
-                    TheExchangeCore core = TheExchangeCore.getInstance();
-                    if (core != null) {
-                        return core.submit(() -> finishRemotePut(serverName, slot, playerUuid,
-                                playerName, item, requestId, response, error));
-                    }
-                    return CompletableFuture.completedFuture(PutResult.fail("核心已停止"));
-                })
-                .thenCompose(future -> future);
+        return syncEngine.querySlotVersionAsync(serverName, slot)
+                .thenCompose(remoteVersion ->
+                        syncEngine.querySlotStateAsync(serverName, slot)
+                                .thenCompose(remoteState -> {
+                                    if (remoteState != null && remoteState.isIncompatible()) {
+                                        return CompletableFuture.completedFuture(PutResult.fail("不兼容物品禁止操作"));
+                                    }
+                                    int expectedVersion = remoteVersion != null ? remoteVersion : 0;
+                                    String requestId = UUID.randomUUID().toString();
+                                    PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
+                                            requestId, playerUuid, playerName, expectedVersion);
+                                    return conn.<PutItemResponse>sendAsync(
+                                                    FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
+                                            .handle((response, error) -> {
+                                                TheExchangeCore core = TheExchangeCore.getInstance();
+                                                if (core != null) {
+                                                    return core.submit(() -> finishRemotePut(serverName, slot, playerUuid,
+                                                            playerName, item, requestId, response, error));
+                                                }
+                                                return CompletableFuture.completedFuture(PutResult.fail("核心已停止"));
+                                            })
+                                            .thenCompose(future -> future);
+                                }));
     }
 
     public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot, int requestCount,
                                                        String playerUuid, String playerName) {
-        var cache = cacheManager.getCache(serverName, InventoryScope.server());
-        NeutralItem expected = cache != null ? cache.getItem(slot) : null;
-        if (expected == null || expected.isEmpty()) {
-            return CompletableFuture.completedFuture(TakeResult.fail("物品已变化，请重试"));
+        if (syncEngine == null) {
+            return CompletableFuture.completedFuture(TakeResult.fail("同步引擎未初始化"));
         }
-        if (compatibilityChecker != null) {
-            expected = expected.copy();
-            compatibilityChecker.checkAndMark(expected);
-            if (expected.isIncompatible()) {
-                return CompletableFuture.completedFuture(TakeResult.fail("不兼容物品禁止操作"));
-            }
-        }
-        return takeItemAsync(serverName, slot, expected.getItemId(), expected.getVersion(),
-                requestCount, playerUuid, playerName);
+        return syncEngine.querySlotVersionAsync(serverName, slot)
+                .thenCompose(remoteVersion ->
+                        syncEngine.querySlotStateAsync(serverName, slot)
+                                .thenCompose(remoteState -> {
+                                    if (remoteState == null || remoteState.isEmpty()) {
+                                        return CompletableFuture.completedFuture(TakeResult.fail("物品已变化，请重试"));
+                                    }
+                                    NeutralItem expected = remoteState.copy();
+                                    if (compatibilityChecker != null) {
+                                        compatibilityChecker.checkAndMark(expected);
+                                        if (expected.isIncompatible()) {
+                                            return CompletableFuture.completedFuture(TakeResult.fail("不兼容物品禁止操作"));
+                                        }
+                                    }
+                                    return takeItemAsync(serverName, slot, expected.getItemId(),
+                                            remoteVersion != null ? remoteVersion : expected.getVersion(),
+                                            requestCount, playerUuid, playerName, remoteVersion != null ? remoteVersion : 0);
+                                }));
     }
 
     public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot,
                                                        String expectedItemId, int expectedVersion,
                                                        int requestCount,
                                                        String playerUuid, String playerName) {
+        return takeItemAsync(serverName, slot, expectedItemId, expectedVersion, requestCount, playerUuid, playerName, expectedVersion);
+    }
+
+    public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot,
+                                                       String expectedItemId, int expectedVersion,
+                                                       int requestCount,
+                                                       String playerUuid, String playerName,
+                                                       int remoteVersion) {
         if (networkManager == null) {
             return CompletableFuture.completedFuture(TakeResult.fail("网络功能未启用，请检查端口配置"));
         }
@@ -127,7 +148,7 @@ public class ExchangeService {
 
         String requestId = UUID.randomUUID().toString();
         TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
-                expectedVersion, requestCount, requestId, playerUuid, playerName);
+                expectedVersion, requestCount, requestId, playerUuid, playerName, remoteVersion);
 
         return conn.<TakeItemResponse>sendAsync(
                         FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
@@ -157,7 +178,7 @@ public class ExchangeService {
             operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
                     serverName, item.getItemId(), item.getCount(), true, null);
             cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, response.getCurrentItem(),
-                    response.getNewTimestamp());
+                    response.getNewVersion());
             refreshOpenViews(serverName);
             return PutResult.success(response.getCurrentItem());
         }
@@ -189,8 +210,8 @@ public class ExchangeService {
             }
             operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
                     serverName, expectedItemId, requestCount, true, null);
-            cacheManager.updateCacheSlot(serverName, slot, response.getCurrentItem(),
-                    response.getNewTimestamp());
+            cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, response.getCurrentItem(),
+                    response.getNewVersion());
             refreshOpenViews(serverName);
             return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
         }
@@ -414,30 +435,30 @@ public class ExchangeService {
     public void routeMessage(org.edtp.theexchange.network.Connection conn,
                               FrameType type, Object message) {
         TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core != null && !core.isOnCoreThread()) {
-            core.executeCore(() -> routeMessage(conn, type, message));
-            return;
-        }
         switch (type) {
-            case QUERY_TIMESTAMP -> {
-                QueryTimestampRequest req = (QueryTimestampRequest) message;
-                long ts = localItemStore.getLastModifiedTimestamp();
-                boolean changed = req.getCachedTimestamp() != ts;
-                conn.send(FrameType.TIMESTAMP_RESPONSE,
-                        new QueryTimestampResponse(ts, changed));
+            case QUERY_TIMESTAMP, QUERY_ITEMS -> {}
+            case QUERY_SLOT_VERSION -> {
+                QuerySlotVersionRequest req = (QuerySlotVersionRequest) message;
+                int version = localItemStore.getItem(req.getSlot()) != null
+                        ? localItemStore.getItem(req.getSlot()).version()
+                        : 0;
+                conn.send(FrameType.SLOT_VERSION_RESPONSE,
+                        new QuerySlotVersionResponse(req.getSlot(), version));
             }
-            case QUERY_ITEMS -> {
-                var items = localItemStore.getAllItems();
-                conn.send(FrameType.ITEMS_RESPONSE,
-                        new QueryItemsResponse(items, 54,
-                                localItemStore.getLastModifiedTimestamp(), "26.1.2"));
+            case QUERY_SLOT_STATE -> {
+                QuerySlotStateRequest req = (QuerySlotStateRequest) message;
+                LocalItemStore.ItemRecord record = localItemStore.getItem(req.getSlot());
+                conn.send(FrameType.SLOT_STATE_RESPONSE,
+                        new SlotStateResponse(req.getSlot(),
+                                record != null ? record.item() : null,
+                                record != null ? record.version() : 0));
             }
             case PUT_ITEM -> {
                 PutItemResponse resp = handleRemotePut((PutItemRequest) message);
                 conn.send(FrameType.PUT_ITEM_RESPONSE, resp);
                 if (resp.isSuccess()) {
                     broadcastInventoryUpdate(conn, List.of(((PutItemRequest) message).getSlot()),
-                            resp.getNewTimestamp());
+                            localItemStore.getLastModifiedTimestamp());
                     refreshOpenViews(sourceServerName(conn));
                 }
             }
@@ -446,7 +467,7 @@ public class ExchangeService {
                 conn.send(FrameType.TAKE_ITEM_RESPONSE, resp);
                 if (resp.isSuccess()) {
                     broadcastInventoryUpdate(conn, List.of(((TakeItemRequest) message).getSlot()),
-                            resp.getNewTimestamp());
+                            localItemStore.getLastModifiedTimestamp());
                     refreshOpenViews(sourceServerName(conn));
                 }
             }
@@ -456,18 +477,13 @@ public class ExchangeService {
                 final String sourceServerName = conn.getPeerServerName() != null
                         ? conn.getPeerServerName()
                         : conn.getRemoteName();
-                cacheManager.clearCache(sourceServerName);
-                if (core != null && core.getApi() != null && core.getSyncEngine() != null) {
-                    core.getSyncEngine().fullSyncAsync(sourceServerName)
-                            .whenComplete((ignored, error) -> {
-                                if (error != null) {
-                                    core.getApi().getLogger().warn("Push sync failed for " + sourceServerName
-                                            + ": " + error.getMessage());
-                                } else {
-                                    core.getApi().runOnMainThread(() ->
-                                            core.getApi().refreshRemoteInventoryView(sourceServerName));
-                                }
-                            });
+                if (core != null && core.getSyncEngine() != null) {
+                    for (int slot : update.getChangedSlots()) {
+                        core.getSyncEngine().querySlotStateAsync(sourceServerName, slot);
+                    }
+                    if (core.getApi() != null) {
+                        core.getApi().runOnMainThread(() -> core.getApi().refreshRemoteInventoryView(sourceServerName));
+                    }
                 }
             }
             default -> {}

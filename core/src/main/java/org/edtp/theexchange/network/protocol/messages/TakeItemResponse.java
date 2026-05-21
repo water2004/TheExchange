@@ -9,6 +9,7 @@ public class TakeItemResponse {
     private String failReason;
     private long newTimestamp;
     private int newVersion;
+    private int remoteVersion;
     private NeutralItem itemsToGive;
 
     public TakeItemResponse() {}
@@ -16,12 +17,19 @@ public class TakeItemResponse {
     public TakeItemResponse(boolean success, int slot, NeutralItem currentItem,
                             String failReason, long newTimestamp, int newVersion,
                             NeutralItem itemsToGive) {
+        this(success, slot, currentItem, failReason, newTimestamp, newVersion, 0, itemsToGive);
+    }
+
+    public TakeItemResponse(boolean success, int slot, NeutralItem currentItem,
+                            String failReason, long newTimestamp, int newVersion,
+                            int remoteVersion, NeutralItem itemsToGive) {
         this.success = success;
         this.slot = slot;
         this.currentItem = currentItem;
         this.failReason = failReason;
         this.newTimestamp = newTimestamp;
         this.newVersion = newVersion;
+        this.remoteVersion = remoteVersion;
         this.itemsToGive = itemsToGive;
     }
 
@@ -42,6 +50,9 @@ public class TakeItemResponse {
 
     public int getNewVersion() { return newVersion; }
     public void setNewVersion(int newVersion) { this.newVersion = newVersion; }
+
+    public int getRemoteVersion() { return remoteVersion; }
+    public void setRemoteVersion(int remoteVersion) { this.remoteVersion = remoteVersion; }
 
     public NeutralItem getItemsToGive() { return itemsToGive; }
     public void setItemsToGive(NeutralItem itemsToGive) { this.itemsToGive = itemsToGive; }

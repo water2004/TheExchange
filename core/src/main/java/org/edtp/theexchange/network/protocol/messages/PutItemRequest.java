@@ -9,21 +9,29 @@ public class PutItemRequest {
     private String requestId;
     private String playerUuid;
     private String playerName;
+    private int remoteVersion;
 
     public PutItemRequest() {}
 
     public PutItemRequest(int slot, NeutralItem item, String requestId, String playerUuid, String playerName) {
-        this(slot, item, 0, requestId, playerUuid, playerName);
+        this(slot, item, 0, requestId, playerUuid, playerName, 0);
     }
 
     public PutItemRequest(int slot, NeutralItem item, int expectedVersion,
                           String requestId, String playerUuid, String playerName) {
+        this(slot, item, expectedVersion, requestId, playerUuid, playerName, 0);
+    }
+
+    public PutItemRequest(int slot, NeutralItem item, int expectedVersion,
+                          String requestId, String playerUuid, String playerName,
+                          int remoteVersion) {
         this.slot = slot;
         this.item = item;
         this.expectedVersion = expectedVersion;
         this.requestId = requestId;
         this.playerUuid = playerUuid;
         this.playerName = playerName;
+        this.remoteVersion = remoteVersion;
     }
 
     public int getSlot() { return slot; }
@@ -43,4 +51,7 @@ public class PutItemRequest {
 
     public String getPlayerName() { return playerName; }
     public void setPlayerName(String playerName) { this.playerName = playerName; }
+
+    public int getRemoteVersion() { return remoteVersion; }
+    public void setRemoteVersion(int remoteVersion) { this.remoteVersion = remoteVersion; }
 }

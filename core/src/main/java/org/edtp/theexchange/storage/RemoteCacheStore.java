@@ -1,100 +1,100 @@
 package org.edtp.theexchange.storage;
 
-import org.edtp.theexchange.model.CachedInventory;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
-import java.sql.*;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Stores cached snapshots of remote server inventories.
- * Cache is NOT authoritative — writes always go to the remote server.
- */
 public class RemoteCacheStore {
-
     private final DatabaseManager db;
 
     public RemoteCacheStore(DatabaseManager db) {
         this.db = db;
     }
 
-    public CachedInventory getCache(String serverName) {
-        return getCache(serverName, InventoryScope.server());
+    public RemoteSlotSnapshot loadSlot(String serverName, InventoryScope scope, int slot) {
+        String sql = "SELECT item_data, version FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setString(1, serverName);
+            ps.setString(2, scope.typeName());
+            ps.setString(3, scope.getScopeId());
+            ps.setInt(4, slot);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    NeutralItem item = NeutralItemBlobCodec.decode(rs.getBytes("item_data"));
+                    if (item != null) {
+                        item.setVersion(rs.getInt("version"));
+                    }
+                    return new RemoteSlotSnapshot(slot, item, rs.getInt("version"));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to load remote slot", e);
+        }
+        return new RemoteSlotSnapshot(slot, null, 0);
     }
 
-    public CachedInventory getCache(String serverName, InventoryScope scope) {
-        String sql = "SELECT items_blob, synced_at, remote_timestamp FROM remote_cache " +
-                "WHERE server_name = ? AND scope_type = ? AND scope_id = ?";
+    public int loadSlotVersion(String serverName, InventoryScope scope, int slot) {
+        return loadSlot(serverName, scope, slot).version();
+    }
+
+    public void saveSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, int version) {
+        String sql = "INSERT OR REPLACE INTO remote_cache (server_name, scope_type, scope_id, slot, item_data, version, synced_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?)";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setString(1, serverName);
+            ps.setString(2, scope.typeName());
+            ps.setString(3, scope.getScopeId());
+            ps.setInt(4, slot);
+            ps.setBytes(5, item != null ? NeutralItemBlobCodec.encode(item) : new byte[0]);
+            ps.setInt(6, version);
+            ps.setLong(7, System.currentTimeMillis());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to save remote slot", e);
+        }
+    }
+
+    public void removeSlot(String serverName, InventoryScope scope, int slot) {
+        String sql = "DELETE FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setString(1, serverName);
+            ps.setString(2, scope.typeName());
+            ps.setString(3, scope.getScopeId());
+            ps.setInt(4, slot);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to remove remote slot", e);
+        }
+    }
+
+    public List<RemoteSlotSnapshot> loadScope(String serverName, InventoryScope scope) {
+        List<RemoteSlotSnapshot> result = new ArrayList<>();
+        String sql = "SELECT slot, item_data, version FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? ORDER BY slot";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setString(1, serverName);
             ps.setString(2, scope.typeName());
             ps.setString(3, scope.getScopeId());
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    byte[] blob = rs.getBytes("items_blob");
-                    List<NeutralItem> items = NeutralItemBlobCodec.decodeList(blob);
-                    if (items != null) {
-                        for (int i = 0; i < items.size(); i++) {
-                            NeutralItem item = items.get(i);
-                            if (item != null && item.getVersion() <= 0) {
-                                item.setVersion(1);
-                            }
-                        }
+                while (rs.next()) {
+                    int slot = rs.getInt("slot");
+                    NeutralItem item = NeutralItemBlobCodec.decode(rs.getBytes("item_data"));
+                    if (item != null) {
+                        item.setVersion(rs.getInt("version"));
                     }
-                    return new CachedInventory(items, items.size(),
-                            rs.getLong("synced_at"), rs.getLong("remote_timestamp"));
+                    result.add(new RemoteSlotSnapshot(slot, item, rs.getInt("version")));
                 }
             }
         } catch (SQLException e) {
-            throw new RuntimeException("Failed to get cache for " + serverName, e);
+            throw new RuntimeException("Failed to load remote scope", e);
         }
-        return null;
+        return result;
     }
 
-    public void putCache(String serverName, List<NeutralItem> items, long remoteTimestamp) {
-        putCache(serverName, InventoryScope.server(), items, remoteTimestamp);
-    }
-
-    public void putCache(String serverName, InventoryScope scope, List<NeutralItem> items, long remoteTimestamp) {
-        String sql = "INSERT OR REPLACE INTO remote_cache (server_name, scope_type, scope_id, items_blob, synced_at, remote_timestamp) " +
-                "VALUES (?, ?, ?, ?, ?, ?)";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, serverName);
-            ps.setString(2, scope.typeName());
-            ps.setString(3, scope.getScopeId());
-            ps.setBytes(4, NeutralItemBlobCodec.encodeList(items));
-            ps.setLong(5, System.currentTimeMillis());
-            ps.setLong(6, remoteTimestamp);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to put cache for " + serverName, e);
-        }
-    }
-
-    public void removeCache(String serverName) {
-        removeCache(serverName, InventoryScope.server());
-    }
-
-    public void removeCache(String serverName, InventoryScope scope) {
-        String sql = "DELETE FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, serverName);
-            ps.setString(2, scope.typeName());
-            ps.setString(3, scope.getScopeId());
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to remove cache for " + serverName, e);
-        }
-    }
-
-    public void cleanupExpired(long retentionMillis) {
-        long cutoff = System.currentTimeMillis() - retentionMillis;
-        String sql = "DELETE FROM remote_cache WHERE synced_at < ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, cutoff);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to cleanup expired caches", e);
-        }
-    }
+    public record RemoteSlotSnapshot(int slot, NeutralItem item, int version) {}
 }
