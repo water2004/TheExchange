@@ -11,27 +11,35 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Standalone throughput benchmark — writes bench_data.csv for external plotting.
- * Not a correctness test; deliberately excluded from CI via the bench tag.
+ * Realistic throughput benchmark through submit → coreExecutor.
+ *
+ * Each scenario uses K core-threads + 2K callers. Every operation is
+ * submitted via CompletableFuture.supplyAsync(task, coreExecutor).get(),
+ * mimicking the production path: coreExecutor processes all requests, and
+ * callers block on the future (simulating async completion handling).
+ *
+ * No network or DB I/O — measures the Java-level overhead of the submit path.
  *
  * Scenarios:
- *   dedicated — each thread owns exclusive slots, zero contention
- *   random    — threads pick random slots from shared pool of 54
- *   sameSlot  — all threads hammer slot 0, max contention
+ *   dedicated — each caller pair owns exclusive slots, zero contention
+ *   random    — callers pick random slots from shared pool of 54
+ *   sameSlot  — all callers target slot 0, max contention
  */
 class ConcurrencyBenchmark {
 
     private static final int SLOTS = 54;
     private static final int MAX_STACK = 64;
+    private static final int ITERS_PER_CALLER = 5000;
 
     private static NeutralItem diamond() {
         NeutralItem item = new NeutralItem("minecraft:diamond", 64, "diamond", new byte[0], false, "26.1.2");
@@ -57,25 +65,23 @@ class ConcurrencyBenchmark {
     @Test
     void run() throws Exception {
         int maxCores = Runtime.getRuntime().availableProcessors();
-        int[] tcs = {1, 2, 4, 6, 8, 10, 12, 14};
-        List<Integer> threadCounts = new ArrayList<>();
-        for (int t : tcs) if (t <= maxCores) threadCounts.add(t);
-        int itersPerThread = 50000;
-
-        // ---- Find project root ----
+        int[] poolSizes = {1, 2, 4, 6, 8};
         Path csvFile = findProjectRoot().resolve("bench_data.csv");
         List<String> lines = new ArrayList<>();
-        lines.add("scenario,threads,ops,elapsedMs,rate,successRate");
-
+        lines.add("scenario,core_threads,ops,elapsedMs,rate_s,successRate");
         System.out.println("[bench] cores=" + maxCores + "  csv=" + csvFile);
 
-        for (int threads : threadCounts) {
-            runScenario("dedicated", threads, itersPerThread, (cache) ->
-                benchmarkDedicated(cache, threads, itersPerThread), lines);
-            runScenario("random", threads, itersPerThread, (cache) ->
-                benchmarkRandom(cache, threads, itersPerThread), lines);
-            runScenario("sameSlot", threads, itersPerThread, (cache) ->
-                benchmarkSameSlot(cache, threads, itersPerThread), lines);
+        for (int k : poolSizes) {
+            if (k > maxCores) break;
+            int callers = k * 2;
+            System.out.println("[bench] --- core_threads=" + k + "  callers=" + callers + " ---");
+
+            runPooled("dedicated", k, callers, lines, (exec, cache) ->
+                pooledDedicated(exec, cache, callers));
+            runPooled("random",    k, callers, lines, (exec, cache) ->
+                pooledRandom(exec, cache, callers));
+            runPooled("sameSlot",  k, callers, lines, (exec, cache) ->
+                pooledSameSlot(exec, cache, callers));
         }
 
         Files.write(csvFile, lines);
@@ -83,117 +89,130 @@ class ConcurrencyBenchmark {
     }
 
     @FunctionalInterface
-    interface Scenario {
-        long[] run(LocalInventoryCache cache) throws Exception;
-        // returns [success, fail]
+    interface PooledScenario {
+        long[] run(ExecutorService coreExecutor, LocalInventoryCache cache) throws Exception;
     }
 
-    private void runScenario(String name, int threads, int itersPerThread,
-                            Scenario scenario, List<String> lines) throws Exception {
+    private void runPooled(String name, int coreThreads, int callers,
+                           List<String> lines, PooledScenario scenario) throws Exception {
+        ExecutorService coreExecutor = Executors.newFixedThreadPool(coreThreads);
         LocalInventoryCache cache = newCache();
         long begin = System.nanoTime();
-        long[] counts = scenario.run(cache);
+        long[] counts = scenario.run(coreExecutor, cache);
         long elapsedMs = Math.max(1, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin));
         long ops = counts[0] + counts[1];
         double rate = ops * 1000.0 / elapsedMs;
-        double successRate = ops > 0 ? counts[0] * 100.0 / ops : 0;
-        String line = String.format("%s,%d,%d,%d,%.0f,%.1f",
-                name, threads, ops, elapsedMs, rate, successRate);
+        double sr = ops > 0 ? counts[0] * 100.0 / ops : 0;
+        String line = String.format("%s,%d,%d,%d,%.0f,%.1f", name, coreThreads, ops, elapsedMs, rate, sr);
         lines.add(line);
-        System.out.println("[bench] " + line);
+        System.out.printf("[bench] %-10s  ops=%d  elapsed=%dms  rate=%,.0f/s  success=%.1f%%%n",
+                name, ops, elapsedMs, rate, sr);
+        coreExecutor.shutdownNow();
     }
 
-    private long[] benchmarkDedicated(LocalInventoryCache cache, int threads,
-                                       int itersPerThread) throws Exception {
+    // ---- shared harness ----
+
+    private long[] runCallers(ExecutorService coreExecutor, LocalInventoryCache cache,
+                               int callers, CallerTask task) throws Exception {
         AtomicLong success = new AtomicLong();
         AtomicLong fail = new AtomicLong();
         CountDownLatch start = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(threads);
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch done = new CountDownLatch(callers);
+        ExecutorService callerPool = Executors.newFixedThreadPool(callers);
 
-        for (int t = 0; t < threads; t++) {
-            final int slotA = (t * 2) % SLOTS;
-            final int slotB = (t * 2 + 1) % SLOTS;
-            pool.submit(() -> {
+        for (int t = 0; t < callers; t++) {
+            final int id = t;
+            callerPool.submit(() -> {
                 try { start.await(); } catch (InterruptedException ignored) {}
-                int va = 1, vb = 1;
-                for (int i = 0; i < itersPerThread; i++) {
-                    int slot = (i % 2 == 0) ? slotA : slotB;
-                    int v = (i % 2 == 0) ? va : vb;
-                    var r = cache.take(slot, "minecraft:diamond", v, 1);
-                    if (r.success()) { success.incrementAndGet(); v = r.newVersion(); }
-                    else { fail.incrementAndGet(); v = cache.getVersion(slot); }
-                    r = cache.put(slot, diamondWithCount(1), v, "test", item -> MAX_STACK);
-                    if (r.success()) { success.incrementAndGet(); v = r.newVersion(); }
-                    else { fail.incrementAndGet(); v = cache.getVersion(slot); }
-                    if (i % 2 == 0) va = v; else vb = v;
-                }
+                task.run(id, coreExecutor, cache, ITERS_PER_CALLER, success, fail);
                 done.countDown();
             });
         }
 
         start.countDown();
         assertTrue(done.await(120, TimeUnit.SECONDS));
-        pool.shutdownNow();
+        callerPool.shutdownNow();
         return new long[]{success.get(), fail.get()};
     }
 
-    private long[] benchmarkRandom(LocalInventoryCache cache, int threads,
-                                    int itersPerThread) throws Exception {
-        AtomicLong success = new AtomicLong();
-        AtomicLong fail = new AtomicLong();
-        CountDownLatch start = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(threads);
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
-
-        for (int t = 0; t < threads; t++) {
-            pool.submit(() -> {
-                try { start.await(); } catch (InterruptedException ignored) {}
-                java.util.Random rng = new java.util.Random(Thread.currentThread().getId());
-                for (int i = 0; i < itersPerThread; i++) {
-                    int s = rng.nextInt(SLOTS);
-                    int v = cache.getVersion(s);
-                    var r = cache.take(s, "minecraft:diamond", v, 1);
-                    if (r.success()) success.incrementAndGet(); else fail.incrementAndGet();
-                    s = rng.nextInt(SLOTS);
-                    v = cache.getVersion(s);
-                    r = cache.put(s, diamondWithCount(1), v, "test", item -> MAX_STACK);
-                    if (r.success()) success.incrementAndGet(); else fail.incrementAndGet();
-                }
-                done.countDown();
-            });
-        }
-
-        start.countDown();
-        assertTrue(done.await(120, TimeUnit.SECONDS));
-        pool.shutdownNow();
-        return new long[]{success.get(), fail.get()};
+    @FunctionalInterface
+    interface CallerTask {
+        void run(int id, ExecutorService exec, LocalInventoryCache cache,
+                 int iters, AtomicLong success, AtomicLong fail);
     }
 
-    private long[] benchmarkSameSlot(LocalInventoryCache cache, int threads,
-                                      int itersPerThread) throws Exception {
-        AtomicLong success = new AtomicLong();
-        AtomicLong fail = new AtomicLong();
-        CountDownLatch start = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(threads);
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
+    // ---- scenarios ----
 
-        for (int t = 0; t < threads; t++) {
-            pool.submit(() -> {
-                try { start.await(); } catch (InterruptedException ignored) {}
-                for (int i = 0; i < itersPerThread; i++) {
-                    int v = cache.getVersion(0);
-                    var r = cache.take(0, "minecraft:diamond", v, 1);
-                    if (r.success()) success.incrementAndGet(); else fail.incrementAndGet();
-                }
-                done.countDown();
-            });
-        }
+    private long[] pooledDedicated(ExecutorService exec, LocalInventoryCache cache,
+                                    int callers) throws Exception {
+        return runCallers(exec, cache, callers, (id, e, c, iters, s, f) -> {
+            int slotA = (id * 2) % SLOTS;
+            int slotB = (id * 2 + 1) % SLOTS;
+            int va = 1, vb = 1;
+            for (int i = 0; i < iters; i++) {
+                int slot = (i % 2 == 0) ? slotA : slotB;
+                int v = (i % 2 == 0) ? va : vb;
+                var r = supplyTake(e, c, slot, v);
+                if (r.success()) { s.incrementAndGet(); v = r.newVersion(); }
+                else { f.incrementAndGet(); v = readVersion(e, c, slot); }
+                r = supplyPut(e, c, slot, v);
+                if (r.success()) { s.incrementAndGet(); v = r.newVersion(); }
+                else { f.incrementAndGet(); v = readVersion(e, c, slot); }
+                if (i % 2 == 0) va = v; else vb = v;
+            }
+        });
+    }
 
-        start.countDown();
-        assertTrue(done.await(120, TimeUnit.SECONDS));
-        pool.shutdownNow();
-        return new long[]{success.get(), fail.get()};
+    private long[] pooledRandom(ExecutorService exec, LocalInventoryCache cache,
+                                 int callers) throws Exception {
+        return runCallers(exec, cache, callers, (id, e, c, iters, s, f) -> {
+            java.util.Random rng = new java.util.Random(Thread.currentThread().getId());
+            for (int i = 0; i < iters; i++) {
+                int slot = rng.nextInt(SLOTS);
+                int v = readVersion(e, c, slot);
+                var r = supplyTake(e, c, slot, v);
+                if (r.success()) s.incrementAndGet(); else f.incrementAndGet();
+                slot = rng.nextInt(SLOTS);
+                v = readVersion(e, c, slot);
+                r = supplyPut(e, c, slot, v);
+                if (r.success()) s.incrementAndGet(); else f.incrementAndGet();
+            }
+        });
+    }
+
+    private long[] pooledSameSlot(ExecutorService exec, LocalInventoryCache cache,
+                                   int callers) throws Exception {
+        return runCallers(exec, cache, callers, (id, e, c, iters, s, f) -> {
+            for (int i = 0; i < iters; i++) {
+                int v = readVersion(e, c, 0);
+                var r = supplyTake(e, c, 0, v);
+                if (r.success()) s.incrementAndGet(); else f.incrementAndGet();
+            }
+        });
+    }
+
+    // ---- submit helpers (mimic TheExchangeCore.submit) ----
+
+    private static LocalInventoryCache.Result supplyTake(ExecutorService exec,
+            LocalInventoryCache cache, int slot, int version) {
+        try {
+            return CompletableFuture.supplyAsync(
+                () -> cache.take(slot, "minecraft:diamond", version, 1), exec).get();
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    private static LocalInventoryCache.Result supplyPut(ExecutorService exec,
+            LocalInventoryCache cache, int slot, int version) {
+        try {
+            return CompletableFuture.supplyAsync(
+                () -> cache.put(slot, diamondWithCount(1), version, "test", item -> MAX_STACK), exec).get();
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    private static int readVersion(ExecutorService exec, LocalInventoryCache cache, int slot) {
+        try {
+            return CompletableFuture.supplyAsync(() -> cache.getVersion(slot), exec).get();
+        } catch (Exception e) { throw new RuntimeException(e); }
     }
 
     private static Path findProjectRoot() {

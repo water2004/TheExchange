@@ -142,9 +142,9 @@ src/                          Fabric 适配层
 
 测试机器：Intel Ultra 9 285H (6P+8E)，JDK 21.0.8，Windows 11
 
-### 生产环境线程模型
+### 生产线程模型
 
-所有业务操作（玩家点击、远端 PUT/TAKE 请求、同步查询）统一走 `TheExchangeCore.submit()` → `coreExecutor`。`coreExecutor` 是固定大小线程池，线程数由 `performance.core_threads` 控制（默认 4，上限为 CPU 核心数）。网络 I/O 由 `Connection` 内部的独立 daemon 线程处理，不占用 coreExecutor。
+所有业务操作统一走 `submit()` → `coreExecutor`。`coreExecutor` 是固定大小线程池，线程数 = `performance.core_threads`（默认 4）。网络 I/O 由 `Connection` 的 daemon 线程处理，不占用 coreExecutor。
 
 ```
 玩家点击 / 远端请求
@@ -159,41 +159,35 @@ src/                          Fabric 适配层
   ExchangeService → LocalInventoryCacheManager → LocalInventoryCache
 ```
 
-### 基准测试方法
+### 测试方法
 
-测试**跳过整个生产链路**（不经过 submit、不经过 ExchangeService、无网络、无 DB），直接对 `LocalInventoryCache` 实例并发读写，测量缓存数据结构本身的吞吐上限。
-
-测试代码对每个线程数创建一个独立 `Executors.newFixedThreadPool(N)`，N 个线程同时调用同一个 cache 实例的 `take()` / `put()`。每线程执行 50K 次 take+put 操作。
+完全模拟生产路径（不经过网络和 DB）：K 个 `core_threads` 的 `coreExecutor`，2K 个 caller 线程通过 `CompletableFuture.supplyAsync(task, coreExecutor).get()` 提交 take+put 操作，caller 阻塞等待结果。每个 caller 执行 5K 次 take+put。3 种竞争场景：
 
 | 场景 | 说明 |
 |------|------|
-| 零竞争 | 每个线程独占 2 个槽位，无冲突 |
-| 随机竞争 | 线程随机选择 54 个共享槽位 |
-| 完全竞争 | 所有线程抢夺同一个槽位 |
+| 零竞争 | 每个 caller 独占 2 个槽位 |
+| 随机竞争 | caller 随机选择 54 个共享槽位 |
+| 完全竞争 | 所有 caller 抢夺同一个槽位 |
 
 ### 结果
 
-横轴 `N` 是测试线程池中**同时访问 cache 的线程数**（1 到 CPU 核心数），不是 `core_threads`。生产环境的实际并发度由 `core_threads` 固定。
+横轴 `core_threads` 即 `performance.core_threads` 配置值（1/2/4/6/8）。
 
 ![](bench_report.png)
 
-| N (压测线程数) | 零竞争 (M ops/s) | 随机竞争 (M ops/s) | 完全竞争 (M ops/s) |
-|------|-----------------|-------------------|-------------------|
-| 1 | 3.3 | 5.0 | 16.7 |
-| 2 | 6.5 | 3.3 | 5.9 |
-| 4 | 7.3 | 5.8 | 12.5 |
-| 6 | 9.1 | 6.0 | 14.3 |
-| 8 | 8.9 | 4.9 | 14.8 |
-| 10 | 9.2 | 9.0 | 15.6 |
-| 12 | 10.3 | 6.3 | 15.8 |
-| 14 | 9.3 | 7.0 | 14.6 |
+| core_threads | 零竞争 (ops/s) | 随机竞争 (ops/s) | 完全竞争 (ops/s) |
+|------|------------|------------|------------|
+| 1 | 134K | 91K | 103K |
+| 2 | 367K | 195K | 185K |
+| 4 | 792K | 460K | 465K |
+| 6 | 1.04M | 550K | 531K |
+| 8 | 1.20M | 618K | 635K |
 
 ### 结论
 
-- **零竞争**随线程数线性扩展到 ~10M ops/s，StampedLock 乐观读消除了结构锁瓶颈
-- **随机竞争**在 6~9M ops/s，瓶颈是跨核心缓存一致性（版本号 CAS + 对象拷贝）
-- **完全竞争**单槽锁吞吐 15M ops/s，2 线程时因 park/unpark 开销短暂下降
-- Minecraft 玩家交互频率约 10–100 QPS，当前吞吐有 **4–5 个数量级余量**，无性能瓶颈
+- 零竞争随 core_threads 线性扩展到 1.2M ops/s
+- 随机和完全竞争在 460K~635K，瓶颈是 `CompletableFuture.supplyAsync` + `.get()` 的线程池排队开销和槽位锁竞争
+- 默认 `core_threads=4` 时约 460K~792K ops/s，Minecraft 玩家交互 ~10-100 QPS，有 **3-4 个数量级余量**
 
 ### 本地运行
 
