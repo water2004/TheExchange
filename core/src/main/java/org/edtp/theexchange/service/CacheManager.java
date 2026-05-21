@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -28,11 +29,17 @@ public class CacheManager {
         thread.setDaemon(true);
         return thread;
     });
+    private final ScheduledExecutorService flusher = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread thread = new Thread(task, "exchange-remote-cache-flusher");
+        thread.setDaemon(true);
+        return thread;
+    });
     private volatile boolean closed;
 
     public CacheManager(RemoteCacheStore cacheStore, int capacity) {
         this.cacheStore = cacheStore;
         this.capacity = Math.max(1, capacity);
+        flusher.scheduleWithFixedDelay(this::flushDirtyCachesSafely, 30, 30, TimeUnit.SECONDS);
     }
 
     public CachedInventory getCache(String serverName) {
@@ -114,7 +121,6 @@ public class CacheManager {
             putCached(key, cache);
         }
         cache.replaceSlot(slot, item, version);
-        persistSlotAsync(key, slot, item, version);
     }
 
     public void removeCacheSlot(String serverName, InventoryScope scope, int slot) {
@@ -122,10 +128,8 @@ public class CacheManager {
         CachedInventory cache = getOrLoad(key);
         if (cache != null) {
             cache.removeSlot(slot);
-            persistSlotAsync(key, slot, null, cache.getVersion(slot));
             return;
         }
-        persistSlotAsync(key, slot, null, 0);
     }
 
     public void clearCache(String serverName) {
@@ -134,28 +138,35 @@ public class CacheManager {
 
     public void clearCache(String serverName, InventoryScope scope) {
         RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
+        CachedInventory removed;
         lock.lock();
         try {
-            caches.remove(key);
+            removed = caches.remove(key);
         } finally {
             lock.unlock();
+        }
+        if (removed != null) {
+            flush(key, removed);
         }
     }
 
     public void cleanupExpired() {
-        List<RemoteScopeKey> stale = new ArrayList<>();
+        List<Map.Entry<RemoteScopeKey, CachedInventory>> stale = new ArrayList<>();
         lock.lock();
         try {
             for (Map.Entry<RemoteScopeKey, CachedInventory> entry : caches.entrySet()) {
                 if (System.currentTimeMillis() - entry.getValue().getLastAccessAt() > CACHE_EXPIRY_MS) {
-                    stale.add(entry.getKey());
+                    stale.add(Map.entry(entry.getKey(), entry.getValue()));
                 }
             }
-            for (RemoteScopeKey key : stale) {
-                caches.remove(key);
+            for (Map.Entry<RemoteScopeKey, CachedInventory> entry : stale) {
+                caches.remove(entry.getKey());
             }
         } finally {
             lock.unlock();
+        }
+        for (Map.Entry<RemoteScopeKey, CachedInventory> entry : stale) {
+            flush(entry.getKey(), entry.getValue());
         }
     }
 
@@ -175,6 +186,7 @@ public class CacheManager {
     public void shutdown() {
         closed = true;
         flushAll();
+        flusher.shutdownNow();
         writer.shutdown();
         try {
             if (!writer.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -238,15 +250,34 @@ public class CacheManager {
         }
     }
 
-    private void persistSlotAsync(RemoteScopeKey key, int slot, NeutralItem item, int version) {
+    private void scheduleFlush(RemoteScopeKey key, CachedInventory cache) {
         if (closed) {
-            persistSlot(key, slot, item, version);
+            flushDirty(key, cache);
+            return;
+        }
+        if (cache == null || !cache.markFlushQueued()) {
             return;
         }
         try {
-            writer.execute(() -> persistSlot(key, slot, item, version));
+            writer.execute(() -> {
+                try {
+                    if (cache.isDirty()) {
+                        flushDirty(key, cache);
+                    }
+                } finally {
+                    cache.clearFlushQueued();
+                    if (!closed && cache.isDirty()) {
+                        scheduleFlush(key, cache);
+                    }
+                }
+            });
         } catch (RejectedExecutionException e) {
-            persistSlot(key, slot, item, version);
+            cache.clearFlushQueued();
+            if (closed) {
+                flushDirty(key, cache);
+                return;
+            }
+            throw e;
         }
     }
 
@@ -256,8 +287,50 @@ public class CacheManager {
 
     private void flush(RemoteScopeKey key, CachedInventory cache) {
         if (cache == null) return;
-        for (CachedInventory.SlotSnapshot snapshot : cache.snapshotSlots()) {
-            persistSlot(key, snapshot.slot(), snapshot.item(), snapshot.version());
+        CachedInventory.Snapshot snapshot = cache.snapshotForFlush();
+        for (CachedInventory.SlotSnapshot slot : snapshot.slots()) {
+            persistSlot(key, slot.slot(), slot.item(), slot.version());
+        }
+        cache.markClean(snapshot.revision());
+    }
+
+    private void flushDirty(RemoteScopeKey key, CachedInventory cache) {
+        if (cache == null) return;
+        CachedInventory.Snapshot snapshot = cache.snapshotForFlush();
+        List<Integer> dirtySlots = cache.dirtySlots();
+        if (dirtySlots.isEmpty()) {
+            cache.markClean(snapshot.revision());
+            return;
+        }
+        java.util.HashSet<Integer> dirtySet = new java.util.HashSet<>(dirtySlots);
+        for (CachedInventory.SlotSnapshot slot : snapshot.slots()) {
+            if (!dirtySet.contains(slot.slot())) continue;
+            persistSlot(key, slot.slot(), slot.item(), slot.version());
+        }
+        cache.markClean(snapshot.revision());
+    }
+
+    private void flushDirtyCachesSafely() {
+        try {
+            flushDirtyCaches();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void flushDirtyCaches() {
+        if (closed) return;
+        List<Map.Entry<RemoteScopeKey, CachedInventory>> entries;
+        lock.lock();
+        try {
+            entries = new ArrayList<>(caches.entrySet());
+        } finally {
+            lock.unlock();
+        }
+        for (Map.Entry<RemoteScopeKey, CachedInventory> entry : entries) {
+            CachedInventory cache = entry.getValue();
+            if (cache != null && cache.isDirty()) {
+                scheduleFlush(entry.getKey(), cache);
+            }
         }
     }
 

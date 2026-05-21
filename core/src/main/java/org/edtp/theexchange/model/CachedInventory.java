@@ -2,6 +2,7 @@ package org.edtp.theexchange.model;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -10,7 +11,9 @@ public final class CachedInventory {
     private final InventoryScope scope;
     private final List<SlotState> slots = new ArrayList<>();
     private final AtomicLong revision = new AtomicLong();
+    private final AtomicBoolean flushQueued = new AtomicBoolean();
     private final ReentrantLock structureLock = new ReentrantLock();
+    private volatile boolean dirty;
     private volatile long lastAccessAt;
     private volatile long lastSyncedAt;
 
@@ -33,6 +36,10 @@ public final class CachedInventory {
 
     public long getRevision() {
         return revision.get();
+    }
+
+    public boolean isDirty() {
+        return dirty;
     }
 
     public void markLoaded(List<SlotSnapshot> snapshots, long syncedAt) {
@@ -68,6 +75,7 @@ public final class CachedInventory {
                 }
             }
             revision.set(0L);
+            dirty = false;
             lastSyncedAt = syncedAt;
             touch();
         } finally {
@@ -130,7 +138,7 @@ public final class CachedInventory {
                 state.item.setVersion(version);
             }
             state.version = version;
-            revision.incrementAndGet();
+            markDirty(state);
             touch();
         } finally {
             state.lock.unlock();
@@ -145,16 +153,71 @@ public final class CachedInventory {
         structureLock.lock();
         try {
             touch();
-            List<SlotSnapshot> snapshots = new ArrayList<>(slots.size());
-            for (int i = 0; i < slots.size(); i++) {
-                SlotState state = slots.get(i);
-                SnapshotValue value = copyValue(state);
-                snapshots.add(new SlotSnapshot(i, value.item(), value.version()));
-            }
-            return snapshots;
+            return snapshotSlotsUnlocked();
         } finally {
             structureLock.unlock();
         }
+    }
+
+    public Snapshot snapshotForFlush() {
+        structureLock.lock();
+        try {
+            touch();
+            return new Snapshot(snapshotSlotsUnlocked(), revision.get());
+        } finally {
+            structureLock.unlock();
+        }
+    }
+
+    public void markClean(long persistedRevision) {
+        structureLock.lock();
+        try {
+            if (revision.get() != persistedRevision) {
+                return;
+            }
+            dirty = false;
+            for (SlotState state : slots) {
+                if (state == null) continue;
+                state.lock.lock();
+                try {
+                    state.dirty = false;
+                } finally {
+                    state.lock.unlock();
+                }
+            }
+        } finally {
+            structureLock.unlock();
+        }
+    }
+
+    public List<Integer> dirtySlots() {
+        structureLock.lock();
+        try {
+            List<Integer> dirtySlots = new ArrayList<>();
+            for (int i = 0; i < slots.size(); i++) {
+                SlotState state = slots.get(i);
+                if (state == null) continue;
+                state.lock.lock();
+                try {
+                    if (state.dirty) {
+                        dirtySlots.add(i);
+                    }
+                } finally {
+                    state.lock.unlock();
+                }
+            }
+            return dirtySlots;
+        } finally {
+            structureLock.unlock();
+        }
+    }
+
+    public boolean markFlushQueued() {
+        return flushQueued.compareAndSet(false, true);
+    }
+
+    public void clearFlushQueued() {
+        flushQueued.set(false);
     }
 
     public List<Integer> versions() {
@@ -224,6 +287,22 @@ public final class CachedInventory {
         lastAccessAt = System.currentTimeMillis();
     }
 
+    private void markDirty(SlotState state) {
+        state.dirty = true;
+        dirty = true;
+        revision.incrementAndGet();
+    }
+
+    private List<SlotSnapshot> snapshotSlotsUnlocked() {
+        List<SlotSnapshot> snapshots = new ArrayList<>(slots.size());
+        for (int i = 0; i < slots.size(); i++) {
+            SlotState state = slots.get(i);
+            SnapshotValue value = copyValue(state);
+            snapshots.add(new SlotSnapshot(i, value.item(), value.version()));
+        }
+        return snapshots;
+    }
+
     private static NeutralItem copyItem(SlotState state) {
         return copyValue(state).item();
     }
@@ -248,9 +327,12 @@ public final class CachedInventory {
         private final ReentrantLock lock = new ReentrantLock();
         private NeutralItem item;
         private int version;
+        private boolean dirty;
     }
 
     public record SlotSnapshot(int slot, NeutralItem item, int version) {}
+
+    public record Snapshot(List<SlotSnapshot> slots, long revision) {}
 
     private record SnapshotValue(NeutralItem item, int version) {}
 }
