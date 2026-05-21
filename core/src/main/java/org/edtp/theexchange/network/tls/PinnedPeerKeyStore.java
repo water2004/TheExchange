@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.Certificate;
 import java.util.Base64;
+import java.util.Set;
 import java.util.Objects;
 import java.util.Properties;
 
@@ -55,6 +56,14 @@ public final class PinnedPeerKeyStore {
 
         if (!storedKey.equals(encodedKey)) {
             throw new SSLHandshakeException("Pinned public key mismatch for " + serverName);
+        }
+    }
+
+    public synchronized void retainOnly(Set<String> allowedServerNames) throws IOException {
+        Objects.requireNonNull(allowedServerNames, "allowedServerNames");
+        boolean changed = pins.keySet().removeIf(key -> !allowedServerNames.contains(String.valueOf(key)));
+        if (changed) {
+            store();
         }
     }
 

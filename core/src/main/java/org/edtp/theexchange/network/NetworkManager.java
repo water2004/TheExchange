@@ -38,10 +38,10 @@ public class NetworkManager {
         void handle(Connection conn, FrameType type, Object message);
     }
 
-    public NetworkManager(int localPort, Path keystorePath, Path pinnedPeerKeyPath,
+    public NetworkManager(int localPort, Path keystorePath, PinnedPeerKeyStore pinnedPeerKeyStore,
                           String cn, char[] keystorePassword) {
         this.tlsContext = TlsContext.create(keystorePath, cn, keystorePassword);
-        this.pinnedPeerKeyStore = new PinnedPeerKeyStore(pinnedPeerKeyPath);
+        this.pinnedPeerKeyStore = pinnedPeerKeyStore;
         this.tcpServer = new TcpServer(localPort, tlsContext);
         this.tcpClient = new TcpClient(tlsContext, pinnedPeerKeyStore);
         System.out.println(TAG + "Created, local port=" + localPort);

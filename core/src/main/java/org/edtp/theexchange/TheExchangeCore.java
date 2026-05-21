@@ -8,6 +8,7 @@ import org.edtp.theexchange.model.ExchangeViewState;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.PlayerExchangeContext;
 import org.edtp.theexchange.network.NetworkManager;
+import org.edtp.theexchange.network.tls.PinnedPeerKeyStore;
 import org.edtp.theexchange.service.CacheManager;
 import org.edtp.theexchange.service.ExchangeService;
 import org.edtp.theexchange.service.HeartbeatManager;
@@ -21,7 +22,9 @@ import org.edtp.theexchange.storage.OperationLogger;
 import org.edtp.theexchange.storage.RemoteCacheStore;
 
 import java.nio.file.Path;
+import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -51,6 +54,7 @@ public class TheExchangeCore {
     private CompletableFuture<Void> startupFuture;
     private ExchangeConfigManager configManager;
     private ExchangeAPI.RuntimeConfig runtimeConfig;
+    private PinnedPeerKeyStore pinnedPeerKeyStore;
 
     private DatabaseManager databaseManager;
     private LocalItemStore localItemStore;
@@ -311,13 +315,13 @@ public class TheExchangeCore {
             beginReload();
             ExchangeAPI.RuntimeConfig oldConfig = runtimeConfig;
             ExchangeAPI.RuntimeConfig reloaded = configManager.reload();
-            stopReloadableServices(false, oldConfig, reloaded);
             if (localInventoryCacheManager != null) {
                 localInventoryCacheManager.flushAll();
             }
             if (cacheManager != null) {
                 cacheManager.shutdown();
             }
+            stopReloadableServices(false, oldConfig, reloaded);
             stopCoreExecutor();
             swapCoreExecutor(reloaded);
             generation.incrementAndGet();
@@ -336,13 +340,18 @@ public class TheExchangeCore {
     }
 
     private void buildRuntime(ExchangeAPI.RuntimeConfig config, ExchangeAPI.RuntimeConfig oldConfig) {
+        Path pinnedPeerKeysPath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "known-peers.properties");
+        if (pinnedPeerKeyStore == null) {
+            pinnedPeerKeyStore = new PinnedPeerKeyStore(pinnedPeerKeysPath);
+        }
+        pruneRemoteState(config);
+
         localInventoryCacheManager = new LocalInventoryCacheManager(
                 localItemStore, api.getItemSerializer(), config.getCache().getLocalInventoryCacheCapacity());
         localItemStore.setCacheManager(localInventoryCacheManager);
         cacheManager = new CacheManager(remoteCacheStore, config.getCache().getRemoteInventoryCacheCapacity());
 
         Path keystorePath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "keystore.jks");
-        Path pinnedPeerKeysPath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "known-peers.properties");
         boolean reuseNetwork = networkManager != null
                 && oldConfig != null
                 && oldConfig.getPort() == config.getPort();
@@ -351,7 +360,7 @@ public class TheExchangeCore {
                 networkManager.shutdown();
             }
             try {
-                networkManager = new NetworkManager(config.getPort(), keystorePath, pinnedPeerKeysPath,
+                networkManager = new NetworkManager(config.getPort(), keystorePath, pinnedPeerKeyStore,
                         config.getDisplayName(), "theexchange".toCharArray());
             } catch (Exception e) {
                 logNetworkStartFailure(config.getPort(), e);
@@ -390,6 +399,18 @@ public class TheExchangeCore {
                     .map(ExchangeAPI.RemoteServerConfig::getName)
                     .collect(java.util.stream.Collectors.toSet()));
             serverRegistry.connectAllEnabled();
+        }
+    }
+
+    private void pruneRemoteState(ExchangeAPI.RuntimeConfig config) {
+        Set<String> configuredServers = config.getRemoteServers().stream()
+                .map(ExchangeAPI.RemoteServerConfig::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        remoteCacheStore.retainOnlyServers(configuredServers);
+        try {
+            pinnedPeerKeyStore.retainOnly(configuredServers);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to prune pinned peer keys", e);
         }
     }
 

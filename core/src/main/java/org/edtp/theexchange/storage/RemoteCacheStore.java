@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 public class RemoteCacheStore {
     private final DatabaseManager db;
@@ -106,6 +107,31 @@ public class RemoteCacheStore {
             db.unlock();
         }
         return result;
+    }
+
+    public void retainOnlyServers(Set<String> allowedServerNames) {
+        db.lock();
+        try {
+            if (allowedServerNames == null || allowedServerNames.isEmpty()) {
+                try (PreparedStatement ps = db.getConnection().prepareStatement("DELETE FROM remote_cache")) {
+                    ps.executeUpdate();
+                }
+                return;
+            }
+            String placeholders = String.join(",", java.util.Collections.nCopies(allowedServerNames.size(), "?"));
+            String sql = "DELETE FROM remote_cache WHERE server_name NOT IN (" + placeholders + ")";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                int index = 1;
+                for (String serverName : allowedServerNames) {
+                    ps.setString(index++, serverName);
+                }
+                ps.executeUpdate();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to prune remote cache", e);
+        } finally {
+            db.unlock();
+        }
     }
 
     public record RemoteSlotSnapshot(int slot, NeutralItem item, int version) {}
