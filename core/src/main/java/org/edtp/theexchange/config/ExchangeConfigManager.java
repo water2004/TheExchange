@@ -16,6 +16,51 @@ import java.util.Locale;
 public final class ExchangeConfigManager {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final List<String> READABLE_PATHS = List.of(
+            "server",
+            "server.display_name",
+            "server.port",
+            "server.password",
+            "network",
+            "network.heartbeat_interval_seconds",
+            "network.heartbeat_timeout_seconds",
+            "network.reconnect_initial_delay_seconds",
+            "network.reconnect_max_delay_seconds",
+            "network.request_timeout_seconds",
+            "network.inbound_enabled",
+            "cache",
+            "cache.offline_retention_hours",
+            "cache.local_inventory_cache_capacity",
+            "cache.remote_inventory_cache_capacity",
+            "performance",
+            "performance.core_threads",
+            "logging",
+            "logging.retention_days",
+            "logging.cleanup_interval_hours",
+            "container",
+            "container.rows",
+            "container.title_template",
+            "remoteServers"
+    );
+    private static final List<String> WRITABLE_PATHS = List.of(
+            "server.display_name",
+            "server.port",
+            "server.password",
+            "network.heartbeat_interval_seconds",
+            "network.heartbeat_timeout_seconds",
+            "network.reconnect_initial_delay_seconds",
+            "network.reconnect_max_delay_seconds",
+            "network.request_timeout_seconds",
+            "network.inbound_enabled",
+            "cache.offline_retention_hours",
+            "cache.local_inventory_cache_capacity",
+            "cache.remote_inventory_cache_capacity",
+            "performance.core_threads",
+            "logging.retention_days",
+            "logging.cleanup_interval_hours",
+            "container.rows",
+            "container.title_template"
+    );
 
     private final ExchangeAPI.ConfigLoader loader;
     private volatile ExchangeAPI.RuntimeConfig active;
@@ -41,6 +86,14 @@ public final class ExchangeConfigManager {
 
     public synchronized String get(String path) {
         return valueToString(getValue(loadFileSnapshot(), path));
+    }
+
+    public List<String> readablePaths() {
+        return READABLE_PATHS;
+    }
+
+    public List<String> writablePaths() {
+        return WRITABLE_PATHS;
     }
 
     public synchronized void set(String path, String rawValue) {

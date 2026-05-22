@@ -4,9 +4,12 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import com.mojang.logging.LogUtils;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.Permissions;
@@ -16,9 +19,12 @@ import org.edtp.theexchange.fabric.container.ExchangeMenu;
 import org.edtp.theexchange.model.RemoteServer;
 import org.slf4j.Logger;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 public class ExchangeCommand {
 
@@ -41,10 +47,13 @@ public class ExchangeCommand {
                 .then(Commands.literal("show").executes(ExchangeCommand::configShow))
                 .then(Commands.literal("get")
                         .then(Commands.argument("path", StringArgumentType.string())
+                                .suggests(ExchangeCommand::suggestReadableConfigPaths)
                                 .executes(ExchangeCommand::configGet)))
                 .then(Commands.literal("set")
                         .then(Commands.argument("path", StringArgumentType.string())
+                                .suggests(ExchangeCommand::suggestWritableConfigPaths)
                                 .then(Commands.argument("value", StringArgumentType.greedyString())
+                                        .suggests(ExchangeCommand::suggestConfigValue)
                                         .executes(ExchangeCommand::configSet))))
                 .then(Commands.literal("remote")
                         .then(Commands.literal("list").executes(ExchangeCommand::configRemoteList))
@@ -56,6 +65,7 @@ public class ExchangeCommand {
                                                                 .executes(ExchangeCommand::configRemoteAdd))))))
                         .then(Commands.literal("remove")
                                 .then(Commands.argument("name", StringArgumentType.string())
+                                        .suggests(ExchangeCommand::suggestConfigRemoteNames)
                                         .executes(ExchangeCommand::configRemoteRemove))))
                 .then(Commands.literal("reload").executes(ExchangeCommand::configReload)));
 
@@ -65,9 +75,11 @@ public class ExchangeCommand {
         root.then(Commands.literal("list").executes(ExchangeCommand::listServers));
         root.then(Commands.literal("view")
                 .then(Commands.argument("server", StringArgumentType.string())
+                        .suggests(ExchangeCommand::suggestViewServers)
                         .executes(ExchangeCommand::viewServer)));
         root.then(Commands.literal("refresh")
                 .then(Commands.argument("server", StringArgumentType.string())
+                        .suggests(ExchangeCommand::suggestRemoteServers)
                         .executes(ExchangeCommand::refreshServer)));
         root.then(Commands.literal("reload")
                 .requires(ExchangeCommand::isAdmin)
@@ -89,6 +101,77 @@ public class ExchangeCommand {
 
     private static boolean isAdmin(CommandSourceStack src) {
         return src.permissions().hasPermission(Permissions.COMMANDS_ADMIN);
+    }
+
+    private static CompletableFuture<Suggestions> suggestReadableConfigPaths(CommandContext<CommandSourceStack> ctx,
+                                                                             SuggestionsBuilder builder) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) {
+            return builder.buildFuture();
+        }
+        return SharedSuggestionProvider.suggest(core.getConfigManager().readablePaths(), builder);
+    }
+
+    private static CompletableFuture<Suggestions> suggestWritableConfigPaths(CommandContext<CommandSourceStack> ctx,
+                                                                             SuggestionsBuilder builder) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) {
+            return builder.buildFuture();
+        }
+        return SharedSuggestionProvider.suggest(core.getConfigManager().writablePaths(), builder);
+    }
+
+    private static CompletableFuture<Suggestions> suggestConfigValue(CommandContext<CommandSourceStack> ctx,
+                                                                     SuggestionsBuilder builder) {
+        String path = StringArgumentType.getString(ctx, "path");
+        if ("network.inbound_enabled".equals(path)) {
+            return SharedSuggestionProvider.suggest(List.of("true", "false"), builder);
+        }
+        return builder.buildFuture();
+    }
+
+    private static CompletableFuture<Suggestions> suggestConfigRemoteNames(CommandContext<CommandSourceStack> ctx,
+                                                                           SuggestionsBuilder builder) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) {
+            return builder.buildFuture();
+        }
+        try {
+            return SharedSuggestionProvider.suggest(
+                    core.getConfigManager().listRemoteServers().stream()
+                            .map(ExchangeAPI.RemoteServerConfig::getName),
+                    builder);
+        } catch (Exception ignored) {
+            return builder.buildFuture();
+        }
+    }
+
+    private static CompletableFuture<Suggestions> suggestViewServers(CommandContext<CommandSourceStack> ctx,
+                                                                     SuggestionsBuilder builder) {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        names.add("local");
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core != null && core.isInitialized()) {
+            String localName = core.getRuntimeConfig().getDisplayName();
+            if (localName != null && !localName.isBlank() && !"local".equalsIgnoreCase(localName)) {
+                names.add(localName);
+            }
+            for (RemoteServer server : core.getServerRegistry().getAllServers()) {
+                names.add(server.getName());
+            }
+        }
+        return SharedSuggestionProvider.suggest(names, builder);
+    }
+
+    private static CompletableFuture<Suggestions> suggestRemoteServers(CommandContext<CommandSourceStack> ctx,
+                                                                       SuggestionsBuilder builder) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) {
+            return builder.buildFuture();
+        }
+        return SharedSuggestionProvider.suggest(
+                core.getServerRegistry().getAllServers().stream().map(RemoteServer::getName),
+                builder);
     }
 
     private static int configShow(CommandContext<CommandSourceStack> ctx) {
