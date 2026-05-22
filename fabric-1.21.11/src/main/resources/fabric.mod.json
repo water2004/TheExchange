@@ -2,20 +2,27 @@
   "schemaVersion": 1,
   "id": "theexchange",
   "version": "${version}",
-  "name": "The Exchange",
-  "description": "Cross-server item exchange",
-  "authors": ["GBwater"],
+  "name": "TheExchange",
+  "description": "",
+  "authors": [],
   "contact": {},
   "license": "MIT",
-  "environment": "server",
+  "icon": "assets/theexchange/icon.png",
+  "environment": "*",
   "entrypoints": {
+    "fabric-datagen": [
+      "org.edtp.theexchange.client.TheexchangeDataGenerator"
+    ],
+    "client": [
+      "org.edtp.theexchange.client.TheexchangeClient"
+    ],
     "main": [
       "org.edtp.theexchange.Theexchange"
     ]
   },
   "depends": {
-    "fabricloader": ">=0.16.0",
-    "fabric": "*",
-    "minecraft": ">=${minecraft_version}"
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
   }
 }

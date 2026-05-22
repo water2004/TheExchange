@@ -3,11 +3,11 @@ plugins {
     id 'maven-publish'
 }
 
-version = project.mod_version
+version = "${project.mod_version}-fabric-${project.minecraft_version}"
 group = project.maven_group
 
 base {
-    archivesName = "${project.archives_base_name}-fabric-26.1"
+    archivesName = project.archives_base_name
 }
 
 loom {
@@ -49,7 +49,7 @@ processResources {
     filteringCharset "UTF-8"
 
     filesMatching("fabric.mod.json") {
-        expand "version": project.version,
+        expand "version": project.mod_version,
                 "minecraft_version": project.minecraft_version,
                 "loader_version": project.loader_version
     }

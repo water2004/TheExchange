@@ -1,20 +1,20 @@
 package org.edtp.theexchange.fabric;
 
+import com.mojang.logging.LogUtils;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.api.ExchangeAPI;
+import org.edtp.theexchange.api.RefreshableExchangeView;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.fabric.config.FabricConfigLoader;
 import org.edtp.theexchange.fabric.item.FabricItemSerializer;
 import org.slf4j.Logger;
-import com.mojang.logging.LogUtils;
-
-// Diff vs 26.1: getServerVersion() uses SharedConstants.getCurrentVersion().getId()
-// in 1.21.11 vs server.getServerVersion() in 26.1.
 
 public class FabricExchangeAPI implements ExchangeAPI {
 
     private final MinecraftServer server;
-    private final Logger slf4jLogger;
+    private final org.slf4j.Logger slf4jLogger;
     private final ExchangeAPI.Logger exchangeLogger;
     private final FabricItemSerializer itemSerializer;
     private final FabricConfigLoader configLoader;
@@ -32,27 +32,68 @@ public class FabricExchangeAPI implements ExchangeAPI {
         this.configLoader = new FabricConfigLoader();
     }
 
-    @Override public Logger getLogger() { return exchangeLogger; }
-    @Override public ItemSerializer getItemSerializer() { return itemSerializer; }
-    @Override public ConfigLoader getConfigLoader() { return configLoader; }
+    @Override
+    public ExchangeAPI.Logger getLogger() {
+        return exchangeLogger;
+    }
+
+    @Override
+    public ItemSerializer getItemSerializer() {
+        return itemSerializer;
+    }
+
+    @Override
+    public ConfigLoader getConfigLoader() {
+        return configLoader;
+    }
 
     @Override
     public String getServerVersion() {
-        // TODO: 1.21.11 uses SharedConstants.getCurrentVersion().getId()
-        return "1.21.11";
+        return server.getServerVersion();
     }
 
-    @Override public String getServerName() { return "Default Server"; }
-    @Override public void runOnMainThread(Runnable task) { server.execute(task); }
-    @Override public void runAsync(Runnable task) { new Thread(task, "exchange-async").start(); }
+    @Override
+    public String getServerName() {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core != null && core.getRuntimeConfig() != null) {
+            return core.getRuntimeConfig().getDisplayName();
+        }
+        return "Default Server";
+    }
+
+    @Override
+    public void runOnMainThread(Runnable task) {
+        server.execute(task);
+    }
+
+    @Override
+    public void runAsync(Runnable task) {
+        Thread thread = new Thread(task, "exchange-async");
+        thread.setDaemon(true);
+        thread.start();
+    }
 
     @Override
     public void refreshRemoteInventoryView(String serverName) {
-        // TODO: iterate server.getPlayerList().getPlayers()
+        server.execute(() -> {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                if (player.containerMenu instanceof RefreshableExchangeView menu
+                        && menu.isViewingServer(serverName)) {
+                    menu.refreshFromCache();
+                }
+            }
+        });
     }
 
     @Override
     public void redrawRemoteInventoryView(String serverName) {
-        // TODO
+        server.execute(() -> {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                if (player.containerMenu instanceof RefreshableExchangeView menu
+                        && menu.isViewingServer(serverName)) {
+                    menu.refreshFromMemory();
+                }
+            }
+        });
     }
 }
