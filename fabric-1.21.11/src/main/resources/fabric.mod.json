@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "theexchange",
+  "version": "${version}",
+  "name": "The Exchange",
+  "description": "Cross-server item exchange",
+  "authors": ["GBwater"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "org.edtp.theexchange.Theexchange"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric": "*",
+    "minecraft": ">=${minecraft_version}"
+  }
+}
