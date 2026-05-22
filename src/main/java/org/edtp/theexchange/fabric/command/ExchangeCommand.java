@@ -19,7 +19,6 @@ import org.edtp.theexchange.fabric.container.ExchangeMenu;
 import org.edtp.theexchange.model.RemoteServer;
 import org.slf4j.Logger;
 
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -152,10 +151,6 @@ public class ExchangeCommand {
         names.add("local");
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core != null && core.isInitialized()) {
-            String localName = core.getRuntimeConfig().getDisplayName();
-            if (localName != null && !localName.isBlank() && !"local".equalsIgnoreCase(localName)) {
-                names.add(localName);
-            }
             for (RemoteServer server : core.getServerRegistry().getAllServers()) {
                 names.add(server.getName());
             }

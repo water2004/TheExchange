@@ -10,8 +10,10 @@ import com.google.gson.JsonPrimitive;
 import org.edtp.theexchange.api.ExchangeAPI;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 public final class ExchangeConfigManager {
 
@@ -106,11 +108,7 @@ public final class ExchangeConfigManager {
         ConfigData data = loadFileSnapshot();
         for (RemoteServerData remote : data.remoteServers) {
             if (remote.name.equals(name)) {
-                remote.address = address;
-                remote.port = port;
-                remote.password = password;
-                saveFileSnapshot(data);
-                return;
+                throw new IllegalArgumentException("Remote server already exists: " + name);
             }
         }
         data.remoteServers.add(new RemoteServerData(name, address, port, password));
@@ -189,9 +187,13 @@ public final class ExchangeConfigManager {
             throw new IllegalArgumentException("container.rows must be 6 for the current generic 9x6 menu");
         }
         requireText("container.title_template", data.container.titleTemplate);
+        Set<String> remoteNames = new HashSet<>();
         for (int i = 0; i < data.remoteServers.size(); i++) {
             RemoteServerData remote = data.remoteServers.get(i);
-            requireText("remoteServers[" + i + "].name", remote.name);
+            requireRemoteName("remoteServers[" + i + "].name", remote.name);
+            if (!remoteNames.add(remote.name)) {
+                throw new IllegalArgumentException("Duplicate remote server name: " + remote.name);
+            }
             requireText("remoteServers[" + i + "].address", remote.address);
             requirePort("remoteServers[" + i + "].port", remote.port);
             requireText("remoteServers[" + i + "].password", remote.password);
@@ -201,6 +203,18 @@ public final class ExchangeConfigManager {
     private void requireText(String path, String value) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(path + " must be a non-empty string");
+        }
+    }
+
+    private void requireRemoteName(String path, String value) {
+        requireText(path, value);
+        if ("local".equalsIgnoreCase(value)) {
+            throw new IllegalArgumentException(path + " cannot be local");
+        }
+        for (int i = 0; i < value.length(); i++) {
+            if (Character.isWhitespace(value.charAt(i))) {
+                throw new IllegalArgumentException(path + " cannot contain whitespace");
+            }
         }
     }
 
