@@ -40,10 +40,6 @@ public class LocalItemStore {
         return requireCacheManager().snapshot(scope);
     }
 
-    public List<NeutralItem> getAllItems(int limit, InventoryScope scope) {
-        return getAllItems(scope);
-    }
-
     public ItemRecord getItem(int slot) {
         return getItem(InventoryScope.server(), slot);
     }
@@ -64,13 +60,12 @@ public class LocalItemStore {
         return requireCacheManager().put(scope, slot, item, expectedVersion, addedBy);
     }
 
-    public boolean replaceSlotFromLocal(int slot, NeutralItem item, String addedBy) {
-        return replaceSlotFromLocal(InventoryScope.server(), slot, item, addedBy);
+    public void replaceSlotFromLocal(int slot, NeutralItem item, String addedBy) {
+        replaceSlotFromLocal(InventoryScope.server(), slot, item, addedBy);
     }
 
-    public boolean replaceSlotFromLocal(InventoryScope scope, int slot, NeutralItem item, String addedBy) {
+    public void replaceSlotFromLocal(InventoryScope scope, int slot, NeutralItem item, String addedBy) {
         requireCacheManager().replaceFromLocal(scope, slot, item, addedBy);
-        return true;
     }
 
     public TakeResult takeItem(int slot, String expectedItemId, int expectedVersion,

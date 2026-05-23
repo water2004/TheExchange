@@ -156,9 +156,8 @@ public class MenuInteractionService {
             NeutralItem prev = i < before.size() ? before.get(i) : null;
             NeutralItem current = i < after.size() ? after.get(i) : null;
             if (sameItemState(prev, current)) continue;
-            if (localItemStore.replaceSlotFromLocal(i, current, player.uuid())) {
-                changed.add(i);
-            }
+            localItemStore.replaceSlotFromLocal(i, current, player.uuid());
+            changed.add(i);
         }
         if (!changed.isEmpty()) {
             exchangeService.publishLocalInventoryUpdate(changed);

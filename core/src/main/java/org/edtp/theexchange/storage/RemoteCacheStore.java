@@ -44,7 +44,21 @@ public class RemoteCacheStore {
     }
 
     public int loadSlotVersion(String serverName, InventoryScope scope, int slot) {
-        return loadSlot(serverName, scope, slot).version();
+        db.lock();
+        String sql = "SELECT version FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setString(1, serverName);
+            ps.setString(2, scope.typeName());
+            ps.setString(3, scope.getScopeId());
+            ps.setInt(4, slot);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt("version") : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to load remote slot version", e);
+        } finally {
+            db.unlock();
+        }
     }
 
     public void saveSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, int version) {

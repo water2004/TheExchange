@@ -30,7 +30,7 @@ public class OperationLogger {
                        String playerUuid, String playerName, String serverName,
                        String itemId, int quantity, boolean success, String failReason) {
         db.lock();
-        String sql = "INSERT INTO operation_log (timestamp, op_type, scope_type, scope_id, player_uuid, player_name, server_name, " +
+        String sql = "INSERT OR IGNORE INTO operation_log (timestamp, op_type, scope_type, scope_id, player_uuid, player_name, server_name, " +
                 "item_id, quantity, result, fail_reason, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setLong(1, System.currentTimeMillis());
@@ -46,11 +46,8 @@ public class OperationLogger {
             ps.setString(11, failReason);
             ps.setString(12, requestId);
             ps.executeUpdate();
-            return true;
+            return lastInsertChangedDatabase();
         } catch (SQLException e) {
-            if (e.getMessage() != null && e.getMessage().contains("UNIQUE constraint failed")) {
-                return false; // Idempotent: already logged
-            }
             throw new RuntimeException("Failed to log operation", e);
         } finally {
             db.unlock();
@@ -81,7 +78,7 @@ public class OperationLogger {
     public List<LogEntry> queryLogs(long sinceTimestamp) {
         db.lock();
         List<LogEntry> results = new ArrayList<>();
-        String sql = "SELECT * FROM operation_log WHERE timestamp >= ? ORDER BY timestamp DESC";
+        String sql = "SELECT * FROM operation_log WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 10000";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
             ps.setLong(1, sinceTimestamp);
             try (ResultSet rs = ps.executeQuery()) {
@@ -95,6 +92,13 @@ public class OperationLogger {
             db.unlock();
         }
         return results;
+    }
+
+    private boolean lastInsertChangedDatabase() throws SQLException {
+        try (Statement stmt = db.getConnection().createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT changes()")) {
+            return rs.next() && rs.getInt(1) != 0;
+        }
     }
 
     public int cleanupOldLogs(int retentionDays) {

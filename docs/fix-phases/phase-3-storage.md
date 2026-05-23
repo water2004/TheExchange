@@ -1,27 +1,11 @@
 # Phase 3：storage 层
 
-## LocalItemStore.java — M-11, C-12
+> **状态：已完成。** 所有修改项已在当前代码中实现，无需额外操作。
 
-`replaceSlotFromLocal` 永远返回 `true`，异常直接传播，返回值无意义。
-`getAllItems(int limit, InventoryScope scope)` 完全忽略 `limit` 参数。
+以下为已验证的修复清单：
 
-**改**：
-- `replaceSlotFromLocal` 改为 `void`
-- `getAllItems(int limit, ...)` 移除 `limit` 参数，简化为 `getAllItems(scope)`
-- 调用方 `MenuInteractionService.applyLocalSnapshot:159` 适配 void 返回
-
-## OperationLogger.java — M-5, D-5
-
-幂等判断依赖错误消息文本 `.contains("UNIQUE constraint failed")`，不同 SQLite 驱动版本或 locale 下可能不匹配。
-`queryLogs` 无结果数量限制，`sinceTimestamp=0` 时可返回全表。
-
-**改**：
-- 优先方案：改用 `INSERT OR IGNORE` + 检查 `changes() == 0` 判断重复（最可靠）
-- 备选方案：`e.getErrorCode() == 19` (SQLITE_CONSTRAINT)
-- `queryLogs` SQL 加 `LIMIT 10000`
-
-## RemoteCacheStore.java — M-9
-
-`loadSlotVersion` 执行完整 `SELECT items_blob, version` 并反序列化整个 blob，然后丢弃物品数据只取 version。
-
-**改**：添加专用 `SELECT version FROM remote_cache WHERE ...` 查询。
+- ✅ M-11: `replaceSlotFromLocal` 已改为 `void` 返回类型
+- ✅ C-12: `getAllItems` 已移除无用的 `limit` 参数
+- ✅ M-5: `OperationLogger.log()` 已使用 `INSERT OR IGNORE` + `changes() == 0` 判断重复
+- ✅ D-5: `queryLogs` SQL 已加 `LIMIT 10000`
+- ✅ M-9: `loadSlotVersion` 已使用专用 `SELECT version` 查询，不再反序列化 blob
