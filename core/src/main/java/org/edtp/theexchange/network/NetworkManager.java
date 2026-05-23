@@ -8,6 +8,8 @@ import org.edtp.theexchange.network.tls.PinnedPeerKeyStore;
 import org.edtp.theexchange.network.tls.TlsContext;
 
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Set;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,6 +20,8 @@ import java.util.function.Consumer;
 public class NetworkManager {
 
     private static final String TAG = "[Exchange|Net] ";
+    private static final int MAX_AUTH_FAILURES = 5;
+    private static final long AUTH_BAN_MS = 30_000L;
 
     private final TlsContext tlsContext;
     private final PinnedPeerKeyStore pinnedPeerKeyStore;
@@ -26,12 +30,13 @@ public class NetworkManager {
     private final String serverVersion;
     private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ServerStatus> serverStatus = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AuthFailure> authFailures = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<BiConsumer<String, ServerStatus>> statusListeners = new CopyOnWriteArrayList<>();
 
-    private String localServerName;
-    private String localPassword;
-    private MessageHandler messageRouter;
-    private Consumer<String> onlineHandler;
+    private volatile String localServerName;
+    private volatile String localPassword;
+    private volatile MessageHandler messageRouter;
+    private volatile Consumer<String> onlineHandler;
     private volatile boolean acceptingInbound;
 
     @FunctionalInterface
@@ -51,7 +56,7 @@ public class NetworkManager {
 
     public void setLocalPassword(String password) {
         this.localPassword = password;
-        System.out.println(TAG + "Local password set (len=" + (password != null ? password.length() : 0) + ")");
+        System.out.println(TAG + "Local password set");
     }
 
     public void setLocalServerName(String localServerName) {
@@ -119,9 +124,16 @@ public class NetworkManager {
             conn.close();
             return;
         }
+        String authKey = authFailureKey(conn);
+        if (isAuthBanned(authKey)) {
+            System.out.println(TAG + "AUTH throttled from " + authKey);
+            conn.send(FrameType.AUTH_RESPONSE,
+                    new AuthResponse(false, "Authentication temporarily blocked", null, null, 0));
+            conn.close();
+            return;
+        }
         System.out.println(TAG + "AUTH from " + request.getServerName()
-                + " mcVer=" + request.getMcVersion()
-                + " pwdLen=" + (request.getPassword() != null ? request.getPassword().length() : 0));
+                + " mcVer=" + request.getMcVersion());
 
         if (localPassword == null) {
             System.out.println(TAG + "AUTH FAIL: localPassword is null (config not loaded?)");
@@ -131,13 +143,14 @@ public class NetworkManager {
             return;
         }
 
-        if (localPassword.equals(request.getPassword())) {
+        if (passwordMatches(localPassword, request.getPassword())) {
+            authFailures.remove(authKey);
             System.out.println(TAG + "AUTH OK from " + request.getServerName());
-            serverStatus.put(request.getServerName(), ServerStatus.ONLINE);
-            connections.put(request.getServerName(), conn);
             conn.setAuthenticated(true);
             conn.setInbound(true);
             conn.setPeerServerName(request.getServerName());
+            connections.put(request.getServerName(), conn);
+            serverStatus.put(request.getServerName(), ServerStatus.ONLINE);
 
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(true, "OK",
@@ -147,8 +160,8 @@ public class NetworkManager {
 
             notifyStatusChange(request.getServerName(), ServerStatus.ONLINE);
         } else {
-            System.out.println(TAG + "AUTH FAIL: password mismatch for " + request.getServerName()
-                    + " (received len=" + (request.getPassword() != null ? request.getPassword().length() : 0) + ")");
+            recordAuthFailure(authKey);
+            System.out.println(TAG + "AUTH FAIL: password mismatch for " + request.getServerName());
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(false, "Authentication failed", null, null, 0));
             conn.close();
@@ -191,6 +204,7 @@ public class NetworkManager {
                     conn.setAuthenticated(true);
                     conn.setInbound(false);
                     conn.setPeerServerName(server.getName());
+                    connections.put(server.getName(), conn);
                     serverStatus.put(server.getName(), ServerStatus.ONLINE);
                     notifyStatusChange(server.getName(), ServerStatus.ONLINE);
                     if (messageRouter != null) {
@@ -213,8 +227,7 @@ public class NetworkManager {
             notifyStatusChange(server.getName(), ServerStatus.OFFLINE);
         });
 
-        connections.put(server.getName(), conn);
-        System.out.println(TAG + "Connection registered for " + server.getName());
+        System.out.println(TAG + "Connection pending auth for " + server.getName());
         return true;
     }
 
@@ -278,9 +291,43 @@ public class NetworkManager {
         return conn != null && conn.isInbound();
     }
 
+    private boolean passwordMatches(String expected, String actual) {
+        byte[] expectedBytes = expected != null ? expected.getBytes(StandardCharsets.UTF_8) : new byte[0];
+        byte[] actualBytes = actual != null ? actual.getBytes(StandardCharsets.UTF_8) : new byte[0];
+        return MessageDigest.isEqual(expectedBytes, actualBytes);
+    }
+
+    private String authFailureKey(Connection conn) {
+        String remote = conn != null ? conn.getRemoteName() : "";
+        int lastColon = remote.lastIndexOf(':');
+        return lastColon > 0 ? remote.substring(0, lastColon) : remote;
+    }
+
+    private boolean isAuthBanned(String key) {
+        AuthFailure failure = authFailures.get(key);
+        if (failure == null || failure.failCount < MAX_AUTH_FAILURES) {
+            return false;
+        }
+        long elapsed = System.currentTimeMillis() - failure.lastFailTime;
+        if (elapsed < AUTH_BAN_MS) {
+            return true;
+        }
+        authFailures.remove(key, failure);
+        return false;
+    }
+
+    private void recordAuthFailure(String key) {
+        long now = System.currentTimeMillis();
+        authFailures.compute(key, (ignored, previous) -> previous == null
+                ? new AuthFailure(1, now)
+                : new AuthFailure(previous.failCount + 1, now));
+    }
+
     public void shutdown() {
         tcpServer.shutdown();
         for (Connection conn : connections.values()) conn.close();
         connections.clear();
     }
+
+    private record AuthFailure(int failCount, long lastFailTime) {}
 }
