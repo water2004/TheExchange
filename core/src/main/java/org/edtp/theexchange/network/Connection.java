@@ -13,11 +13,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
 /**
@@ -25,12 +27,19 @@ import java.util.function.BiConsumer;
  * Each connection has 1 read thread and 1 write thread.
  */
 public class Connection {
+    private static final ScheduledExecutorService TIMEOUT_EXECUTOR =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread thread = new Thread(r, "exchange-connection-timeouts");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     private final String remoteName;
     private final SSLSocket socket;
     private final InputStream in;
     private final OutputStream out;
     private final AtomicLong sendSequence = new AtomicLong(0);
+    private final AtomicBoolean disconnected = new AtomicBoolean(false);
     private final SequenceWindow recvWindow = new SequenceWindow();
     private volatile boolean running;
     private volatile boolean authenticated;
@@ -120,53 +129,64 @@ public class Connection {
     }
 
     @SuppressWarnings("unchecked")
-    private <T> T sendAndWait(FrameType requestType, Object request,
-                              FrameType responseType, long timeoutMs, String requestId) {
-        CompletableFuture<Object> future = new CompletableFuture<>();
-        ResponseKey key = new ResponseKey(responseType, requestId);
-        pendingResponses.put(key, future);
+    public <T> CompletableFuture<T> sendAsync(FrameType requestType, Object request,
+                                              FrameType responseType, long timeoutMs) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        if (!running || disconnected.get()) {
+            result.completeExceptionally(new IOException("Connection closed"));
+            return result;
+        }
 
-        Frame frame = new Frame(requestType, sendSequence.incrementAndGet(),
-                System.currentTimeMillis(), MessageCodec.encodeMessage(request));
-        byte[] data = FrameEncoder.encode(frame);
+        String requestId = ensureRequestId(request);
+        ResponseKey key = new ResponseKey(responseType, requestId);
+        CompletableFuture<Object> responseFuture = new CompletableFuture<>();
+        CompletableFuture<Object> previous = pendingResponses.putIfAbsent(key, responseFuture);
+        if (previous != null) {
+            result.completeExceptionally(new IOException("Duplicate request id: " + requestId));
+            return result;
+        }
+
+        byte[] data;
+        try {
+            Frame frame = new Frame(requestType, sendSequence.incrementAndGet(),
+                    System.currentTimeMillis(), MessageCodec.encodeMessage(request));
+            data = FrameEncoder.encode(frame);
+        } catch (RuntimeException e) {
+            pendingResponses.remove(key, responseFuture);
+            result.completeExceptionally(e);
+            return result;
+        }
+        ScheduledFuture<?> timeout = TIMEOUT_EXECUTOR.schedule(() -> {
+            if (pendingResponses.remove(key, responseFuture)) {
+                responseFuture.complete(null);
+            }
+        }, timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+
+        responseFuture.whenComplete((response, error) -> {
+            timeout.cancel(false);
+            if (error != null) {
+                result.completeExceptionally(error);
+            } else {
+                result.complete((T) response);
+            }
+        });
+
         synchronized (out) {
             try {
                 out.write(data);
                 out.flush();
             } catch (IOException e) {
-                pendingResponses.remove(key, future);
+                if (pendingResponses.remove(key, responseFuture)) {
+                    responseFuture.completeExceptionally(e);
+                }
                 handleDisconnect();
-                return null;
             }
         }
-
-        try {
-            return (T) future.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            return null;
-        } catch (Exception e) {
-            return null;
-        } finally {
-            pendingResponses.remove(key, future);
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    public <T> CompletableFuture<T> sendAsync(FrameType requestType, Object request,
-                                              FrameType responseType, long timeoutMs) {
-        CompletableFuture<T> future = new CompletableFuture<>();
-        String requestId = ensureRequestId(request);
-        Thread thread = new Thread(() -> {
-            T response = sendAndWait(requestType, request, responseType, timeoutMs, requestId);
-            future.complete(response);
-        }, "exchange-req-" + remoteName + "-" + requestId);
-        thread.setDaemon(true);
-        thread.start();
-        return future;
+        return result;
     }
 
     /**
-     * Feed a received response to any pending sendAndWait future.
+     * Feed a received response to any pending sendAsync future.
      */
     public void onResponse(FrameType type, Object message) {
         String requestId = message instanceof CorrelatedMessage correlated ? correlated.getRequestId() : null;
@@ -245,6 +265,9 @@ public class Connection {
     }
 
     private void handleDisconnect() {
+        if (!disconnected.compareAndSet(false, true)) {
+            return;
+        }
         running = false;
         for (CompletableFuture<Object> future : pendingResponses.values()) {
             future.completeExceptionally(new IOException("Connection closed"));
@@ -257,15 +280,10 @@ public class Connection {
     }
 
     public void close() {
-        running = false;
-        for (CompletableFuture<Object> future : pendingResponses.values()) {
-            future.completeExceptionally(new IOException("Connection closed"));
-        }
-        pendingResponses.clear();
         if (readThread != null) {
             readThread.interrupt();
         }
-        try { socket.close(); } catch (IOException ignored) {}
+        handleDisconnect();
     }
 
     private String ensureRequestId(Object message) {
