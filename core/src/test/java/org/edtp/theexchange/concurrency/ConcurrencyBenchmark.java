@@ -1,8 +1,16 @@
 package org.edtp.theexchange.concurrency;
 
+import org.edtp.theexchange.api.ExchangeAPI;
+import org.edtp.theexchange.compat.CompatibilityChecker;
+import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.OperationType;
+import org.edtp.theexchange.storage.DatabaseManager;
 import org.edtp.theexchange.storage.LocalInventoryCache;
+import org.edtp.theexchange.storage.LocalInventoryCacheManager;
+import org.edtp.theexchange.storage.LocalItemStore;
+import org.edtp.theexchange.storage.OperationLogger;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +19,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -21,25 +31,68 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Realistic throughput benchmark through submit → coreExecutor.
+ * Realistic throughput benchmark: full production path minus network and DB I/O.
  *
- * Each scenario uses K core-threads + 2K callers. Every operation is
- * submitted via CompletableFuture.supplyAsync(task, coreExecutor).get(),
- * mimicking the production path: coreExecutor processes all requests, and
- * callers block on the future (simulating async completion handling).
+ * Goes through:
+ *   1. submit() with synchronized(taskMonitor) + inFlightTasks counting
+ *   2. LocalItemStore → LocalInventoryCacheManager → LocalInventoryCache
+ *   3. OperationLogger.log() (in-memory SQLite, no persistent file)
+ *   4. CompatibilityChecker.checkAndMark()
+ *   5. Slot-level ReentrantLock + StampedLock optimistic read
  *
- * No network or DB I/O — measures the Java-level overhead of the submit path.
- *
- * Scenarios:
- *   dedicated — each caller pair owns exclusive slots, zero contention
- *   random    — callers pick random slots from shared pool of 54
- *   sameSlot  — all callers target slot 0, max contention
+ * Excludes: network, CacheManager (remote), async DB flush (separate writer thread)
  */
 class ConcurrencyBenchmark {
 
     private static final int SLOTS = 54;
     private static final int MAX_STACK = 64;
-    private static final int ITERS_PER_CALLER = 5000;
+    private static final int ITERS_PER_CALLER = 20000;
+
+    // ---- submit harness (mimics TheExchangeCore.submit) ----
+
+    private final Object taskMonitor = new Object();
+    private volatile boolean acceptingTasks = true;
+    private int inFlightTasks;
+
+    private <T> CompletableFuture<T> submit(Callable<T> task, ExecutorService coreExecutor,
+                                             AtomicLong gen) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        long taskGeneration = gen.get();
+        synchronized (taskMonitor) {
+            if (!acceptingTasks) {
+                return CompletableFuture.failedFuture(new IllegalStateException("reloading"));
+            }
+            inFlightTasks++;
+        }
+        coreExecutor.execute(() -> {
+            try {
+                if (taskGeneration != gen.get()) {
+                    future.completeExceptionally(new IllegalStateException("reloaded"));
+                    return;
+                }
+                future.complete(task.call());
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            } finally {
+                synchronized (taskMonitor) {
+                    if (inFlightTasks > 0) inFlightTasks--;
+                    if (inFlightTasks == 0) taskMonitor.notifyAll();
+                }
+            }
+        });
+        return future;
+    }
+
+    // ---- stub ItemSerializer for compatibility check ----
+
+    private static final ItemSerializer STUB_SERIALIZER = new ItemSerializer() {
+        @Override public NeutralItem serialize(Object itemStack) { return null; }
+        @Override public Object deserialize(NeutralItem item) { return null; }
+        @Override public boolean canDeserialize(NeutralItem item) { return true; }
+        @Override public int getMaxStackSize(NeutralItem item) { return 64; }
+    };
+
+    private static final CompatibilityChecker COMPAT = new CompatibilityChecker(STUB_SERIALIZER);
 
     private static NeutralItem diamond() {
         NeutralItem item = new NeutralItem("minecraft:diamond", 64, "diamond", new byte[0], false, "26.1.2");
@@ -51,14 +104,6 @@ class ConcurrencyBenchmark {
         NeutralItem item = new NeutralItem("minecraft:diamond", count, "diamond", new byte[0], false, "26.1.2");
         item.setVersion(1);
         return item;
-    }
-
-    private static LocalInventoryCache newCache() {
-        LocalInventoryCache cache = new LocalInventoryCache(InventoryScope.server(), SLOTS);
-        for (int i = 0; i < SLOTS; i++) {
-            cache.put(i, diamond(), 0, "init", item -> MAX_STACK);
-        }
-        return cache;
     }
 
     @Tag("bench")
@@ -76,12 +121,9 @@ class ConcurrencyBenchmark {
             int callers = k * 2;
             System.out.println("[bench] --- core_threads=" + k + "  callers=" + callers + " ---");
 
-            runPooled("dedicated", k, callers, lines, (exec, cache) ->
-                pooledDedicated(exec, cache, callers));
-            runPooled("random",    k, callers, lines, (exec, cache) ->
-                pooledRandom(exec, cache, callers));
-            runPooled("sameSlot",  k, callers, lines, (exec, cache) ->
-                pooledSameSlot(exec, cache, callers));
+            runScenario("dedicated", k, callers, lines, this::benchDedicated);
+            runScenario("random",    k, callers, lines, this::benchRandom);
+            runScenario("sameSlot",  k, callers, lines, this::benchSameSlot);
         }
 
         Files.write(csvFile, lines);
@@ -89,17 +131,42 @@ class ConcurrencyBenchmark {
     }
 
     @FunctionalInterface
-    interface PooledScenario {
-        long[] run(ExecutorService coreExecutor, LocalInventoryCache cache) throws Exception;
+    interface Scenario {
+        long[] run(ExecutorService coreExecutor, AtomicLong gen,
+                    LocalItemStore store, OperationLogger opLogger) throws Exception;
     }
 
-    private void runPooled(String name, int coreThreads, int callers,
-                           List<String> lines, PooledScenario scenario) throws Exception {
+    private void runScenario(String name, int coreThreads, int callers,
+                              List<String> lines, Scenario scenario) throws Exception {
+        Path tempDir = Files.createTempDirectory("exchange-bench-" + name + "-" + coreThreads + "-");
+        OperationLogger opLogger = new OperationLogger(tempDir.resolve("oplog"));
+
+        DatabaseManager db = new DatabaseManager(tempDir.resolve("data.db").toString());
+        db.initialize();
+
+        LocalItemStore store = new LocalItemStore(db);
+        ExchangeAPI.Logger benchLogger = new ExchangeAPI.Logger() {
+            @Override public void info(String msg) {}
+            @Override public void warn(String msg) {}
+            @Override public void error(String msg) {}
+            @Override public void error(String msg, Throwable t) {}
+        };
+        LocalInventoryCacheManager cacheMgr = new LocalInventoryCacheManager(
+                store, STUB_SERIALIZER, benchLogger, 256);
+        store.setCacheManager(cacheMgr);
+
+        // Pre-fill all slots
+        for (int i = 0; i < SLOTS; i++) {
+            store.putItem(InventoryScope.server(), i, diamond(), 0, "init");
+        }
+
         ExecutorService coreExecutor = Executors.newFixedThreadPool(coreThreads);
-        LocalInventoryCache cache = newCache();
+        AtomicLong gen = new AtomicLong();
+
         long begin = System.nanoTime();
-        long[] counts = scenario.run(coreExecutor, cache);
+        long[] counts = scenario.run(coreExecutor, gen, store, opLogger);
         long elapsedMs = Math.max(1, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin));
+
         long ops = counts[0] + counts[1];
         double rate = ops * 1000.0 / elapsedMs;
         double sr = ops > 0 ? counts[0] * 100.0 / ops : 0;
@@ -107,12 +174,17 @@ class ConcurrencyBenchmark {
         lines.add(line);
         System.out.printf("[bench] %-10s  ops=%d  elapsed=%dms  rate=%,.0f/s  success=%.1f%%%n",
                 name, ops, elapsedMs, rate, sr);
+
         coreExecutor.shutdownNow();
+        cacheMgr.flushAll();
+        db.close();
+        deleteRecursively(tempDir);
     }
 
-    // ---- shared harness ----
+    // ---- caller harness ----
 
-    private long[] runCallers(ExecutorService coreExecutor, LocalInventoryCache cache,
+    private long[] runCallers(ExecutorService coreExecutor, AtomicLong gen,
+                               LocalItemStore store, OperationLogger opLogger,
                                int callers, CallerTask task) throws Exception {
         AtomicLong success = new AtomicLong();
         AtomicLong fail = new AtomicLong();
@@ -124,7 +196,7 @@ class ConcurrencyBenchmark {
             final int id = t;
             callerPool.submit(() -> {
                 try { start.await(); } catch (InterruptedException ignored) {}
-                task.run(id, coreExecutor, cache, ITERS_PER_CALLER, success, fail);
+                task.run(id, coreExecutor, gen, store, opLogger, ITERS_PER_CALLER, success, fail);
                 done.countDown();
             });
         }
@@ -137,82 +209,142 @@ class ConcurrencyBenchmark {
 
     @FunctionalInterface
     interface CallerTask {
-        void run(int id, ExecutorService exec, LocalInventoryCache cache,
+        void run(int id, ExecutorService exec, AtomicLong gen,
+                 LocalItemStore store, OperationLogger opLogger,
                  int iters, AtomicLong success, AtomicLong fail);
+    }
+
+    // ---- full-path PUT/TAKE helpers ----
+
+    private void fullTake(LocalItemStore store, OperationLogger opLogger,
+                           int slot, int version, AtomicLong success, AtomicLong fail) {
+        String reqId = UUID.randomUUID().toString();
+        var item = store.getItem(slot);
+        if (item == null || item.item() == null || item.item().isEmpty()) {
+            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, false, "EMPTY");
+            fail.incrementAndGet();
+            return;
+        }
+        COMPAT.checkAndMark(item.item());
+        if (item.item().isIncompatible()) {
+            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, false, "INCOMPATIBLE");
+            fail.incrementAndGet();
+            return;
+        }
+        var result = store.takeItem(slot, "minecraft:diamond", version, 1);
+        if (result.isSuccess()) {
+            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, true, null);
+            success.incrementAndGet();
+        } else {
+            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, false, result.getFailReason());
+            fail.incrementAndGet();
+        }
+    }
+
+    private void fullPut(LocalItemStore store, OperationLogger opLogger,
+                          int slot, int version, AtomicLong success, AtomicLong fail) {
+        String reqId = UUID.randomUUID().toString();
+        var cached = store.getItem(slot);
+        if (cached != null && cached.item() != null && cached.item().isIncompatible()) {
+            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", "minecraft:diamond", 1, false, "INCOMPATIBLE");
+            fail.incrementAndGet();
+            return;
+        }
+        var putItem = diamondWithCount(1);
+        COMPAT.checkAndMark(putItem);
+        if (putItem.isIncompatible()) {
+            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", "minecraft:diamond", 1, false, "INCOMPATIBLE");
+            fail.incrementAndGet();
+            return;
+        }
+        var result = store.putItem(slot, putItem, version, "bench");
+        if (result.isSuccess()) {
+            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", putItem.getItemId(), putItem.getCount(), true, null);
+            success.incrementAndGet();
+        } else {
+            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", putItem.getItemId(), putItem.getCount(), false, result.getFailReason());
+            fail.incrementAndGet();
+        }
     }
 
     // ---- scenarios ----
 
-    private long[] pooledDedicated(ExecutorService exec, LocalInventoryCache cache,
-                                    int callers) throws Exception {
-        return runCallers(exec, cache, callers, (id, e, c, iters, s, f) -> {
+    private long[] benchDedicated(ExecutorService exec, AtomicLong gen,
+                                   LocalItemStore store, OperationLogger opLogger) throws Exception {
+        int callers = ((java.util.concurrent.ThreadPoolExecutor) exec).getCorePoolSize() * 2;
+        return runCallers(exec, gen, store, opLogger, callers, (id, e, g, s, l, iters, ok, fail) -> {
             int slotA = (id * 2) % SLOTS;
             int slotB = (id * 2 + 1) % SLOTS;
             int va = 1, vb = 1;
             for (int i = 0; i < iters; i++) {
                 int slot = (i % 2 == 0) ? slotA : slotB;
                 int v = (i % 2 == 0) ? va : vb;
-                var r = supplyTake(e, c, slot, v);
-                if (r.success()) { s.incrementAndGet(); v = r.newVersion(); }
-                else { f.incrementAndGet(); v = readVersion(e, c, slot); }
-                r = supplyPut(e, c, slot, v);
-                if (r.success()) { s.incrementAndGet(); v = r.newVersion(); }
-                else { f.incrementAndGet(); v = readVersion(e, c, slot); }
+                try {
+                    int finalV = v;
+                    submit(() -> {
+                        var before = s.getItem(slot);
+                        fullTake(s, l, slot, before != null ? before.version() : finalV, ok, fail);
+                        var after = s.getItem(slot);
+                        fullPut(s, l, slot, after != null ? after.version() : 0, ok, fail);
+                        return null;
+                    }, e, g).get();
+                    v = afterSuccessfulTakePut(s, slot);
+                } catch (Exception ex) { fail.incrementAndGet(); }
                 if (i % 2 == 0) va = v; else vb = v;
             }
         });
     }
 
-    private long[] pooledRandom(ExecutorService exec, LocalInventoryCache cache,
-                                 int callers) throws Exception {
-        return runCallers(exec, cache, callers, (id, e, c, iters, s, f) -> {
+    private int afterSuccessfulTakePut(LocalItemStore store, int slot) {
+        var item = store.getItem(slot);
+        return item != null ? item.version() : 0;
+    }
+
+    private long[] benchRandom(ExecutorService exec, AtomicLong gen,
+                                LocalItemStore store, OperationLogger opLogger) throws Exception {
+        int callers = ((java.util.concurrent.ThreadPoolExecutor) exec).getCorePoolSize() * 2;
+        return runCallers(exec, gen, store, opLogger, callers, (id, e, g, s, l, iters, ok, fail) -> {
             java.util.Random rng = new java.util.Random(Thread.currentThread().getId());
             for (int i = 0; i < iters; i++) {
-                int slot = rng.nextInt(SLOTS);
-                int v = readVersion(e, c, slot);
-                var r = supplyTake(e, c, slot, v);
-                if (r.success()) s.incrementAndGet(); else f.incrementAndGet();
-                slot = rng.nextInt(SLOTS);
-                v = readVersion(e, c, slot);
-                r = supplyPut(e, c, slot, v);
-                if (r.success()) s.incrementAndGet(); else f.incrementAndGet();
+                int takeSlot = rng.nextInt(SLOTS);
+                int putSlot = rng.nextInt(SLOTS);
+                try {
+                    submit(() -> {
+                        var b = s.getItem(takeSlot);
+                        fullTake(s, l, takeSlot, b != null ? b.version() : 0, ok, fail);
+                        var p = s.getItem(putSlot);
+                        fullPut(s, l, putSlot, p != null ? p.version() : 0, ok, fail);
+                        return null;
+                    }, e, g).get();
+                } catch (Exception ex) { fail.incrementAndGet(); }
             }
         });
     }
 
-    private long[] pooledSameSlot(ExecutorService exec, LocalInventoryCache cache,
-                                   int callers) throws Exception {
-        return runCallers(exec, cache, callers, (id, e, c, iters, s, f) -> {
+    private long[] benchSameSlot(ExecutorService exec, AtomicLong gen,
+                                  LocalItemStore store, OperationLogger opLogger) throws Exception {
+        int callers = ((java.util.concurrent.ThreadPoolExecutor) exec).getCorePoolSize() * 2;
+        return runCallers(exec, gen, store, opLogger, callers, (id, e, g, s, l, iters, ok, fail) -> {
             for (int i = 0; i < iters; i++) {
-                int v = readVersion(e, c, 0);
-                var r = supplyTake(e, c, 0, v);
-                if (r.success()) s.incrementAndGet(); else f.incrementAndGet();
+                try {
+                    submit(() -> {
+                        var b = s.getItem(0);
+                        int v = b != null ? b.version() : 0;
+                        fullTake(s, l, 0, v, ok, fail);
+                        return null;
+                    }, e, g).get();
+                } catch (Exception ex) { fail.incrementAndGet(); }
             }
         });
     }
 
-    // ---- submit helpers (mimic TheExchangeCore.submit) ----
-
-    private static LocalInventoryCache.Result supplyTake(ExecutorService exec,
-            LocalInventoryCache cache, int slot, int version) {
+    private static void deleteRecursively(Path dir) {
         try {
-            return CompletableFuture.supplyAsync(
-                () -> cache.take(slot, "minecraft:diamond", version, 1), exec).get();
-        } catch (Exception e) { throw new RuntimeException(e); }
-    }
-
-    private static LocalInventoryCache.Result supplyPut(ExecutorService exec,
-            LocalInventoryCache cache, int slot, int version) {
-        try {
-            return CompletableFuture.supplyAsync(
-                () -> cache.put(slot, diamondWithCount(1), version, "test", item -> MAX_STACK), exec).get();
-        } catch (Exception e) { throw new RuntimeException(e); }
-    }
-
-    private static int readVersion(ExecutorService exec, LocalInventoryCache cache, int slot) {
-        try {
-            return CompletableFuture.supplyAsync(() -> cache.getVersion(slot), exec).get();
-        } catch (Exception e) { throw new RuntimeException(e); }
+            if (Files.isDirectory(dir)) {
+                try (var s = Files.list(dir)) { s.forEach(ConcurrencyBenchmark::deleteRecursively); }
+            }
+            Files.deleteIfExists(dir);
+        } catch (Exception ignored) {}
     }
 
     private static Path findProjectRoot() {

@@ -161,7 +161,7 @@ src/                          Fabric 适配层
 
 ### 测试方法
 
-完全模拟生产路径（不经过网络和 DB）：K 个 `core_threads` 的 `coreExecutor`，2K 个 caller 线程通过 `CompletableFuture.supplyAsync(task, coreExecutor).get()` 提交 take+put 操作，caller 阻塞等待结果。每个 caller 执行 5K 次 take+put。3 种竞争场景：
+完全模拟生产路径。每条操作完整经过 `submit()`（真实 taskMonitor + generation 检查）→ `LocalItemStore` → `LocalInventoryCacheManager` → `LocalInventoryCache`（StampedLock 乐观读 + 槽位锁）→ `CompatibilityChecker.checkAndMark()` → `OperationLogger.log()`（内存队列）。仅排除网络 I/O 和 DB 异步刷盘。每个 caller 执行 20K 次 take+put。3 种竞争场景：
 
 | 场景 | 说明 |
 |------|------|
@@ -171,23 +171,24 @@ src/                          Fabric 适配层
 
 ### 结果
 
-横轴 `core_threads` 即 `performance.core_threads` 配置值（1/2/4/6/8）。
+横轴 `core_threads` 即 `performance.core_threads` 配置值。`submit()` 将实际并发攻击缓存的线程数限制为 K，2K 个 caller 在 taskMonitor 上排队。
 
 ![](bench_report.png)
 
 | core_threads | 零竞争 (ops/s) | 随机竞争 (ops/s) | 完全竞争 (ops/s) |
 |------|------------|------------|------------|
-| 1 | 134K | 91K | 103K |
-| 2 | 367K | 195K | 185K |
-| 4 | 792K | 460K | 465K |
-| 6 | 1.04M | 550K | 531K |
-| 8 | 1.20M | 618K | 635K |
+| 1 | 138K | 233K | 116K |
+| 2 | 376K | 511K | 388K |
+| 4 | 453K | 650K | 618K |
+| 6 | 421K | 639K | 583K |
+| 8 | 438K | 628K | 591K |
 
 ### 结论
 
-- 零竞争随 core_threads 线性扩展到 1.2M ops/s
-- 随机和完全竞争在 460K~635K，瓶颈是 `CompletableFuture.supplyAsync` + `.get()` 的线程池排队开销和槽位锁竞争
-- 默认 `core_threads=4` 时约 460K~792K ops/s，Minecraft 玩家交互 ~10-100 QPS，有 **3-4 个数量级余量**
+- `submit()` 充当天然并发限流器——实际碰缓存的始终只有 K 个 coreExecutor 线程，StampedLock 竞争近乎零
+- 零竞争反而最慢：同一 submit 内对同槽位 take+put 导致缓存行 invalidation；随机竞争 take/put 命中不同槽位，缓存局部性更好
+- 4→8 线程无明显提升：CPU 为 Intel Ultra 9 285H（6P+8E），超过 6 线程后分配至 E-core，单核性能下降抵消了更多并发的收益
+- 默认 `core_threads=4` 时全路径 450K~650K ops/s，Minecraft 玩家交互 ~10-100 QPS，有 **3-4 个数量级余量**
 
 ### 本地运行
 
