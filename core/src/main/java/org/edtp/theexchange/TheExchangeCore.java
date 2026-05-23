@@ -321,7 +321,7 @@ public class TheExchangeCore {
 
         localItemStore = new LocalItemStore(databaseManager);
         remoteCacheStore = new RemoteCacheStore(databaseManager);
-        operationLogger = new OperationLogger(databaseManager);
+        operationLogger = new OperationLogger(Path.of(api.getConfigLoader().getConfigDir(), "logs"));
 
         RuntimeBundle initialRuntime = buildRuntime(runtimeConfig, null);
         publishRuntime(initialRuntime);
@@ -664,6 +664,7 @@ public class TheExchangeCore {
             try {
                 api.getLogger().info("Shutting down TheExchange core...");
                 stopRuntimeServices(true);
+                if (operationLogger != null) operationLogger.shutdown();
                 if (databaseManager != null) databaseManager.close();
                 instance = null;
                 initialized = false;
