@@ -34,7 +34,9 @@ public interface ExchangeAPI {
     String getServerName();
 
     /** Get this server's runtime version label, if the loader wants to expose it. */
-    default String getMinecraftVersion() { return "26.1.2"; }
+    default String getMinecraftVersion() {
+        throw new UnsupportedOperationException("Loader adapter must provide the Minecraft version");
+    }
 
     /** Schedule a task on the main server thread */
     void runOnMainThread(Runnable task);

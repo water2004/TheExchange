@@ -51,6 +51,7 @@ public class HeartbeatManager {
     }
 
     private void sendHeartbeats() {
+        if (!running) return;
         for (RemoteServer server : serverRegistry.getAllServers()) {
             Connection conn = networkManager.getConnection(server.getName());
             if (conn != null && conn.isRunning()) {
@@ -63,6 +64,7 @@ public class HeartbeatManager {
     }
 
     private void checkTimeouts() {
+        if (!running) return;
         long now = System.currentTimeMillis();
         long timeoutMs = (long) heartbeatTimeoutSeconds * 1000;
 

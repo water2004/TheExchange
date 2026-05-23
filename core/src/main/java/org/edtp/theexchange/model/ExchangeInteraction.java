@@ -1,6 +1,7 @@
 package org.edtp.theexchange.model;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class ExchangeInteraction {
@@ -43,6 +44,6 @@ public class ExchangeInteraction {
     public NeutralItem getSlotItem() { return slotItem; }
     public NeutralItem getCarriedItem() { return carriedItem; }
     public NeutralItem getHotbarItem() { return hotbarItem; }
-    public List<NeutralItem> getExchangeItems() { return exchangeItems; }
+    public List<NeutralItem> getExchangeItems() { return Collections.unmodifiableList(exchangeItems); }
     public PlayerExchangeContext getPlayer() { return player; }
 }

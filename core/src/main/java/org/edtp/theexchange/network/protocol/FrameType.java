@@ -1,5 +1,9 @@
 package org.edtp.theexchange.network.protocol;
 
+import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 public enum FrameType {
     AUTH_REQUEST((short) 0x0001),
     AUTH_RESPONSE((short) 0x0002),
@@ -21,7 +25,10 @@ public enum FrameType {
     TAKE_ITEM((short) 0x0022),
     TAKE_ITEM_RESPONSE((short) 0x0023),
     PUSH_UPDATE((short) 0x0030),
-    ERROR((short) (short) 0xFFFF);
+    ERROR((short) 0xFFFF);
+
+    private static final Map<Short, FrameType> BY_CODE = Stream.of(values())
+            .collect(Collectors.toUnmodifiableMap(FrameType::getCode, type -> type));
 
     private final short code;
 
@@ -34,9 +41,6 @@ public enum FrameType {
     }
 
     public static FrameType fromCode(short code) {
-        for (FrameType type : values()) {
-            if (type.code == code) return type;
-        }
-        return ERROR;
+        return BY_CODE.getOrDefault(code, ERROR);
     }
 }

@@ -18,6 +18,7 @@ public class DatabaseManager {
             Class.forName("org.sqlite.JDBC");
             connection = DriverManager.getConnection("jdbc:sqlite:" + databasePath);
             try (Statement stmt = connection.createStatement()) {
+                stmt.execute("PRAGMA busy_timeout=5000");
                 stmt.execute("PRAGMA journal_mode=WAL");
                 stmt.execute("PRAGMA foreign_keys=ON");
             }
@@ -72,7 +73,6 @@ public class DatabaseManager {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_timestamp ON operation_log(timestamp)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_player    ON operation_log(player_uuid)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_server    ON operation_log(server_name)");
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_request   ON operation_log(request_id)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_log_scope     ON operation_log(scope_type, scope_id)");
 
             stmt.execute("CREATE TABLE IF NOT EXISTS exchange_metadata (" +

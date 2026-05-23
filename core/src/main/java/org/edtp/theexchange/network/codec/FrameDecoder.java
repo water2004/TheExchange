@@ -87,7 +87,9 @@ public class FrameDecoder {
     public static Frame readFrame(InputStream in) throws IOException {
         byte[] headerBytes = new byte[Frame.HEADER_SIZE];
         int read = readFully(in, headerBytes);
-        if (read < Frame.HEADER_SIZE) return null;
+        if (read < Frame.HEADER_SIZE) {
+            throw new IOException("Stream closed while reading frame header");
+        }
 
         ByteBuffer bb = ByteBuffer.wrap(headerBytes).order(ByteOrder.BIG_ENDIAN);
         int magic = bb.getInt();
@@ -106,7 +108,10 @@ public class FrameDecoder {
         byte[] payload = null;
         if (length > 0) {
             payload = new byte[length];
-            readFully(in, payload);
+            int payloadBytes = readFully(in, payload);
+            if (payloadBytes < length) {
+                throw new IOException("Stream closed while reading frame payload");
+            }
         }
 
         return new Frame(type, sequence, timestamp, payload);

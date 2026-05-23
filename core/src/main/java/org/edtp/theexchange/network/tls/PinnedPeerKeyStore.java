@@ -6,8 +6,10 @@ import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.cert.Certificate;
 import java.util.Base64;
 import java.util.Set;
@@ -87,7 +89,10 @@ public final class PinnedPeerKeyStore {
         try (OutputStream out = Files.newOutputStream(tmp)) {
             pins.store(out, "TheExchange pinned peer keys");
         }
-        Files.move(tmp, pinFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        try {
+            Files.move(tmp, pinFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tmp, pinFile, StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 }

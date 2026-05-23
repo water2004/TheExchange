@@ -29,7 +29,7 @@ public class NeutralItem {
         this.itemId = itemId;
         this.count = count;
         this.displayName = displayName;
-        this.extraData = extraData;
+        this.extraData = copyBytes(extraData);
         this.incompatible = incompatible;
         this.sourceVersion = sourceVersion;
     }
@@ -43,8 +43,8 @@ public class NeutralItem {
     public String getDisplayName() { return displayName; }
     public void setDisplayName(String displayName) { this.displayName = displayName; }
 
-    public byte[] getExtraData() { return extraData; }
-    public void setExtraData(byte[] extraData) { this.extraData = extraData; }
+    public byte[] getExtraData() { return copyBytes(extraData); }
+    public void setExtraData(byte[] extraData) { this.extraData = copyBytes(extraData); }
 
     public boolean isIncompatible() { return incompatible; }
     public void setIncompatible(boolean incompatible) { this.incompatible = incompatible; }
@@ -78,6 +78,10 @@ public class NeutralItem {
 
     private static byte[] normalizeExtra(byte[] data) {
         return data == null || data.length == 0 ? EMPTY_BYTES : data;
+    }
+
+    private static byte[] copyBytes(byte[] data) {
+        return data != null ? Arrays.copyOf(data, data.length) : null;
     }
 
     public void writeTo(DataOutput out) throws IOException {

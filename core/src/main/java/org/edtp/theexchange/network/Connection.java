@@ -247,7 +247,7 @@ public class Connection {
     private void handleDisconnect() {
         running = false;
         for (CompletableFuture<Object> future : pendingResponses.values()) {
-            future.complete(null);
+            future.completeExceptionally(new IOException("Connection closed"));
         }
         pendingResponses.clear();
         try { socket.close(); } catch (IOException ignored) {}
@@ -258,6 +258,10 @@ public class Connection {
 
     public void close() {
         running = false;
+        for (CompletableFuture<Object> future : pendingResponses.values()) {
+            future.completeExceptionally(new IOException("Connection closed"));
+        }
+        pendingResponses.clear();
         if (readThread != null) {
             readThread.interrupt();
         }
