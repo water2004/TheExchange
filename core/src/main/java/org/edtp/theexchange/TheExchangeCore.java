@@ -73,7 +73,6 @@ public class TheExchangeCore {
     public TheExchangeCore(ExchangeAPI api) {
         this.api = api;
         this.lifecycleExecutor = Executors.newSingleThreadExecutor(namedThreadFactory("exchange-core-lifecycle"));
-        instance = this;
     }
 
     private ThreadFactory namedThreadFactory(String prefix) {
@@ -110,8 +109,12 @@ public class TheExchangeCore {
         if (startupFuture != null) return startupFuture;
         startupFuture = new CompletableFuture<>();
         lifecycleExecutor.execute(() -> {
-            initialize();
-            startupFuture.complete(null);
+            try {
+                initialize();
+                startupFuture.complete(null);
+            } catch (Throwable t) {
+                startupFuture.completeExceptionally(t);
+            }
         });
         return startupFuture;
     }
@@ -302,6 +305,7 @@ public class TheExchangeCore {
 
         buildRuntime(runtimeConfig);
 
+        instance = this;
         initialized = true;
         api.getLogger().info("TheExchange configured. Port: " + runtimeConfig.getPort()
                 + ", inbound=" + runtimeConfig.getNetwork().isInboundEnabled()
@@ -377,7 +381,8 @@ public class TheExchangeCore {
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(api.getItemSerializer());
         syncEngine = networkManager != null ? new SyncEngine(networkManager, cacheManager, compatibilityChecker) : null;
         exchangeService = new ExchangeService(networkManager, localItemStore,
-                operationLogger, cacheManager, compatibilityChecker, api.getItemSerializer(), syncEngine);
+                operationLogger, cacheManager, compatibilityChecker, api.getItemSerializer(), syncEngine,
+                exchangeServiceHooks());
         menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
 
         if (networkManager != null) {
@@ -400,6 +405,45 @@ public class TheExchangeCore {
                     .collect(java.util.stream.Collectors.toSet()));
             serverRegistry.connectAllEnabled();
         }
+    }
+
+    private ExchangeService.RuntimeHooks exchangeServiceHooks() {
+        return new ExchangeService.RuntimeHooks() {
+            @Override
+            public long currentGeneration() {
+                return TheExchangeCore.this.currentGeneration();
+            }
+
+            @Override
+            public <T> CompletableFuture<T> submitIfGeneration(long expectedGeneration, Callable<T> task) {
+                return TheExchangeCore.this.submitIfGeneration(expectedGeneration, task);
+            }
+
+            @Override
+            public ExchangeAPI.Logger logger() {
+                return api.getLogger();
+            }
+
+            @Override
+            public void refreshRemoteInventoryView(String serverName) {
+                api.refreshRemoteInventoryView(serverName);
+            }
+
+            @Override
+            public void redrawRemoteInventoryView(String serverName) {
+                api.redrawRemoteInventoryView(serverName);
+            }
+
+            @Override
+            public void runOnMainThread(Runnable task) {
+                api.runOnMainThread(task);
+            }
+
+            @Override
+            public String localServerName() {
+                return runtimeConfig != null ? runtimeConfig.getDisplayName() : "local";
+            }
+        };
     }
 
     private void pruneRemoteState(ExchangeAPI.RuntimeConfig config) {

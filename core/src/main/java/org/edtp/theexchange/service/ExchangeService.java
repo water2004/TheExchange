@@ -2,7 +2,7 @@ package org.edtp.theexchange.service;
 
 import org.edtp.theexchange.compat.CompatibilityChecker;
 import org.edtp.theexchange.compat.ItemSerializer;
-import org.edtp.theexchange.TheExchangeCore;
+import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.OperationType;
@@ -15,6 +15,7 @@ import org.edtp.theexchange.storage.OperationLogger;
 
 import java.util.UUID;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
@@ -34,12 +35,13 @@ public class ExchangeService {
     private final CompatibilityChecker compatibilityChecker;
     private final ItemSerializer itemSerializer;
     private final SyncEngine syncEngine;
+    private final RuntimeHooks runtimeHooks;
     private final ConcurrentHashMap<Integer, ReentrantLock> localSlotLocks = new ConcurrentHashMap<>();
 
     public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
                            OperationLogger operationLogger, CacheManager cacheManager,
                            CompatibilityChecker compatibilityChecker, ItemSerializer itemSerializer,
-                           SyncEngine syncEngine) {
+                           SyncEngine syncEngine, RuntimeHooks runtimeHooks) {
         this.networkManager = networkManager;
         this.localItemStore = localItemStore;
         this.operationLogger = operationLogger;
@@ -47,6 +49,17 @@ public class ExchangeService {
         this.compatibilityChecker = compatibilityChecker;
         this.itemSerializer = itemSerializer;
         this.syncEngine = syncEngine;
+        this.runtimeHooks = runtimeHooks;
+    }
+
+    public interface RuntimeHooks {
+        long currentGeneration();
+        <T> CompletableFuture<T> submitIfGeneration(long expectedGeneration, Callable<T> task);
+        ExchangeAPI.Logger logger();
+        void refreshRemoteInventoryView(String serverName);
+        void redrawRemoteInventoryView(String serverName);
+        void runOnMainThread(Runnable task);
+        String localServerName();
     }
 
     public CompletableFuture<PutResult> putItemAsync(String serverName, int slot, String playerUuid,
@@ -83,18 +96,11 @@ public class ExchangeService {
         String requestId = UUID.randomUUID().toString();
         PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
                 requestId, playerUuid, playerName, expectedVersion);
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        long opGeneration = core != null ? core.currentGeneration() : -1L;
+        long opGeneration = runtimeHooks.currentGeneration();
         return conn.<PutItemResponse>sendAsync(
                         FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
-                .handle((response, error) -> {
-                    TheExchangeCore currentCore = TheExchangeCore.getInstance();
-                    if (currentCore != null) {
-                        return currentCore.submitIfGeneration(opGeneration, () -> finishRemotePut(serverName, slot, playerUuid,
-                                playerName, item, requestId, response, error));
-                    }
-                    return CompletableFuture.completedFuture(PutResult.fail("核心已停止"));
-                })
+                .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemotePut(serverName, slot, playerUuid,
+                        playerName, item, requestId, response, error)))
                 .thenCompose(future -> future);
     }
 
@@ -139,19 +145,12 @@ public class ExchangeService {
         TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
                 expectedVersion, requestCount, requestId, playerUuid, playerName, remoteVersion);
 
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        long opGeneration = core != null ? core.currentGeneration() : -1L;
+        long opGeneration = runtimeHooks.currentGeneration();
         return conn.<TakeItemResponse>sendAsync(
                         FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
-                .handle((response, error) -> {
-                    TheExchangeCore currentCore = TheExchangeCore.getInstance();
-                    if (currentCore != null) {
-                        return currentCore.submitIfGeneration(opGeneration, () -> finishRemoteTake(serverName, slot,
-                                expectedItemId, requestCount, playerUuid, playerName,
-                                requestId, response, error));
-                    }
-                    return CompletableFuture.completedFuture(TakeResult.fail("核心已停止"));
-                })
+                .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemoteTake(serverName, slot,
+                        expectedItemId, requestCount, playerUuid, playerName,
+                        requestId, response, error)))
                 .thenCompose(future -> future);
     }
 
@@ -380,8 +379,8 @@ public class ExchangeService {
     private void debugTake(String stage, String serverName, int slot, String expectedItemId,
                            int requestCount, String requestId, TakeItemResponse response,
                            LocalItemStore.ItemRecord existing, LocalItemStore.TakeResult result) {
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core == null || core.getApi() == null || core.getApi().getLogger() == null) {
+        ExchangeAPI.Logger logger = runtimeHooks.logger();
+        if (logger == null) {
             return;
         }
         StringBuilder sb = new StringBuilder();
@@ -407,14 +406,14 @@ public class ExchangeService {
                     .append(" taken=").append(describeItem(result.getItem()))
                     .append(" newVersion=").append(result.getNewVersion());
         }
-        core.getApi().getLogger().info(sb.toString());
+        logger.info(sb.toString());
     }
 
     private void debugPut(String stage, PutItemRequest request, NeutralItem item,
                           LocalItemStore.ItemRecord existing,
                           LocalItemStore.PutResult result, Throwable error) {
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core == null || core.getApi() == null || core.getApi().getLogger() == null) {
+        ExchangeAPI.Logger logger = runtimeHooks.logger();
+        if (logger == null) {
             return;
         }
         StringBuilder sb = new StringBuilder();
@@ -438,7 +437,7 @@ public class ExchangeService {
             sb.append(" error=").append(error.getClass().getSimpleName())
                     .append(": ").append(error.getMessage());
         }
-        core.getApi().getLogger().info(sb.toString());
+        logger.info(sb.toString());
     }
 
     private String describeRecord(LocalItemStore.ItemRecord record) {
@@ -465,7 +464,6 @@ public class ExchangeService {
 
     public void routeMessage(org.edtp.theexchange.network.Connection conn,
                               FrameType type, Object message) {
-        TheExchangeCore core = TheExchangeCore.getInstance();
         switch (type) {
             case QUERY_TIMESTAMP, QUERY_ITEMS -> {}
             case QUERY_SLOT_VERSION -> {
@@ -525,12 +523,10 @@ public class ExchangeService {
                 final String sourceServerName = conn.getPeerServerName() != null
                         ? conn.getPeerServerName()
                         : conn.getRemoteName();
-                if (core != null && core.getSyncEngine() != null) {
-                    core.getSyncEngine().querySlotsAsync(sourceServerName, update.getChangedSlots())
+                if (syncEngine != null) {
+                    syncEngine.querySlotsAsync(sourceServerName, update.getChangedSlots())
                             .whenComplete((ignored, error) -> {
-                                if (core.getApi() != null) {
-                                    core.getApi().runOnMainThread(() -> core.getApi().redrawRemoteInventoryView(sourceServerName));
-                                }
+                                runtimeHooks.runOnMainThread(() -> runtimeHooks.redrawRemoteInventoryView(sourceServerName));
                             });
                 }
             }
@@ -539,17 +535,11 @@ public class ExchangeService {
     }
 
     private void refreshOpenViews(String serverName) {
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core != null && core.getApi() != null) {
-            core.getApi().refreshRemoteInventoryView(serverName);
-        }
+        runtimeHooks.refreshRemoteInventoryView(serverName);
     }
 
     private void redrawOpenViews(String serverName) {
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core != null && core.getApi() != null) {
-            core.getApi().redrawRemoteInventoryView(serverName);
-        }
+        runtimeHooks.redrawRemoteInventoryView(serverName);
     }
 
     private String sourceServerName(Connection conn) {
@@ -579,11 +569,8 @@ public class ExchangeService {
     public void publishLocalInventoryUpdate(List<Integer> changedSlots) {
         long timestamp = localItemStore.getLastModifiedTimestamp();
         broadcastInventoryUpdate(null, changedSlots, timestamp);
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core != null && core.getApi() != null) {
-            String localName = core.getApi().getServerName();
-            core.getApi().runOnMainThread(() -> core.getApi().refreshRemoteInventoryView(localName));
-        }
+        String localName = runtimeHooks.localServerName();
+        runtimeHooks.runOnMainThread(() -> runtimeHooks.refreshRemoteInventoryView(localName));
     }
 
     // ========== Result types ==========
