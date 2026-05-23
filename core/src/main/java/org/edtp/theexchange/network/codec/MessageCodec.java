@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class MessageCodec {
+    private static final int MAX_SLOTS = 256;
 
     private MessageCodec() {}
 
@@ -298,7 +299,7 @@ public final class MessageCodec {
         int totalSlots = in.readInt();
         long timestamp = in.readLong();
         String serverVersion = BinaryIO.readString(in);
-        int size = in.readInt();
+        int size = readListSize(in, "items");
         List<NeutralItem> items = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             items.add(BinaryIO.readNullableNeutralItem(in));
@@ -328,8 +329,8 @@ public final class MessageCodec {
 
     private static SlotVersionsResponse decodeSlotVersionsResponse(DataInputStream in) throws IOException {
         String requestId = BinaryIO.readString(in);
-        int size = in.readInt();
-        List<Integer> versions = new ArrayList<>(Math.max(0, size));
+        int size = readListSize(in, "slot versions");
+        List<Integer> versions = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             versions.add(in.readInt());
         }
@@ -338,8 +339,8 @@ public final class MessageCodec {
 
     private static QuerySlotsRequest decodeQuerySlotsRequest(DataInputStream in) throws IOException {
         String requestId = BinaryIO.readString(in);
-        int size = in.readInt();
-        List<Integer> slots = new ArrayList<>(Math.max(0, size));
+        int size = readListSize(in, "query slots");
+        List<Integer> slots = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             slots.add(in.readInt());
         }
@@ -348,8 +349,8 @@ public final class MessageCodec {
 
     private static SlotsStateResponse decodeSlotsStateResponse(DataInputStream in) throws IOException {
         String requestId = BinaryIO.readString(in);
-        int size = in.readInt();
-        List<SlotStateResponse> slots = new ArrayList<>(Math.max(0, size));
+        int size = readListSize(in, "slot states");
+        List<SlotStateResponse> slots = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             slots.add(decodeSlotStateResponse(in));
         }
@@ -432,7 +433,7 @@ public final class MessageCodec {
     private static PushUpdate decodePushUpdate(DataInputStream in) throws IOException {
         PushUpdate update = new PushUpdate();
         update.setTimestamp(in.readLong());
-        int size = in.readInt();
+        int size = readListSize(in, "push update slots");
         List<Integer> slots = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             slots.add(in.readInt());
@@ -443,5 +444,13 @@ public final class MessageCodec {
 
     private static ErrorMessage decodeError(DataInputStream in) throws IOException {
         return new ErrorMessage(in.readInt(), BinaryIO.readString(in));
+    }
+
+    private static int readListSize(DataInputStream in, String label) throws IOException {
+        int size = in.readInt();
+        if (size < 0 || size > MAX_SLOTS) {
+            throw new IOException(label + " list too large: " + size);
+        }
+        return size;
     }
 }

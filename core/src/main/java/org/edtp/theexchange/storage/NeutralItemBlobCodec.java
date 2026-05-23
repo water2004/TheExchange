@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class NeutralItemBlobCodec {
+    private static final int MAX_LIST_ITEMS = 10_000;
 
     private NeutralItemBlobCodec() {}
 
@@ -58,6 +59,9 @@ public final class NeutralItemBlobCodec {
         if (blob == null) return items;
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(blob))) {
             int size = in.readInt();
+            if (size < 0 || size > MAX_LIST_ITEMS) {
+                throw new IOException("Blob list too large: " + size);
+            }
             for (int i = 0; i < size; i++) {
                 if (in.readBoolean()) {
                     items.add(NeutralItem.readFrom(in));
