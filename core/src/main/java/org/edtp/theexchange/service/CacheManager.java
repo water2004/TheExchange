@@ -4,6 +4,7 @@ import org.edtp.theexchange.model.CachedInventory;
 import org.edtp.theexchange.model.AbstractSlotInventoryCache;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.storage.RemoteCacheStore;
 
 import java.util.ArrayList;
@@ -22,6 +23,7 @@ public class CacheManager {
     private static final long CACHE_EXPIRY_MS = 24L * 60L * 60L * 1000L;
 
     private final RemoteCacheStore cacheStore;
+    private final ExchangeAPI.Logger logger;
     private final int capacity;
     private final ReentrantLock lock = new ReentrantLock();
     private final LinkedHashMap<RemoteScopeKey, CachedInventory> caches = new LinkedHashMap<>(16, 0.75f, true);
@@ -37,8 +39,9 @@ public class CacheManager {
     });
     private volatile boolean closed;
 
-    public CacheManager(RemoteCacheStore cacheStore, int capacity) {
+    public CacheManager(RemoteCacheStore cacheStore, ExchangeAPI.Logger logger, int capacity) {
         this.cacheStore = cacheStore;
+        this.logger = logger;
         this.capacity = Math.max(1, capacity);
         flusher.scheduleWithFixedDelay(this::flushDirtyCachesSafely, 30, 30, TimeUnit.SECONDS);
     }
@@ -118,8 +121,21 @@ public class CacheManager {
         RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
         CachedInventory cache = getOrLoad(key);
         if (cache == null) {
-            cache = new CachedInventory(scope);
-            putCached(key, cache);
+            List<Map.Entry<RemoteScopeKey, CachedInventory>> evicted = List.of();
+            lock.lock();
+            try {
+                cache = caches.get(key);
+                if (cache == null) {
+                    cache = new CachedInventory(key.scope());
+                    caches.put(key, cache);
+                    evicted = evictIfNeededLocked();
+                }
+            } finally {
+                lock.unlock();
+            }
+            for (Map.Entry<RemoteScopeKey, CachedInventory> entry : evicted) {
+                flush(entry.getKey(), entry.getValue());
+            }
         }
         cache.replaceSlot(slot, item, version);
     }
@@ -314,7 +330,10 @@ public class CacheManager {
     private void flushDirtyCachesSafely() {
         try {
             flushDirtyCaches();
-        } catch (Throwable ignored) {
+        } catch (Exception e) {
+            if (logger != null) {
+                logger.warn("Remote cache flush failed: " + e.getMessage());
+            }
         }
     }
 

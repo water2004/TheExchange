@@ -1,5 +1,20 @@
 # Phase 4：并发正确性
 
+> **状态：已完成。** 所有修改项已在当前代码中实现，无需额外操作。
+
+以下为已验证的修复清单：
+
+- ✅ C-1: `markClean` 全程持 `structureLock.writeLock()`，直接访问 `slots` 字段避免 StampedLock 重入
+- ✅ C-2: `markClean` 持写锁后 snapshot 和 dirtySlots 之间无竞争窗口
+- ✅ M-2: `flushDirtyCachesSafely` 已改为 `catch (Exception e)` + `logger.warn` 记录
+- ✅ C-9: `startAsync()` 有 `synchronized(this)` 保护 `startupFuture != null` 检查
+- ✅ C-5: `reloadConfigInternal` 保存旧 config/runtime，异常时回滚恢复旧状态后再 `endReload`
+- ✅ C-3: `updateCacheSlot` 在 `lock.lock()` 内做 check-then-create，防止并发首次写入覆盖
+
+---
+
+以下为原始修复计划（供参考）：
+
 ## AbstractSlotInventoryCache.java — C-1
 
 `markClean` 方法：

@@ -2,6 +2,7 @@ package org.edtp.theexchange.storage;
 
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.compat.ItemSerializer;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -18,6 +19,7 @@ public final class LocalInventoryCacheManager {
 
     private final LocalItemStore store;
     private final ItemSerializer itemSerializer;
+    private final ExchangeAPI.Logger logger;
     private final int capacity;
     private final ReentrantLock lock = new ReentrantLock();
     private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
@@ -34,9 +36,11 @@ public final class LocalInventoryCacheManager {
             new LinkedHashMap<>(16, 0.75f, true);
     private volatile boolean closed;
 
-    public LocalInventoryCacheManager(LocalItemStore store, ItemSerializer itemSerializer, int capacity) {
+    public LocalInventoryCacheManager(LocalItemStore store, ItemSerializer itemSerializer,
+                                      ExchangeAPI.Logger logger, int capacity) {
         this.store = store;
         this.itemSerializer = itemSerializer;
+        this.logger = logger;
         this.capacity = Math.max(1, capacity);
         flusher.scheduleWithFixedDelay(this::flushDirtyCachesSafely, 30, 30, TimeUnit.SECONDS);
     }
@@ -219,7 +223,10 @@ public final class LocalInventoryCacheManager {
     private void flushDirtyCachesSafely() {
         try {
             flushDirtyCaches();
-        } catch (Throwable ignored) {
+        } catch (Exception e) {
+            if (logger != null) {
+                logger.warn("Local cache flush failed: " + e.getMessage());
+            }
         }
     }
 

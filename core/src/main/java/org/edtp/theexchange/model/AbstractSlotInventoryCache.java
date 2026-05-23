@@ -149,21 +149,29 @@ public abstract class AbstractSlotInventoryCache {
     }
 
     public final void markClean(long persistedRevision) {
-        List<SlotState> current = slotRefs();
-        if (revision.get() != persistedRevision) {
-            return;
-        }
-        dirty = false;
-        for (SlotState slot : current) {
-            if (slot == null) {
-                continue;
+        long stamp = structureLock.writeLock();
+        List<SlotState> locked = new ArrayList<>();
+        try {
+            List<SlotState> current = new ArrayList<>(slots);
+            for (SlotState slot : current) {
+                if (slot == null) {
+                    continue;
+                }
+                slot.lock.lock();
+                locked.add(slot);
             }
-            slot.lock.lock();
-            try {
+            if (revision.get() != persistedRevision) {
+                return;
+            }
+            dirty = false;
+            for (SlotState slot : locked) {
                 slot.dirty = false;
-            } finally {
-                slot.lock.unlock();
             }
+        } finally {
+            for (int i = locked.size() - 1; i >= 0; i--) {
+                locked.get(i).lock.unlock();
+            }
+            structureLock.unlockWrite(stamp);
         }
     }
 

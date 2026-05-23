@@ -81,7 +81,6 @@ public class NetworkManager {
             acceptingInbound = true;
             return;
         }
-        acceptingInbound = true;
         System.out.println(TAG + "Starting TCP server...");
         tcpServer.start(conn -> {
             System.out.println(TAG + "Inbound connection from " + conn.getRemoteName());
@@ -102,6 +101,7 @@ public class NetworkManager {
                 tcpServer.removeConnection(c);
             });
         });
+        acceptingInbound = true;
         System.out.println(TAG + "TCP server started");
     }
 

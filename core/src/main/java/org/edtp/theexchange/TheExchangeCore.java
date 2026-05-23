@@ -106,17 +106,21 @@ public class TheExchangeCore {
     public boolean isInitialized() { return initialized; }
 
     public CompletableFuture<Void> startAsync() {
-        if (startupFuture != null) return startupFuture;
-        startupFuture = new CompletableFuture<>();
+        CompletableFuture<Void> future;
+        synchronized (this) {
+            if (startupFuture != null) return startupFuture;
+            startupFuture = new CompletableFuture<>();
+            future = startupFuture;
+        }
         lifecycleExecutor.execute(() -> {
             try {
                 initialize();
-                startupFuture.complete(null);
+                future.complete(null);
             } catch (Throwable t) {
-                startupFuture.completeExceptionally(t);
+                future.completeExceptionally(t);
             }
         });
-        return startupFuture;
+        return future;
     }
 
     public <T> CompletableFuture<T> submit(Callable<T> task) {
@@ -303,7 +307,9 @@ public class TheExchangeCore {
         remoteCacheStore = new RemoteCacheStore(databaseManager);
         operationLogger = new OperationLogger(databaseManager);
 
-        buildRuntime(runtimeConfig);
+        RuntimeBundle initialRuntime = buildRuntime(runtimeConfig, null);
+        publishRuntime(initialRuntime);
+        activateRuntime(initialRuntime, runtimeConfig);
 
         instance = this;
         initialized = true;
@@ -315,80 +321,101 @@ public class TheExchangeCore {
 
     private void reloadConfigInternal() {
         api.getLogger().info("Reloading TheExchange config...");
+        ExchangeAPI.RuntimeConfig oldConfig = runtimeConfig;
+        RuntimeBundle oldRuntime = currentRuntimeBundle();
+        ExecutorService oldExecutor;
+        synchronized (executorLock) {
+            oldExecutor = coreExecutor;
+        }
+        RuntimeBundle newRuntime = null;
+        ExecutorService newExecutor = null;
         try {
             beginReload();
-            ExchangeAPI.RuntimeConfig oldConfig = runtimeConfig;
             ExchangeAPI.RuntimeConfig reloaded = configManager.reload();
-            if (localInventoryCacheManager != null) {
-                localInventoryCacheManager.flushAll();
-            }
-            if (cacheManager != null) {
-                cacheManager.shutdown();
-            }
-            stopReloadableServices(false, oldConfig, reloaded);
-            stopCoreExecutor();
-            swapCoreExecutor(reloaded);
+            boolean reuseNetwork = oldRuntime.networkManager != null
+                    && oldConfig != null
+                    && oldConfig.getPort() == reloaded.getPort();
+            stopHeartbeat(oldRuntime.heartbeatManager);
+            newExecutor = newCoreExecutor(reloaded);
             generation.incrementAndGet();
             runtimeConfig = reloaded;
-            buildRuntime(reloaded, oldConfig);
+            newRuntime = buildRuntime(reloaded, reuseNetwork ? oldRuntime.networkManager : null);
+            synchronized (executorLock) {
+                coreExecutor = newExecutor;
+            }
+            publishRuntime(newRuntime);
+            activateRuntime(newRuntime, reloaded);
+            if (!reuseNetwork) {
+                shutdownNetwork(oldRuntime.networkManager);
+            }
+            shutdownRuntimeCaches(oldRuntime);
+            shutdownExecutor(oldExecutor);
             api.getLogger().info("TheExchange config reloaded. Port: " + reloaded.getPort()
                     + ", inbound=" + reloaded.getNetwork().isInboundEnabled()
                     + ", Servers: " + serverRegistry.getAllServers().size());
+        } catch (Throwable t) {
+            runtimeConfig = oldConfig;
+            restoreNetworkConfig(oldRuntime.networkManager, oldConfig);
+            RuntimeBundle restored = withRestartedHeartbeat(oldRuntime, oldConfig);
+            synchronized (executorLock) {
+                coreExecutor = oldExecutor;
+            }
+            publishRuntime(restored);
+            if (newRuntime != null) {
+                shutdownFailedReloadRuntime(newRuntime, oldRuntime);
+            }
+            shutdownExecutor(newExecutor);
+            api.getLogger().error("TheExchange config reload failed; keeping previous runtime", t);
+            throw t;
         } finally {
             endReload();
         }
     }
 
-    private void buildRuntime(ExchangeAPI.RuntimeConfig config) {
-        buildRuntime(config, null);
-    }
-
-    private void buildRuntime(ExchangeAPI.RuntimeConfig config, ExchangeAPI.RuntimeConfig oldConfig) {
+    private RuntimeBundle buildRuntime(ExchangeAPI.RuntimeConfig config, NetworkManager reusableNetworkManager) {
         Path pinnedPeerKeysPath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "known-peers.properties");
         if (pinnedPeerKeyStore == null) {
             pinnedPeerKeyStore = new PinnedPeerKeyStore(pinnedPeerKeysPath);
         }
         pruneRemoteState(config);
 
-        localInventoryCacheManager = new LocalInventoryCacheManager(
-                localItemStore, api.getItemSerializer(), config.getCache().getLocalInventoryCacheCapacity());
-        localItemStore.setCacheManager(localInventoryCacheManager);
-        cacheManager = new CacheManager(remoteCacheStore, config.getCache().getRemoteInventoryCacheCapacity());
+        LocalInventoryCacheManager nextLocalInventoryCacheManager = new LocalInventoryCacheManager(
+                localItemStore, api.getItemSerializer(), api.getLogger(),
+                config.getCache().getLocalInventoryCacheCapacity());
+        CacheManager nextCacheManager = new CacheManager(remoteCacheStore, api.getLogger(),
+                config.getCache().getRemoteInventoryCacheCapacity());
 
         Path keystorePath = Path.of(api.getConfigLoader().getConfigDir(), "tls", "keystore.jks");
-        boolean reuseNetwork = networkManager != null
-                && oldConfig != null
-                && oldConfig.getPort() == config.getPort();
-        if (!reuseNetwork) {
-            if (networkManager != null) {
-                networkManager.shutdown();
-            }
+        NetworkManager nextNetworkManager = reusableNetworkManager;
+        if (nextNetworkManager == null) {
             try {
-                networkManager = new NetworkManager(config.getPort(), keystorePath, pinnedPeerKeyStore,
+                nextNetworkManager = new NetworkManager(config.getPort(), keystorePath, pinnedPeerKeyStore,
                         config.getDisplayName(), "theexchange".toCharArray(), api.getServerVersion());
             } catch (Exception e) {
                 logNetworkStartFailure(config.getPort(), e);
-                networkManager = null;
+                nextNetworkManager = null;
             }
         }
-        if (networkManager != null) {
-            networkManager.setLocalServerName(config.getDisplayName());
-            networkManager.setLocalPassword(config.getPassword());
-            networkManager.setOnlineHandler(serverName ->
+        if (nextNetworkManager != null) {
+            nextNetworkManager.setLocalServerName(config.getDisplayName());
+            nextNetworkManager.setLocalPassword(config.getPassword());
+            nextNetworkManager.setOnlineHandler(serverName ->
                     api.runOnMainThread(() -> api.refreshRemoteInventoryView(serverName)));
-            applyInboundConfig(config);
         }
 
-        serverRegistry = new ServerRegistry(networkManager, config.getRemoteServers());
+        ServerRegistry nextServerRegistry = new ServerRegistry(nextNetworkManager, config.getRemoteServers());
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(api.getItemSerializer());
-        syncEngine = networkManager != null ? new SyncEngine(networkManager, cacheManager, compatibilityChecker) : null;
-        exchangeService = new ExchangeService(networkManager, localItemStore,
-                operationLogger, cacheManager, compatibilityChecker, api.getItemSerializer(), syncEngine,
+        SyncEngine nextSyncEngine = nextNetworkManager != null
+                ? new SyncEngine(nextNetworkManager, nextCacheManager, compatibilityChecker)
+                : null;
+        ExchangeService nextExchangeService = new ExchangeService(nextNetworkManager, localItemStore,
+                operationLogger, nextCacheManager, compatibilityChecker, api.getItemSerializer(), nextSyncEngine,
                 exchangeServiceHooks(), requestTimeoutMs(config));
-        menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
+        MenuInteractionService nextMenuInteractionService = new MenuInteractionService(nextExchangeService, localItemStore);
 
-        if (networkManager != null) {
-            networkManager.setMessageRouter((conn, type, msg) ->
+        HeartbeatManager nextHeartbeatManager = null;
+        if (nextNetworkManager != null) {
+            nextNetworkManager.setMessageRouter((conn, type, msg) ->
                     submit(() -> {
                         ExchangeService service = exchangeService;
                         if (service != null) {
@@ -400,13 +427,11 @@ public class TheExchangeCore {
                             api.getLogger().warn("Dropped inbound exchange message during reload: " + error.getMessage());
                         }
             }));
-            heartbeatManager = new HeartbeatManager(networkManager, serverRegistry, config.getNetwork());
-            heartbeatManager.start();
-            networkManager.disconnectOutboundNotIn(config.getRemoteServers().stream()
-                    .map(ExchangeAPI.RemoteServerConfig::getName)
-                    .collect(java.util.stream.Collectors.toSet()));
-            serverRegistry.connectAllEnabled();
+            nextHeartbeatManager = new HeartbeatManager(nextNetworkManager, nextServerRegistry, config.getNetwork());
         }
+        return new RuntimeBundle(nextLocalInventoryCacheManager, nextNetworkManager, nextServerRegistry,
+                nextCacheManager, nextSyncEngine, nextMenuInteractionService, nextHeartbeatManager,
+                nextExchangeService);
     }
 
     private ExchangeService.RuntimeHooks exchangeServiceHooks() {
@@ -464,51 +489,143 @@ public class TheExchangeCore {
         }
     }
 
-    private void applyInboundConfig(ExchangeAPI.RuntimeConfig config) {
+    private void applyInboundConfig(NetworkManager manager, ExchangeAPI.RuntimeConfig config) {
+        if (manager == null) {
+            return;
+        }
         if (config.getNetwork().isInboundEnabled()) {
-            networkManager.startInbound();
+            manager.startInbound();
             api.getLogger().info("Inbound Exchange listener started on port " + config.getPort());
         } else {
-            networkManager.stopInbound();
+            manager.stopInbound();
             api.getLogger().info("Inbound Exchange listener disabled");
         }
     }
 
     private void stopRuntimeServices(boolean flush) {
-        stopReloadableServices(flush, runtimeConfig, null);
-        if (networkManager != null) {
-            networkManager.shutdown();
-            networkManager = null;
+        RuntimeBundle current = currentRuntimeBundle();
+        if (flush) {
+            shutdownRuntimeCaches(current);
         }
+        stopHeartbeat(current.heartbeatManager);
+        shutdownNetwork(current.networkManager);
+        publishRuntime(new RuntimeBundle(null, null, null, null, null, null, null, null));
         stopCoreExecutor();
     }
 
-    private void stopReloadableServices(boolean flush, ExchangeAPI.RuntimeConfig oldConfig,
-                                        ExchangeAPI.RuntimeConfig nextConfig) {
-        if (heartbeatManager != null) {
-            heartbeatManager.stop();
-            heartbeatManager = null;
+    private void publishRuntime(RuntimeBundle runtime) {
+        localInventoryCacheManager = runtime.localInventoryCacheManager;
+        localItemStore.setCacheManager(runtime.localInventoryCacheManager);
+        networkManager = runtime.networkManager;
+        serverRegistry = runtime.serverRegistry;
+        cacheManager = runtime.cacheManager;
+        syncEngine = runtime.syncEngine;
+        menuInteractionService = runtime.menuInteractionService;
+        heartbeatManager = runtime.heartbeatManager;
+        exchangeService = runtime.exchangeService;
+    }
+
+    private RuntimeBundle currentRuntimeBundle() {
+        return new RuntimeBundle(localInventoryCacheManager, networkManager, serverRegistry, cacheManager,
+                syncEngine, menuInteractionService, heartbeatManager, exchangeService);
+    }
+
+    private void activateRuntime(RuntimeBundle runtime, ExchangeAPI.RuntimeConfig config) {
+        if (runtime == null || runtime.networkManager == null) {
+            return;
         }
-        boolean keepNetwork = networkManager != null
-                && oldConfig != null
-                && nextConfig != null
-                && oldConfig.getPort() == nextConfig.getPort();
-        if (networkManager != null && !keepNetwork) {
-            networkManager.shutdown();
-            networkManager = null;
+        applyInboundConfig(runtime.networkManager, config);
+        runtime.networkManager.disconnectOutboundNotIn(config.getRemoteServers().stream()
+                .map(ExchangeAPI.RemoteServerConfig::getName)
+                .collect(java.util.stream.Collectors.toSet()));
+        if (runtime.heartbeatManager != null) {
+            runtime.heartbeatManager.start();
         }
-        if (flush && localInventoryCacheManager != null) {
-            localInventoryCacheManager.flushAll();
+        if (runtime.serverRegistry != null) {
+            runtime.serverRegistry.connectAllEnabled();
         }
-        if (flush && cacheManager != null) {
-            cacheManager.shutdown();
+    }
+
+    private RuntimeBundle withRestartedHeartbeat(RuntimeBundle runtime, ExchangeAPI.RuntimeConfig config) {
+        if (runtime == null || runtime.networkManager == null || runtime.serverRegistry == null || config == null) {
+            return runtime;
         }
-        localInventoryCacheManager = null;
-        cacheManager = null;
-        syncEngine = null;
-        exchangeService = null;
-        menuInteractionService = null;
-        serverRegistry = null;
+        HeartbeatManager restarted = new HeartbeatManager(runtime.networkManager, runtime.serverRegistry,
+                config.getNetwork());
+        restarted.start();
+        return new RuntimeBundle(runtime.localInventoryCacheManager, runtime.networkManager,
+                runtime.serverRegistry, runtime.cacheManager, runtime.syncEngine,
+                runtime.menuInteractionService, restarted, runtime.exchangeService);
+    }
+
+    private void restoreNetworkConfig(NetworkManager manager, ExchangeAPI.RuntimeConfig config) {
+        if (manager == null || config == null) {
+            return;
+        }
+        manager.setLocalServerName(config.getDisplayName());
+        manager.setLocalPassword(config.getPassword());
+        manager.setOnlineHandler(serverName ->
+                api.runOnMainThread(() -> api.refreshRemoteInventoryView(serverName)));
+        manager.setMessageRouter((conn, type, msg) ->
+                submit(() -> {
+                    ExchangeService service = exchangeService;
+                    if (service != null) {
+                        service.routeMessage(conn, type, msg);
+                    }
+                    return null;
+                }).whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        api.getLogger().warn("Dropped inbound exchange message during reload: " + error.getMessage());
+                    }
+                }));
+        applyInboundConfig(manager, config);
+        manager.disconnectOutboundNotIn(config.getRemoteServers().stream()
+                .map(ExchangeAPI.RemoteServerConfig::getName)
+                .collect(java.util.stream.Collectors.toSet()));
+    }
+
+    private void stopHeartbeat(HeartbeatManager manager) {
+        if (manager != null) {
+            manager.stop();
+        }
+    }
+
+    private void shutdownNetwork(NetworkManager manager) {
+        if (manager != null) {
+            manager.shutdown();
+        }
+    }
+
+    private void shutdownRuntimeCaches(RuntimeBundle runtime) {
+        if (runtime == null) {
+            return;
+        }
+        if (runtime.localInventoryCacheManager != null) {
+            runtime.localInventoryCacheManager.flushAll();
+        }
+        if (runtime.cacheManager != null) {
+            runtime.cacheManager.shutdown();
+        }
+    }
+
+    private void shutdownRuntimeServices(RuntimeBundle runtime) {
+        if (runtime == null) {
+            return;
+        }
+        stopHeartbeat(runtime.heartbeatManager);
+        shutdownNetwork(runtime.networkManager);
+        shutdownRuntimeCaches(runtime);
+    }
+
+    private void shutdownFailedReloadRuntime(RuntimeBundle failedRuntime, RuntimeBundle oldRuntime) {
+        if (failedRuntime == null) {
+            return;
+        }
+        stopHeartbeat(failedRuntime.heartbeatManager);
+        if (oldRuntime == null || failedRuntime.networkManager != oldRuntime.networkManager) {
+            shutdownNetwork(failedRuntime.networkManager);
+        }
+        shutdownRuntimeCaches(failedRuntime);
     }
 
     private void logNetworkStartFailure(int port, Exception e) {
@@ -593,15 +710,6 @@ public class TheExchangeCore {
         }
     }
 
-    private void swapCoreExecutor(ExchangeAPI.RuntimeConfig config) {
-        ExecutorService oldExecutor;
-        synchronized (executorLock) {
-            oldExecutor = coreExecutor;
-            coreExecutor = newCoreExecutor(config);
-        }
-        shutdownExecutor(oldExecutor);
-    }
-
     private void stopCoreExecutor() {
         ExecutorService oldExecutor;
         synchronized (executorLock) {
@@ -638,5 +746,15 @@ public class TheExchangeCore {
             Thread.currentThread().interrupt();
             executor.shutdownNow();
         }
+    }
+
+    private record RuntimeBundle(LocalInventoryCacheManager localInventoryCacheManager,
+                                 NetworkManager networkManager,
+                                 ServerRegistry serverRegistry,
+                                 CacheManager cacheManager,
+                                 SyncEngine syncEngine,
+                                 MenuInteractionService menuInteractionService,
+                                 HeartbeatManager heartbeatManager,
+                                 ExchangeService exchangeService) {
     }
 }
