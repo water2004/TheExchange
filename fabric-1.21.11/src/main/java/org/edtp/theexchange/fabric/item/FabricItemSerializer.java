@@ -29,6 +29,12 @@ import java.util.Arrays;
  */
 public class FabricItemSerializer implements ItemSerializer {
 
+    private final String sourceVersion;
+
+    public FabricItemSerializer(String sourceVersion) {
+        this.sourceVersion = sourceVersion;
+    }
+
     @Override
     public NeutralItem serialize(Object itemStack) {
         if (!(itemStack instanceof ItemStack stack)) return null;
@@ -48,7 +54,7 @@ public class FabricItemSerializer implements ItemSerializer {
         }
 
         return new NeutralItem(itemId, stack.getCount(), displayName,
-                extraData, false, "26.1.2");
+                extraData, false, sourceVersion);
     }
 
     @Override

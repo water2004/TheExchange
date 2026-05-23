@@ -123,7 +123,9 @@ public final class ExchangeConfigManager {
     }
 
     public synchronized List<ExchangeAPI.RemoteServerConfig> listRemoteServers() {
-        return parse(GSON.toJson(loadFileSnapshot())).getRemoteServers();
+        ConfigData data = loadFileSnapshot();
+        validate(data);
+        return remoteConfigs(data.remoteServers);
     }
 
     private ConfigData loadFileSnapshot() {
@@ -138,10 +140,6 @@ public final class ExchangeConfigManager {
     private ExchangeAPI.RuntimeConfig parse(String json) {
         ConfigData data = parseData(json);
         validate(data);
-        List<ExchangeAPI.RemoteServerConfig> remotes = new ArrayList<>();
-        for (RemoteServerData remote : data.remoteServers) {
-            remotes.add(new ExchangeAPI.RemoteServerConfig(remote.name, remote.address, remote.port, remote.password));
-        }
         return new ExchangeAPI.RuntimeConfig(
                 new ExchangeAPI.ServerConfig(data.server.displayName, data.server.port, data.server.password),
                 new ExchangeAPI.NetworkConfig(data.network.heartbeatIntervalSeconds, data.network.heartbeatTimeoutSeconds,
@@ -152,7 +150,15 @@ public final class ExchangeConfigManager {
                 new ExchangeAPI.PerformanceConfig(data.performance.coreThreads),
                 new ExchangeAPI.LoggingConfig(data.logging.retentionDays, data.logging.cleanupIntervalHours),
                 new ExchangeAPI.ContainerConfig(data.container.rows, data.container.titleTemplate),
-                remotes);
+                remoteConfigs(data.remoteServers));
+    }
+
+    private List<ExchangeAPI.RemoteServerConfig> remoteConfigs(List<RemoteServerData> source) {
+        List<ExchangeAPI.RemoteServerConfig> remotes = new ArrayList<>();
+        for (RemoteServerData remote : source) {
+            remotes.add(new ExchangeAPI.RemoteServerConfig(remote.name, remote.address, remote.port, remote.password));
+        }
+        return remotes;
     }
 
     private ConfigData parseData(String json) {

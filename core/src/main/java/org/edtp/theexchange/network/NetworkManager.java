@@ -1,6 +1,5 @@
 package org.edtp.theexchange.network;
 
-import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.model.RemoteServer;
 import org.edtp.theexchange.model.ServerStatus;
 import org.edtp.theexchange.network.protocol.FrameType;
@@ -24,6 +23,7 @@ public class NetworkManager {
     private final PinnedPeerKeyStore pinnedPeerKeyStore;
     private final TcpServer tcpServer;
     private final TcpClient tcpClient;
+    private final String serverVersion;
     private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ServerStatus> serverStatus = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<BiConsumer<String, ServerStatus>> statusListeners = new CopyOnWriteArrayList<>();
@@ -31,6 +31,7 @@ public class NetworkManager {
     private String localServerName;
     private String localPassword;
     private MessageHandler messageRouter;
+    private Consumer<String> onlineHandler;
     private volatile boolean acceptingInbound;
 
     @FunctionalInterface
@@ -39,11 +40,12 @@ public class NetworkManager {
     }
 
     public NetworkManager(int localPort, Path keystorePath, PinnedPeerKeyStore pinnedPeerKeyStore,
-                          String cn, char[] keystorePassword) {
+                          String cn, char[] keystorePassword, String serverVersion) {
         this.tlsContext = TlsContext.create(keystorePath, cn, keystorePassword);
         this.pinnedPeerKeyStore = pinnedPeerKeyStore;
         this.tcpServer = new TcpServer(localPort, tlsContext);
         this.tcpClient = new TcpClient(tlsContext, pinnedPeerKeyStore);
+        this.serverVersion = serverVersion;
         System.out.println(TAG + "Created, local port=" + localPort);
     }
 
@@ -59,6 +61,10 @@ public class NetworkManager {
 
     public void setMessageRouter(MessageHandler router) {
         this.messageRouter = router;
+    }
+
+    public void setOnlineHandler(Consumer<String> onlineHandler) {
+        this.onlineHandler = onlineHandler;
     }
 
     public void start() {
@@ -136,9 +142,7 @@ public class NetworkManager {
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(true, "OK",
                             localServerName != null ? localServerName : "local",
-                            TheExchangeCore.getInstance() != null
-                                    ? TheExchangeCore.getInstance().getApi().getServerVersion()
-                                    : "26.1.2",
+                            serverVersion,
                             System.currentTimeMillis()));
 
             notifyStatusChange(request.getServerName(), ServerStatus.ONLINE);
@@ -170,7 +174,7 @@ public class NetworkManager {
 
         System.out.println(TAG + "TLS connected to " + server.getName() + ", sending AUTH...");
         String authServerName = localServerName != null ? localServerName : "local";
-        AuthRequest auth = new AuthRequest(authServerName, server.getPasswordHash(), "1", "26.1.2");
+        AuthRequest auth = new AuthRequest(authServerName, server.getPasswordHash(), "1", serverVersion);
         conn.send(FrameType.AUTH_REQUEST, auth);
 
         conn.start((type, msg) -> {
@@ -260,9 +264,9 @@ public class NetworkManager {
             listener.accept(serverName, status);
         }
         if (status == ServerStatus.ONLINE) {
-            TheExchangeCore core = TheExchangeCore.getInstance();
-            if (core != null && core.getApi() != null) {
-                core.getApi().runOnMainThread(() -> core.getApi().refreshRemoteInventoryView(serverName));
+            Consumer<String> handler = onlineHandler;
+            if (handler != null) {
+                handler.accept(serverName);
             }
         }
     }

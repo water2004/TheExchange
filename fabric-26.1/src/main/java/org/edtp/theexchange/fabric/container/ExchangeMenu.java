@@ -153,8 +153,12 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
     @Override
     public void clicked(int slotIndex, int buttonNum, ContainerInput containerInput, Player player) {
-        ExchangeInteractionResult decision = TheExchangeCore.getInstance()
-                .getMenuInteractionService()
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized() || core.getMenuInteractionService() == null) {
+            player.sendSystemMessage(Component.literal("Exchange 正在重载，请稍后再试"));
+            return;
+        }
+        ExchangeInteractionResult decision = core.getMenuInteractionService()
                 .decide(buildInteraction(slotIndex, buttonNum, containerInput, player));
 
         switch (decision.getAction()) {

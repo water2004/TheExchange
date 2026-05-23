@@ -26,8 +26,6 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public class ExchangeService {
 
-    private static final long REQUEST_TIMEOUT_MS = 5000;
-
     private final NetworkManager networkManager;
     private final LocalItemStore localItemStore;
     private final OperationLogger operationLogger;
@@ -36,12 +34,13 @@ public class ExchangeService {
     private final ItemSerializer itemSerializer;
     private final SyncEngine syncEngine;
     private final RuntimeHooks runtimeHooks;
+    private final long requestTimeoutMs;
     private final ConcurrentHashMap<Integer, ReentrantLock> localSlotLocks = new ConcurrentHashMap<>();
 
     public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
                            OperationLogger operationLogger, CacheManager cacheManager,
                            CompatibilityChecker compatibilityChecker, ItemSerializer itemSerializer,
-                           SyncEngine syncEngine, RuntimeHooks runtimeHooks) {
+                           SyncEngine syncEngine, RuntimeHooks runtimeHooks, long requestTimeoutMs) {
         this.networkManager = networkManager;
         this.localItemStore = localItemStore;
         this.operationLogger = operationLogger;
@@ -50,6 +49,7 @@ public class ExchangeService {
         this.itemSerializer = itemSerializer;
         this.syncEngine = syncEngine;
         this.runtimeHooks = runtimeHooks;
+        this.requestTimeoutMs = requestTimeoutMs;
     }
 
     public interface RuntimeHooks {
@@ -98,7 +98,7 @@ public class ExchangeService {
                 requestId, playerUuid, playerName, expectedVersion);
         long opGeneration = runtimeHooks.currentGeneration();
         return conn.<PutItemResponse>sendAsync(
-                        FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
+                        FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, requestTimeoutMs)
                 .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemotePut(serverName, slot, playerUuid,
                         playerName, item, requestId, response, error)))
                 .thenCompose(future -> future);
@@ -147,7 +147,7 @@ public class ExchangeService {
 
         long opGeneration = runtimeHooks.currentGeneration();
         return conn.<TakeItemResponse>sendAsync(
-                        FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, REQUEST_TIMEOUT_MS)
+                        FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, requestTimeoutMs)
                 .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemoteTake(serverName, slot,
                         expectedItemId, requestCount, playerUuid, playerName,
                         requestId, response, error)))

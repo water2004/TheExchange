@@ -28,7 +28,7 @@ public class FabricExchangeAPI implements ExchangeAPI {
             @Override public void error(String msg) { slf4jLogger.error("[Exchange] " + msg); }
             @Override public void error(String msg, Throwable t) { slf4jLogger.error("[Exchange] " + msg, t); }
         };
-        this.itemSerializer = new FabricItemSerializer();
+        this.itemSerializer = new FabricItemSerializer(server.getServerVersion());
         this.configLoader = new FabricConfigLoader();
     }
 

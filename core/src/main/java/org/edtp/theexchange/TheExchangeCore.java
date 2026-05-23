@@ -365,7 +365,7 @@ public class TheExchangeCore {
             }
             try {
                 networkManager = new NetworkManager(config.getPort(), keystorePath, pinnedPeerKeyStore,
-                        config.getDisplayName(), "theexchange".toCharArray());
+                        config.getDisplayName(), "theexchange".toCharArray(), api.getServerVersion());
             } catch (Exception e) {
                 logNetworkStartFailure(config.getPort(), e);
                 networkManager = null;
@@ -374,6 +374,8 @@ public class TheExchangeCore {
         if (networkManager != null) {
             networkManager.setLocalServerName(config.getDisplayName());
             networkManager.setLocalPassword(config.getPassword());
+            networkManager.setOnlineHandler(serverName ->
+                    api.runOnMainThread(() -> api.refreshRemoteInventoryView(serverName)));
             applyInboundConfig(config);
         }
 
@@ -382,7 +384,7 @@ public class TheExchangeCore {
         syncEngine = networkManager != null ? new SyncEngine(networkManager, cacheManager, compatibilityChecker) : null;
         exchangeService = new ExchangeService(networkManager, localItemStore,
                 operationLogger, cacheManager, compatibilityChecker, api.getItemSerializer(), syncEngine,
-                exchangeServiceHooks());
+                exchangeServiceHooks(), requestTimeoutMs(config));
         menuInteractionService = new MenuInteractionService(exchangeService, localItemStore);
 
         if (networkManager != null) {
@@ -444,6 +446,10 @@ public class TheExchangeCore {
                 return runtimeConfig != null ? runtimeConfig.getDisplayName() : "local";
             }
         };
+    }
+
+    private long requestTimeoutMs(ExchangeAPI.RuntimeConfig config) {
+        return TimeUnit.SECONDS.toMillis(config.getNetwork().getRequestTimeoutSeconds());
     }
 
     private void pruneRemoteState(ExchangeAPI.RuntimeConfig config) {
