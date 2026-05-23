@@ -92,7 +92,7 @@ public class MenuInteractionService {
             }
             if (!isEmpty(remote)) {
                 return ExchangeInteractionResult.swapRemote(input.getSlotIndex(),
-                        input.getHotbarItem(), input.getHotbarItem().getCount());
+                        input.getHotbarItem(), remote.getCount(), remote.getItemId());
             }
             int targetSlot = findTargetSlot(input);
             if (targetSlot < 0) {

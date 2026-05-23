@@ -246,10 +246,13 @@ public class TheExchangeCore {
 
     public CompletableFuture<ExchangeMutationResult> swapRemoteAsync(String serverName, int slot,
                                                                      NeutralItem item,
+                                                                     String expectedItemId,
+                                                                     int takeCount,
                                                                      PlayerExchangeContext player) {
         long opGeneration = generation.get();
         return submit(() -> exchangeService.swapItemAsync(
-                        serverName, slot, item, player.uuid(), player.name()))
+                        serverName, slot, item, expectedItemId, takeCount,
+                        player.uuid(), player.name()))
                 .thenCompose(future -> future)
                 .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()

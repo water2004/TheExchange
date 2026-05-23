@@ -3,6 +3,7 @@ package org.edtp.theexchange.fabric.item;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
@@ -126,9 +127,15 @@ public class FabricItemSerializer implements ItemSerializer {
 
     @Override
     public int getMaxStackSize(NeutralItem item) {
-        Object stackObj = deserialize(item);
-        if (stackObj instanceof ItemStack stack) {
-            return stack.getMaxStackSize();
+        if (item == null || item.isEmpty()) {
+            throw new IllegalArgumentException("Cannot resolve max stack size for empty item");
+        }
+        Identifier id = Identifier.tryParse(item.getItemId());
+        if (id != null) {
+            var itemHolder = BuiltInRegistries.ITEM.get(id);
+            if (itemHolder.isPresent() && itemHolder.get().value() != Items.AIR) {
+                return itemHolder.get().value().getDefaultMaxStackSize();
+            }
         }
         throw new IllegalArgumentException("Cannot resolve max stack size for " + item.getItemId());
     }
@@ -163,7 +170,43 @@ public class FabricItemSerializer implements ItemSerializer {
             writeCompoundSorted(compound, out);
             return;
         }
+        if (tag instanceof ListTag list) {
+            writeListSorted(list, out);
+            return;
+        }
         tag.write(out);
+    }
+
+    private void writeListSorted(ListTag list, DataOutputStream out) throws IOException {
+        byte elementType = identifyListElementType(list);
+        out.writeByte(elementType);
+        out.writeInt(list.size());
+        for (Tag element : list) {
+            writeTag(wrapListElementIfNeeded(elementType, element), out);
+        }
+    }
+
+    private byte identifyListElementType(ListTag list) {
+        byte homogenousType = 0;
+        for (Tag element : list) {
+            byte elementType = element.getId();
+            if (homogenousType == 0) {
+                homogenousType = elementType;
+            } else if (homogenousType != elementType) {
+                return 10;
+            }
+        }
+        return homogenousType;
+    }
+
+    private Tag wrapListElementIfNeeded(byte elementType, Tag element) {
+        if (elementType != 10) return element;
+        if (element instanceof CompoundTag compound && !(compound.size() == 1 && compound.contains(""))) {
+            return compound;
+        }
+        CompoundTag wrapper = new CompoundTag();
+        wrapper.put("", element);
+        return wrapper;
     }
 
     private void debugCanDeserializeFailure(NeutralItem item, String stage, Exception error) {

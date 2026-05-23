@@ -1,5 +1,18 @@
 # Phase 6：fabric 适配层
 
+> **状态：已完成。** 所有修改项已在当前代码中实现，无需额外操作。
+
+以下为已验证的修复清单：
+
+- ✅ C-10: `refreshing` 已声明 `volatile`，`loadViewAsync` 的 `.whenComplete` 内 try-finally 确保异常路径重置
+- ✅ C-4: 两个 fabric 的 `clicked()` 新增 `SWAP_REMOTE` 分支，`applyRemoteSwap` 完整实现原子交换客户端逻辑
+- ✅ O-3: `getMaxStackSize` 直接查 `BuiltInRegistries.ITEM` 注册表，不再调用 `deserialize`
+- ✅ O-8: `writeTag` 对 `ListTag` 走 `writeListSorted` 递归处理，嵌套 CompoundTag 也会排序
+
+---
+
+以下为原始修复计划（供参考）：
+
 两个 fabric 目录同步修改。
 
 ## ExchangeMenu.java — C-10

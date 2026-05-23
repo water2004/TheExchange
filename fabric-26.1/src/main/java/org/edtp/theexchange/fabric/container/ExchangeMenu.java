@@ -35,7 +35,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
     private final String serverName;
     private final boolean local;
     private volatile boolean online;
-    private boolean refreshing;
+    private volatile boolean refreshing;
 
     public ExchangeMenu(int containerId, Inventory playerInventory,
                          ExchangeViewState state) {
@@ -119,16 +119,23 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         var future = local
                 ? core.openLocalViewAsync(serverName)
                 : core.openRemoteViewAsync(serverName);
-        future.whenComplete((state, error) -> core.getApi().runOnMainThread(() -> {
+        future.whenComplete((state, error) -> {
             try {
-                if (error != null || state == null || !isViewingServer(state.getServerName())) {
-                    return;
-                }
-                applyViewState(state);
-            } finally {
+                core.getApi().runOnMainThread(() -> {
+                    try {
+                        if (error != null || state == null || !isViewingServer(state.getServerName())) {
+                            return;
+                        }
+                        applyViewState(state);
+                    } finally {
+                        refreshing = false;
+                    }
+                });
+            } catch (RuntimeException e) {
                 refreshing = false;
+                throw e;
             }
-        }));
+        });
     }
 
     private void applyViewState(ExchangeViewState state) {
@@ -342,7 +349,8 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized()) return;
 
-        ItemStack inFlight = removeSourceStack(decision.getCount(), slotIndex, buttonNum, containerInput);
+        int putCount = decision.getItem() == null ? 0 : decision.getItem().getCount();
+        ItemStack inFlight = removeSourceStack(putCount, slotIndex, buttonNum, containerInput);
         if (inFlight.isEmpty()) {
             player.sendSystemMessage(Component.literal("物品已变化，请重试"));
             refreshFromCache();
@@ -350,7 +358,8 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         }
 
         NeutralItem item = neutralFromStack(inFlight);
-        core.swapRemoteAsync(serverName, decision.getTargetSlot(), item, playerContext(player))
+        core.swapRemoteAsync(serverName, decision.getTargetSlot(), item,
+                        decision.getExpectedItemId(), decision.getCount(), playerContext(player))
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
                         giveOrDrop(player, inFlight);

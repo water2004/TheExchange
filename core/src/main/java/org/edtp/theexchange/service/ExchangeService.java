@@ -148,6 +148,8 @@ public class ExchangeService {
 
     public CompletableFuture<SwapResult> swapItemAsync(String serverName, int slot,
                                                        NeutralItem newItem,
+                                                       String expectedItemId,
+                                                       int takeCount,
                                                        String playerUuid, String playerName) {
         if (networkManager == null) {
             return CompletableFuture.completedFuture(SwapResult.fail("网络功能未启用，请检查端口配置"));
@@ -172,7 +174,7 @@ public class ExchangeService {
         int expectedVersion = cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
         String requestId = UUID.randomUUID().toString();
         SwapItemRequest request = new SwapItemRequest(slot, newItem, expectedVersion,
-                expected.getItemId(), expected.getCount(), requestId, playerUuid, playerName);
+                expectedItemId, takeCount, requestId, playerUuid, playerName);
 
         long opGeneration = runtimeHooks.currentGeneration();
         return conn.<SwapItemResponse>sendAsync(
