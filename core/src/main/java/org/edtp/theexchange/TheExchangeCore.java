@@ -244,6 +244,19 @@ public class TheExchangeCore {
                         : ExchangeMutationResult.fail(result.getFailReason()));
     }
 
+    public CompletableFuture<ExchangeMutationResult> swapRemoteAsync(String serverName, int slot,
+                                                                     NeutralItem item,
+                                                                     PlayerExchangeContext player) {
+        long opGeneration = generation.get();
+        return submit(() -> exchangeService.swapItemAsync(
+                        serverName, slot, item, player.uuid(), player.name()))
+                .thenCompose(future -> future)
+                .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
+                .thenApply(result -> result.isSuccess()
+                        ? ExchangeMutationResult.success(result.getTakenItem())
+                        : ExchangeMutationResult.fail(result.getFailReason()));
+    }
+
     public CompletableFuture<ExchangeAPI.RuntimeConfig> reloadConfigAsync() {
         if (shuttingDown) {
             return CompletableFuture.failedFuture(new IllegalStateException("TheExchange core is shutting down"));

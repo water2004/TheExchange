@@ -336,6 +336,50 @@ public abstract class AbstractSlotInventoryCache {
         }
     }
 
+    protected final Result swapSlot(int slot, NeutralItem newItem, String expectedItemId,
+                                    int expectedVersion, int takeCount) {
+        if (slot < 0) {
+            return Result.fail("INVALID_SLOT");
+        }
+        SlotState state = stateForRead(slot);
+        if (state == null) {
+            return Result.fail("INVALID_SLOT");
+        }
+        state.lock.lock();
+        try {
+            touch();
+            NeutralItem current = state.item;
+            if (current == null || current.isEmpty()) {
+                return Result.fail("ITEM_NOT_FOUND");
+            }
+            if (state.version != expectedVersion) {
+                return Result.fail("VERSION_MISMATCH");
+            }
+            if (!Objects.equals(current.getItemId(), expectedItemId)) {
+                return Result.fail("ITEM_MISMATCH");
+            }
+            if (current.isIncompatible() || newItem == null || newItem.isEmpty() || newItem.isIncompatible()) {
+                return Result.fail("INCOMPATIBLE");
+            }
+            if (takeCount <= 0 || current.getCount() != takeCount) {
+                return Result.fail("INSUFFICIENT");
+            }
+            NeutralItem taken = current.copy();
+            taken.setCount(takeCount);
+            int newVersion = state.version + 1;
+            NeutralItem stored = copyOf(newItem);
+            stored.setVersion(newVersion);
+            state.item = stored;
+            state.version = newVersion;
+            markDirty(state);
+            onMutated();
+            taken.setVersion(newVersion);
+            return Result.success(taken, newVersion);
+        } finally {
+            state.lock.unlock();
+        }
+    }
+
     protected final void setSlotExact(int slot, NeutralItem item, int version) {
         if (slot < 0) {
             return;

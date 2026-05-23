@@ -90,6 +90,10 @@ public class MenuInteractionService {
             if (input.getHotbarItem().isIncompatible()) {
                 return ExchangeInteractionResult.reject("不兼容物品禁止操作");
             }
+            if (!isEmpty(remote)) {
+                return ExchangeInteractionResult.swapRemote(input.getSlotIndex(),
+                        input.getHotbarItem(), input.getHotbarItem().getCount());
+            }
             int targetSlot = findTargetSlot(input);
             if (targetSlot < 0) {
                 return ExchangeInteractionResult.reject("共享空间已满");

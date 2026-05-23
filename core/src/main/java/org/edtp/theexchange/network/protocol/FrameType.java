@@ -24,6 +24,8 @@ public enum FrameType {
     PUT_ITEM_RESPONSE((short) 0x0021),
     TAKE_ITEM((short) 0x0022),
     TAKE_ITEM_RESPONSE((short) 0x0023),
+    SWAP_ITEM((short) 0x0024),
+    SWAP_ITEM_RESPONSE((short) 0x0025),
     PUSH_UPDATE((short) 0x0030),
     ERROR((short) 0xFFFF);
 

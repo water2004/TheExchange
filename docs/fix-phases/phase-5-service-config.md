@@ -1,5 +1,18 @@
 # Phase 5：service 层 + config
 
+> **状态：已完成。** 所有修改项已在当前代码中实现，无需额外操作。
+
+以下为已验证的修复清单：
+
+- ✅ S-7: `handleRemotePutLocked`/`handleRemoteTakeLocked`/`handleRemoteSwapLocked` catch 块只返回 `"INTERNAL_ERROR"`，异常详情仅本地记录
+- ✅ C-14: `PutItemRequest` 已移除 `remoteVersion` 死字段，构造函数和 MessageCodec 编解码均已对齐
+- ✅ C-4: SWAP_ITEM 协议完整实现（FrameType 0x0024/0x0025、SwapItemRequest/Response、handleRemoteSwapLocked 原子交换、decideSwap 返回 SWAP_REMOTE）
+- ✅ S-4: `show()` 和 `get()` 对 `.password` 路径返回 `"***"` 遮盖
+
+---
+
+以下为原始修复计划（供参考）：
+
 ## ExchangeService.java — S-7, C-14
 
 **S-7**: `handleRemotePutLocked` 和 `handleRemoteTakeLocked` 的 catch 分支：

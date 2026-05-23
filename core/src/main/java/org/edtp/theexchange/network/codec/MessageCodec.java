@@ -39,6 +39,8 @@ public final class MessageCodec {
             else if (msg instanceof PutItemResponse m) encodePutItemResponse(out, m);
             else if (msg instanceof TakeItemRequest m) encodeTakeItemRequest(out, m);
             else if (msg instanceof TakeItemResponse m) encodeTakeItemResponse(out, m);
+            else if (msg instanceof SwapItemRequest m) encodeSwapItemRequest(out, m);
+            else if (msg instanceof SwapItemResponse m) encodeSwapItemResponse(out, m);
             else if (msg instanceof PushUpdate m) encodePushUpdate(out, m);
             else if (msg instanceof ErrorMessage m) encodeError(out, m);
             else throw new IllegalArgumentException("Unknown message type: " + msg.getClass());
@@ -72,6 +74,8 @@ public final class MessageCodec {
                 case PUT_ITEM_RESPONSE -> decodePutItemResponse(in);
                 case TAKE_ITEM -> decodeTakeItemRequest(in);
                 case TAKE_ITEM_RESPONSE -> decodeTakeItemResponse(in);
+                case SWAP_ITEM -> decodeSwapItemRequest(in);
+                case SWAP_ITEM_RESPONSE -> decodeSwapItemResponse(in);
                 case PUSH_UPDATE -> decodePushUpdate(in);
                 case ERROR -> decodeError(in);
             };
@@ -194,7 +198,6 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
-        out.writeInt(m.getRemoteVersion());
     }
 
     private static void encodePutItemResponse(DataOutputStream out, PutItemResponse m) throws IOException {
@@ -204,7 +207,6 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getFailReason());
         out.writeLong(m.getNewTimestamp());
         out.writeInt(m.getNewVersion());
-        out.writeInt(m.getRemoteVersion());
         BinaryIO.writeString(out, m.getRequestId());
     }
 
@@ -216,7 +218,6 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
-        out.writeInt(m.getRemoteVersion());
     }
 
     private static void encodeTakeItemResponse(DataOutputStream out, TakeItemResponse m) throws IOException {
@@ -226,8 +227,28 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getFailReason());
         out.writeLong(m.getNewTimestamp());
         out.writeInt(m.getNewVersion());
-        out.writeInt(m.getRemoteVersion());
         BinaryIO.writeNullableNeutralItem(out, m.getItemsToGive());
+        BinaryIO.writeString(out, m.getRequestId());
+    }
+
+    private static void encodeSwapItemRequest(DataOutputStream out, SwapItemRequest m) throws IOException {
+        out.writeInt(m.getSlot());
+        BinaryIO.writeNullableNeutralItem(out, m.getNewItem());
+        out.writeInt(m.getExpectedVersion());
+        BinaryIO.writeString(out, m.getExpectedItemId());
+        out.writeInt(m.getTakeCount());
+        BinaryIO.writeString(out, m.getRequestId());
+        BinaryIO.writeString(out, m.getPlayerUuid());
+        BinaryIO.writeString(out, m.getPlayerName());
+    }
+
+    private static void encodeSwapItemResponse(DataOutputStream out, SwapItemResponse m) throws IOException {
+        out.writeBoolean(m.isSuccess());
+        out.writeInt(m.getSlot());
+        BinaryIO.writeNullableNeutralItem(out, m.getCurrentItem());
+        BinaryIO.writeNullableNeutralItem(out, m.getTakenItem());
+        out.writeInt(m.getNewVersion());
+        BinaryIO.writeString(out, m.getFailReason());
         BinaryIO.writeString(out, m.getRequestId());
     }
 
@@ -343,7 +364,6 @@ public final class MessageCodec {
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));
-        request.setRemoteVersion(in.readInt());
         return request;
     }
 
@@ -355,7 +375,6 @@ public final class MessageCodec {
         response.setFailReason(BinaryIO.readString(in));
         response.setNewTimestamp(in.readLong());
         response.setNewVersion(in.readInt());
-        response.setRemoteVersion(in.readInt());
         response.setRequestId(BinaryIO.readString(in));
         return response;
     }
@@ -369,7 +388,6 @@ public final class MessageCodec {
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));
-        request.setRemoteVersion(in.readInt());
         return request;
     }
 
@@ -381,8 +399,32 @@ public final class MessageCodec {
         response.setFailReason(BinaryIO.readString(in));
         response.setNewTimestamp(in.readLong());
         response.setNewVersion(in.readInt());
-        response.setRemoteVersion(in.readInt());
         response.setItemsToGive(BinaryIO.readNullableNeutralItem(in));
+        response.setRequestId(BinaryIO.readString(in));
+        return response;
+    }
+
+    private static SwapItemRequest decodeSwapItemRequest(DataInputStream in) throws IOException {
+        SwapItemRequest request = new SwapItemRequest();
+        request.setSlot(in.readInt());
+        request.setNewItem(BinaryIO.readNullableNeutralItem(in));
+        request.setExpectedVersion(in.readInt());
+        request.setExpectedItemId(BinaryIO.readString(in));
+        request.setTakeCount(in.readInt());
+        request.setRequestId(BinaryIO.readString(in));
+        request.setPlayerUuid(BinaryIO.readString(in));
+        request.setPlayerName(BinaryIO.readString(in));
+        return request;
+    }
+
+    private static SwapItemResponse decodeSwapItemResponse(DataInputStream in) throws IOException {
+        SwapItemResponse response = new SwapItemResponse();
+        response.setSuccess(in.readBoolean());
+        response.setSlot(in.readInt());
+        response.setCurrentItem(BinaryIO.readNullableNeutralItem(in));
+        response.setTakenItem(BinaryIO.readNullableNeutralItem(in));
+        response.setNewVersion(in.readInt());
+        response.setFailReason(BinaryIO.readString(in));
         response.setRequestId(BinaryIO.readString(in));
         return response;
     }

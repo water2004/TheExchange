@@ -7,6 +7,7 @@ public class ExchangeInteractionResult {
         REFRESH,
         PUT_REMOTE,
         TAKE_REMOTE,
+        SWAP_REMOTE,
         LOCAL_APPLY
     }
 
@@ -43,6 +44,10 @@ public class ExchangeInteractionResult {
 
     public static ExchangeInteractionResult takeRemote(int slot, int count) {
         return new ExchangeInteractionResult(Action.TAKE_REMOTE, null, slot, count, null);
+    }
+
+    public static ExchangeInteractionResult swapRemote(int slot, NeutralItem item, int count) {
+        return new ExchangeInteractionResult(Action.SWAP_REMOTE, null, slot, count, item);
     }
 
     public static ExchangeInteractionResult localApply() {

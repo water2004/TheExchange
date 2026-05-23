@@ -2,30 +2,26 @@ package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
 
-public class PutItemResponse implements CorrelatedMessage {
+public class SwapItemResponse implements CorrelatedMessage {
     private boolean success;
     private int slot;
     private NeutralItem currentItem;
-    private String failReason;
-    private long newTimestamp;
+    private NeutralItem takenItem;
     private int newVersion;
+    private String failReason;
     private String requestId;
 
-    public PutItemResponse() {}
+    public SwapItemResponse() {}
 
-    public PutItemResponse(boolean success, int slot, NeutralItem currentItem,
-                           String failReason, long newTimestamp, int newVersion) {
-        this(success, slot, currentItem, failReason, newTimestamp, newVersion, null);
-    }
-
-    public PutItemResponse(boolean success, int slot, NeutralItem currentItem,
-                           String failReason, long newTimestamp, int newVersion, String requestId) {
+    public SwapItemResponse(boolean success, int slot, NeutralItem currentItem,
+                            NeutralItem takenItem, int newVersion,
+                            String failReason, String requestId) {
         this.success = success;
         this.slot = slot;
         this.currentItem = currentItem;
-        this.failReason = failReason;
-        this.newTimestamp = newTimestamp;
+        this.takenItem = takenItem;
         this.newVersion = newVersion;
+        this.failReason = failReason;
         this.requestId = requestId;
     }
 
@@ -38,14 +34,14 @@ public class PutItemResponse implements CorrelatedMessage {
     public NeutralItem getCurrentItem() { return currentItem; }
     public void setCurrentItem(NeutralItem currentItem) { this.currentItem = currentItem; }
 
-    public String getFailReason() { return failReason; }
-    public void setFailReason(String failReason) { this.failReason = failReason; }
-
-    public long getNewTimestamp() { return newTimestamp; }
-    public void setNewTimestamp(long newTimestamp) { this.newTimestamp = newTimestamp; }
+    public NeutralItem getTakenItem() { return takenItem; }
+    public void setTakenItem(NeutralItem takenItem) { this.takenItem = takenItem; }
 
     public int getNewVersion() { return newVersion; }
     public void setNewVersion(int newVersion) { this.newVersion = newVersion; }
+
+    public String getFailReason() { return failReason; }
+    public void setFailReason(String failReason) { this.failReason = failReason; }
 
     @Override
     public String getRequestId() { return requestId; }

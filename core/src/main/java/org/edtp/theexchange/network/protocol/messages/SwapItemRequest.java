@@ -2,25 +2,26 @@ package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
 
-public class PutItemRequest implements CorrelatedMessage {
+public class SwapItemRequest implements CorrelatedMessage {
     private int slot;
-    private NeutralItem item;
+    private NeutralItem newItem;
     private int expectedVersion;
+    private String expectedItemId;
+    private int takeCount;
     private String requestId;
     private String playerUuid;
     private String playerName;
 
-    public PutItemRequest() {}
+    public SwapItemRequest() {}
 
-    public PutItemRequest(int slot, NeutralItem item, String requestId, String playerUuid, String playerName) {
-        this(slot, item, 0, requestId, playerUuid, playerName);
-    }
-
-    public PutItemRequest(int slot, NeutralItem item, int expectedVersion,
-                          String requestId, String playerUuid, String playerName) {
+    public SwapItemRequest(int slot, NeutralItem newItem, int expectedVersion,
+                           String expectedItemId, int takeCount, String requestId,
+                           String playerUuid, String playerName) {
         this.slot = slot;
-        this.item = item;
+        this.newItem = newItem;
         this.expectedVersion = expectedVersion;
+        this.expectedItemId = expectedItemId;
+        this.takeCount = takeCount;
         this.requestId = requestId;
         this.playerUuid = playerUuid;
         this.playerName = playerName;
@@ -29,13 +30,22 @@ public class PutItemRequest implements CorrelatedMessage {
     public int getSlot() { return slot; }
     public void setSlot(int slot) { this.slot = slot; }
 
-    public NeutralItem getItem() { return item; }
-    public void setItem(NeutralItem item) { this.item = item; }
+    public NeutralItem getNewItem() { return newItem; }
+    public void setNewItem(NeutralItem newItem) { this.newItem = newItem; }
 
     public int getExpectedVersion() { return expectedVersion; }
     public void setExpectedVersion(int expectedVersion) { this.expectedVersion = expectedVersion; }
 
+    public String getExpectedItemId() { return expectedItemId; }
+    public void setExpectedItemId(String expectedItemId) { this.expectedItemId = expectedItemId; }
+
+    public int getTakeCount() { return takeCount; }
+    public void setTakeCount(int takeCount) { this.takeCount = takeCount; }
+
+    @Override
     public String getRequestId() { return requestId; }
+
+    @Override
     public void setRequestId(String requestId) { this.requestId = requestId; }
 
     public String getPlayerUuid() { return playerUuid; }

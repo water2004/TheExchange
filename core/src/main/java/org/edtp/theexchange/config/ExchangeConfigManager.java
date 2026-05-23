@@ -83,10 +83,14 @@ public final class ExchangeConfigManager {
     }
 
     public synchronized String show() {
-        return GSON.toJson(toJson(loadFileSnapshot()));
+        return GSON.toJson(maskSensitive(toJson(loadFileSnapshot())));
     }
 
     public synchronized String get(String path) {
+        if (isSensitivePath(path)) {
+            getValue(loadFileSnapshot(), path);
+            return "***";
+        }
         return valueToString(getValue(loadFileSnapshot(), path));
     }
 
@@ -242,6 +246,27 @@ public final class ExchangeConfigManager {
 
     private JsonElement getValue(ConfigData data, String path) {
         return getJsonValue(toJson(data), path);
+    }
+
+    private JsonObject maskSensitive(JsonObject root) {
+        JsonObject masked = root.deepCopy();
+        JsonElement server = masked.get("server");
+        if (server instanceof JsonObject serverObject && serverObject.has("password")) {
+            serverObject.addProperty("password", "***");
+        }
+        JsonElement remotes = masked.get("remoteServers");
+        if (remotes != null && remotes.isJsonArray()) {
+            for (JsonElement element : remotes.getAsJsonArray()) {
+                if (element instanceof JsonObject remoteObject && remoteObject.has("password")) {
+                    remoteObject.addProperty("password", "***");
+                }
+            }
+        }
+        return masked;
+    }
+
+    private boolean isSensitivePath(String path) {
+        return path != null && path.endsWith(".password");
     }
 
     private JsonElement getJsonValue(JsonObject root, String path) {

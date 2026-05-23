@@ -191,6 +191,10 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                 applyRemoteTake(decision, buttonNum, clickType, player);
                 return;
             }
+            case SWAP_REMOTE -> {
+                applyRemoteSwap(decision, slotIndex, buttonNum, clickType, player);
+                return;
+            }
         }
     }
 
@@ -325,6 +329,34 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                         player.displayClientMessage(Component.literal(error != null
                                 ? "取出失败: " + rootMessage(error)
                                 : result.getFailReason() != null ? result.getFailReason() : "取出失败"), false);
+                        refreshFromMemory();
+                        return;
+                    }
+                    applyTakenItem(result, buttonNum, clickType, player);
+                    refreshFromMemory();
+                }));
+    }
+
+    private void applyRemoteSwap(ExchangeInteractionResult decision, int slotIndex, int buttonNum,
+                                 ClickType clickType, Player player) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) return;
+
+        ItemStack inFlight = removeSourceStack(decision.getCount(), slotIndex, buttonNum, clickType);
+        if (inFlight.isEmpty()) {
+            player.displayClientMessage(Component.literal("物品已变化，请重试"), false);
+            refreshFromCache();
+            return;
+        }
+
+        NeutralItem item = neutralFromStack(inFlight);
+        core.swapRemoteAsync(serverName, decision.getTargetSlot(), item, playerContext(player))
+                .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
+                    if (error != null || result == null || !result.isSuccess()) {
+                        giveOrDrop(player, inFlight);
+                        player.displayClientMessage(Component.literal(error != null
+                                ? "交换失败: " + rootMessage(error)
+                                : result.getFailReason() != null ? result.getFailReason() : "交换失败"), false);
                         refreshFromMemory();
                         return;
                     }

@@ -47,6 +47,11 @@ public final class LocalInventoryCache extends AbstractSlotInventoryCache {
         return takeFromSlot(slot, expectedItemId, expectedVersion, requestCount);
     }
 
+    public Result swap(int slot, NeutralItem newItem, String expectedItemId,
+                       int expectedVersion, int takeCount) {
+        return swapSlot(slot, newItem, expectedItemId, expectedVersion, takeCount);
+    }
+
     public void replaceSlot(int slot, NeutralItem item) {
         setSlotIncremented(slot, item);
         lastModifiedAt = System.currentTimeMillis();

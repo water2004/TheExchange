@@ -103,6 +103,18 @@ public final class LocalInventoryCacheManager {
         return LocalItemStore.TakeResult.success(result.item(), result.newVersion());
     }
 
+    public LocalItemStore.SwapResult swap(InventoryScope scope, int slot, NeutralItem newItem,
+                                          String expectedItemId, int expectedVersion,
+                                          int takeCount, String addedBy) {
+        LocalInventoryCache cache = getOrLoad(scope);
+        LocalInventoryCache.Result result = cache.swap(slot, newItem, expectedItemId, expectedVersion, takeCount);
+        if (!result.success()) {
+            return LocalItemStore.SwapResult.fail(result.failReason());
+        }
+        scheduleFlush(scope, cache);
+        return LocalItemStore.SwapResult.success(result.item(), result.newVersion());
+    }
+
     public void replaceFromLocal(InventoryScope scope, int slot, NeutralItem item, String addedBy) {
         LocalInventoryCache cache = getOrLoad(scope);
         cache.replaceSlot(slot, item);

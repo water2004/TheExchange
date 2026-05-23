@@ -78,6 +78,19 @@ public class LocalItemStore {
         return requireCacheManager().take(scope, slot, expectedItemId, expectedVersion, requestCount);
     }
 
+    public SwapResult swapItem(int slot, NeutralItem newItem, String expectedItemId,
+                               int expectedVersion, int takeCount, String addedBy) {
+        return swapItem(InventoryScope.server(), slot, newItem, expectedItemId,
+                expectedVersion, takeCount, addedBy);
+    }
+
+    public SwapResult swapItem(InventoryScope scope, int slot, NeutralItem newItem,
+                               String expectedItemId, int expectedVersion,
+                               int takeCount, String addedBy) {
+        return requireCacheManager().swap(scope, slot, newItem, expectedItemId,
+                expectedVersion, takeCount, addedBy);
+    }
+
     public long getLastModifiedTimestamp() {
         return getLastModifiedTimestamp(InventoryScope.server());
     }
@@ -383,6 +396,21 @@ public class LocalItemStore {
 
         public boolean isSuccess() { return success; }
         public NeutralItem getItem() { return item; }
+        public String getFailReason() { return failReason; }
+        public int getNewVersion() { return newVersion; }
+    }
+
+    public record SwapResult(boolean success, NeutralItem takenItem, String failReason, int newVersion) {
+        public static SwapResult success(NeutralItem takenItem, int newVersion) {
+            return new SwapResult(true, takenItem, null, newVersion);
+        }
+
+        public static SwapResult fail(String reason) {
+            return new SwapResult(false, null, reason, -1);
+        }
+
+        public boolean isSuccess() { return success; }
+        public NeutralItem getTakenItem() { return takenItem; }
         public String getFailReason() { return failReason; }
         public int getNewVersion() { return newVersion; }
     }

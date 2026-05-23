@@ -8,18 +8,11 @@ public class TakeItemRequest implements CorrelatedMessage {
     private String requestId;
     private String playerUuid;
     private String playerName;
-    private int remoteVersion;
 
     public TakeItemRequest() {}
 
     public TakeItemRequest(int slot, String expectedItemId, int expectedVersion,
                            int requestCount, String requestId, String playerUuid, String playerName) {
-        this(slot, expectedItemId, expectedVersion, requestCount, requestId, playerUuid, playerName, 0);
-    }
-
-    public TakeItemRequest(int slot, String expectedItemId, int expectedVersion,
-                           int requestCount, String requestId, String playerUuid, String playerName,
-                           int remoteVersion) {
         this.slot = slot;
         this.expectedItemId = expectedItemId;
         this.expectedVersion = expectedVersion;
@@ -27,7 +20,6 @@ public class TakeItemRequest implements CorrelatedMessage {
         this.requestId = requestId;
         this.playerUuid = playerUuid;
         this.playerName = playerName;
-        this.remoteVersion = remoteVersion;
     }
 
     public int getSlot() { return slot; }
@@ -50,7 +42,4 @@ public class TakeItemRequest implements CorrelatedMessage {
 
     public String getPlayerName() { return playerName; }
     public void setPlayerName(String playerName) { this.playerName = playerName; }
-
-    public int getRemoteVersion() { return remoteVersion; }
-    public void setRemoteVersion(int remoteVersion) { this.remoteVersion = remoteVersion; }
 }

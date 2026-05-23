@@ -95,7 +95,7 @@ public class ExchangeService {
         int expectedVersion = cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
         String requestId = UUID.randomUUID().toString();
         PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
-                requestId, playerUuid, playerName, expectedVersion);
+                requestId, playerUuid, playerName);
         long opGeneration = runtimeHooks.currentGeneration();
         return conn.<PutItemResponse>sendAsync(
                         FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, requestTimeoutMs)
@@ -118,21 +118,13 @@ public class ExchangeService {
         }
         int expectedVersion = cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
         return takeItemAsync(serverName, slot, expected.getItemId(),
-                expectedVersion, requestCount, playerUuid, playerName, expectedVersion);
+                expectedVersion, requestCount, playerUuid, playerName);
     }
 
     public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot,
                                                        String expectedItemId, int expectedVersion,
                                                        int requestCount,
                                                        String playerUuid, String playerName) {
-        return takeItemAsync(serverName, slot, expectedItemId, expectedVersion, requestCount, playerUuid, playerName, expectedVersion);
-    }
-
-    public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot,
-                                                       String expectedItemId, int expectedVersion,
-                                                       int requestCount,
-                                                       String playerUuid, String playerName,
-                                                       int remoteVersion) {
         if (networkManager == null) {
             return CompletableFuture.completedFuture(TakeResult.fail("网络功能未启用，请检查端口配置"));
         }
@@ -143,7 +135,7 @@ public class ExchangeService {
 
         String requestId = UUID.randomUUID().toString();
         TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
-                expectedVersion, requestCount, requestId, playerUuid, playerName, remoteVersion);
+                expectedVersion, requestCount, requestId, playerUuid, playerName);
 
         long opGeneration = runtimeHooks.currentGeneration();
         return conn.<TakeItemResponse>sendAsync(
@@ -151,6 +143,43 @@ public class ExchangeService {
                 .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemoteTake(serverName, slot,
                         expectedItemId, requestCount, playerUuid, playerName,
                         requestId, response, error)))
+                .thenCompose(future -> future);
+    }
+
+    public CompletableFuture<SwapResult> swapItemAsync(String serverName, int slot,
+                                                       NeutralItem newItem,
+                                                       String playerUuid, String playerName) {
+        if (networkManager == null) {
+            return CompletableFuture.completedFuture(SwapResult.fail("网络功能未启用，请检查端口配置"));
+        }
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null) {
+            return CompletableFuture.completedFuture(SwapResult.fail("目标服务器离线"));
+        }
+        if (newItem == null || newItem.isEmpty()) {
+            return CompletableFuture.completedFuture(SwapResult.fail("物品为空"));
+        }
+        if (newItem.isIncompatible()) {
+            return CompletableFuture.completedFuture(SwapResult.fail("不兼容物品禁止操作"));
+        }
+        NeutralItem expected = cacheManager.getSlot(serverName, InventoryScope.server(), slot);
+        if (expected == null || expected.isEmpty()) {
+            return CompletableFuture.completedFuture(SwapResult.fail("物品已变化，请重试"));
+        }
+        if (expected.isIncompatible()) {
+            return CompletableFuture.completedFuture(SwapResult.fail("不兼容物品禁止操作"));
+        }
+        int expectedVersion = cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
+        String requestId = UUID.randomUUID().toString();
+        SwapItemRequest request = new SwapItemRequest(slot, newItem, expectedVersion,
+                expected.getItemId(), expected.getCount(), requestId, playerUuid, playerName);
+
+        long opGeneration = runtimeHooks.currentGeneration();
+        return conn.<SwapItemResponse>sendAsync(
+                        FrameType.SWAP_ITEM, request, FrameType.SWAP_ITEM_RESPONSE, requestTimeoutMs)
+                .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration,
+                        () -> finishRemoteSwap(serverName, slot, playerUuid, playerName,
+                                newItem, requestId, response, error)))
                 .thenCompose(future -> future);
     }
 
@@ -217,6 +246,40 @@ public class ExchangeService {
         return TakeResult.fail(response.getFailReason());
     }
 
+    private SwapResult finishRemoteSwap(String serverName, int slot, String playerUuid,
+                                        String playerName, NeutralItem newItem, String requestId,
+                                        SwapItemResponse response, Throwable error) {
+        if (error != null || response == null) {
+            operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+                    serverName, newItem.getItemId(), newItem.getCount(), false,
+                    error != null ? error.getMessage() : "TIMEOUT");
+            return SwapResult.fail("请求超时，物品已退回");
+        }
+
+        if (response.isSuccess()) {
+            if (response.getTakenItem() == null || response.getTakenItem().isEmpty()
+                    || response.getTakenItem().isIncompatible()) {
+                operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+                        serverName, newItem.getItemId(), newItem.getCount(), false, "INCOMPATIBLE");
+                debugSwap("rejectResponse", serverName, slot, newItem, requestId, response, null, null);
+                return SwapResult.fail("不兼容物品禁止操作");
+            }
+            operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+                    serverName, newItem.getItemId(), newItem.getCount(), true, null);
+            cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot,
+                    response.getCurrentItem(), response.getNewVersion());
+            redrawOpenViews(serverName);
+            return SwapResult.success(response.getTakenItem(), response.getNewVersion());
+        }
+
+        operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+                serverName, newItem.getItemId(), newItem.getCount(), false, response.getFailReason());
+        cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot,
+                response.getCurrentItem(), response.getNewVersion());
+        redrawOpenViews(serverName);
+        return SwapResult.fail(response.getFailReason());
+    }
+
     public PutItemResponse handleRemotePut(PutItemRequest request) {
         ReentrantLock slotLock = localSlotLock(request.getSlot());
         slotLock.lock();
@@ -234,7 +297,6 @@ public class ExchangeService {
             return new PutItemResponse(existing.success(), request.getSlot(),
                     r != null ? r.item() : null,
                     existing.failReason(), localItemStore.getLastModifiedTimestamp(),
-                    r != null ? r.version() : 0,
                     r != null ? r.version() : 0,
                     request.getRequestId());
         }
@@ -261,7 +323,6 @@ public class ExchangeService {
                         after != null ? after.item() : result.getItem(),
                         null, timestamp,
                         after != null ? after.version() : result.getNewVersion(),
-                        after != null ? after.version() : result.getNewVersion(),
                         request.getRequestId());
             }
 
@@ -273,7 +334,6 @@ public class ExchangeService {
                     current != null ? current.item() : null,
                     result.getFailReason(), localItemStore.getLastModifiedTimestamp(),
                     current != null ? current.version() : 0,
-                    current != null ? current.version() : 0,
                     request.getRequestId());
         } catch (Exception e) {
             debugPut("exception", request, request.getItem(), null, null, e);
@@ -282,7 +342,7 @@ public class ExchangeService {
                     "local", request.getItem().getItemId(), request.getItem().getCount(),
                     false, e.getMessage());
             return new PutItemResponse(false, request.getSlot(), null,
-                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0, 0, request.getRequestId());
+                    "INTERNAL_ERROR", 0, 0, request.getRequestId());
         }
     }
 
@@ -304,7 +364,7 @@ public class ExchangeService {
                         r != null ? r.item() : null,
                         existing.failReason(), localItemStore.getLastModifiedTimestamp(),
                         r != null ? r.version() : 0,
-                        r != null ? r.version() : 0, null, request.getRequestId());
+                        null, request.getRequestId());
         }
 
         try {
@@ -319,7 +379,7 @@ public class ExchangeService {
                 return new TakeItemResponse(false, request.getSlot(), null,
                         "ITEM_NOT_FOUND", localItemStore.getLastModifiedTimestamp(),
                         before != null ? before.version() : 0,
-                        before != null ? before.version() : 0, null, request.getRequestId());
+                        null, request.getRequestId());
             }
             if (before.item().isIncompatible()) {
                 debugTake("rejectIncompatible", "local", request.getSlot(), request.getExpectedItemId(),
@@ -329,7 +389,7 @@ public class ExchangeService {
                         "local", request.getExpectedItemId(), request.getRequestCount(),
                         false, "INCOMPATIBLE");
                 return new TakeItemResponse(false, request.getSlot(), before.item(),
-                        "INCOMPATIBLE", localItemStore.getLastModifiedTimestamp(), before.version(), before.version(), null,
+                        "INCOMPATIBLE", localItemStore.getLastModifiedTimestamp(), before.version(), null,
                         request.getRequestId());
             }
             LocalItemStore.TakeResult result = localItemStore.takeItem(
@@ -351,7 +411,6 @@ public class ExchangeService {
                         updated != null ? updated.item() : null,
                         null, timestamp,
                         updated != null ? updated.version() : result.getNewVersion(),
-                        updated != null ? updated.version() : result.getNewVersion(),
                         result.getItem(), request.getRequestId());
             } else {
                 operationLogger.log(request.getRequestId(), OperationType.TAKE,
@@ -364,21 +423,132 @@ public class ExchangeService {
                         r != null ? r.item() : null,
                         result.getFailReason(), localItemStore.getLastModifiedTimestamp(),
                         r != null ? r.version() : 0,
-                        r != null ? r.version() : 0, null, request.getRequestId());
+                        null, request.getRequestId());
             }
         } catch (Exception e) {
+            debugTake("exception", "local", request.getSlot(), request.getExpectedItemId(),
+                    request.getRequestCount(), request.getRequestId(), null, null, null, e);
             operationLogger.log(request.getRequestId(), OperationType.TAKE,
                     request.getPlayerUuid(), request.getPlayerName(),
                     "local", request.getExpectedItemId(), request.getRequestCount(),
                     false, e.getMessage());
             return new TakeItemResponse(false, request.getSlot(), null,
-                    "INTERNAL_ERROR: " + e.getMessage(), 0, 0, 0, null, request.getRequestId());
+                    "INTERNAL_ERROR", 0, 0, null, request.getRequestId());
+        }
+    }
+
+    public SwapItemResponse handleRemoteSwap(SwapItemRequest request) {
+        ReentrantLock slotLock = localSlotLock(request.getSlot());
+        slotLock.lock();
+        try {
+            return handleRemoteSwapLocked(request);
+        } finally {
+            slotLock.unlock();
+        }
+    }
+
+    private SwapItemResponse handleRemoteSwapLocked(SwapItemRequest request) {
+        OperationLogger.LogEntry existing = operationLogger.findByRequestId(request.getRequestId());
+        if (existing != null) {
+            LocalItemStore.ItemRecord r = localItemStore.getItem(request.getSlot());
+            return new SwapItemResponse(existing.success(), request.getSlot(),
+                    r != null ? r.item() : null,
+                    null,
+                    r != null ? r.version() : 0,
+                    existing.failReason(),
+                    request.getRequestId());
+        }
+
+        try {
+            NeutralItem newItem = request.getNewItem();
+            LocalItemStore.ItemRecord before = localItemStore.getItem(request.getSlot());
+            debugSwap("incoming", "local", request.getSlot(), newItem,
+                    request.getRequestId(), null, before, null);
+            compatibilityChecker.checkAndMark(newItem);
+            if (newItem == null || newItem.isEmpty() || newItem.isIncompatible()) {
+                operationLogger.log(request.getRequestId(), OperationType.SWAP,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", newItem != null ? newItem.getItemId() : null,
+                        newItem != null ? newItem.getCount() : 0,
+                        false, "INCOMPATIBLE");
+                return new SwapItemResponse(false, request.getSlot(),
+                        before != null ? before.item() : null,
+                        null,
+                        before != null ? before.version() : 0,
+                        "INCOMPATIBLE", request.getRequestId());
+            }
+            if (before == null || before.item() == null || before.item().isEmpty()) {
+                operationLogger.log(request.getRequestId(), OperationType.SWAP,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", newItem.getItemId(), newItem.getCount(),
+                        false, "ITEM_NOT_FOUND");
+                return new SwapItemResponse(false, request.getSlot(), null, null, 0,
+                        "ITEM_NOT_FOUND", request.getRequestId());
+            }
+            if (before.item().isIncompatible()) {
+                debugSwap("rejectIncompatible", "local", request.getSlot(), newItem,
+                        request.getRequestId(), null, before, null);
+                operationLogger.log(request.getRequestId(), OperationType.SWAP,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", newItem.getItemId(), newItem.getCount(),
+                        false, "INCOMPATIBLE");
+                return new SwapItemResponse(false, request.getSlot(), before.item(), null,
+                        before.version(), "INCOMPATIBLE", request.getRequestId());
+            }
+
+            LocalItemStore.SwapResult result = localItemStore.swapItem(request.getSlot(), newItem,
+                    request.getExpectedItemId(), request.getExpectedVersion(),
+                    request.getTakeCount(), request.getPlayerUuid());
+            LocalItemStore.ItemRecord after = localItemStore.getItem(request.getSlot());
+            debugSwap("storeResult", "local", request.getSlot(), newItem,
+                    request.getRequestId(), null, after, result);
+
+            if (result.isSuccess()) {
+                operationLogger.log(request.getRequestId(), OperationType.SWAP,
+                        request.getPlayerUuid(), request.getPlayerName(),
+                        "local", newItem.getItemId(), newItem.getCount(),
+                        true, null);
+                return new SwapItemResponse(true, request.getSlot(),
+                        after != null ? after.item() : newItem,
+                        result.getTakenItem(),
+                        after != null ? after.version() : result.getNewVersion(),
+                        null, request.getRequestId());
+            }
+
+            operationLogger.log(request.getRequestId(), OperationType.SWAP,
+                    request.getPlayerUuid(), request.getPlayerName(),
+                    "local", newItem.getItemId(), newItem.getCount(),
+                    false, result.getFailReason());
+            LocalItemStore.ItemRecord current = localItemStore.getItem(request.getSlot());
+            return new SwapItemResponse(false, request.getSlot(),
+                    current != null ? current.item() : null,
+                    null,
+                    current != null ? current.version() : 0,
+                    result.getFailReason(), request.getRequestId());
+        } catch (Exception e) {
+            debugSwap("exception", "local", request.getSlot(), request.getNewItem(),
+                    request.getRequestId(), null, null, null, e);
+            operationLogger.log(request.getRequestId(), OperationType.SWAP,
+                    request.getPlayerUuid(), request.getPlayerName(),
+                    "local",
+                    request.getNewItem() != null ? request.getNewItem().getItemId() : null,
+                    request.getNewItem() != null ? request.getNewItem().getCount() : 0,
+                    false, e.getMessage());
+            return new SwapItemResponse(false, request.getSlot(), null, null, 0,
+                    "INTERNAL_ERROR", request.getRequestId());
         }
     }
 
     private void debugTake(String stage, String serverName, int slot, String expectedItemId,
                            int requestCount, String requestId, TakeItemResponse response,
                            LocalItemStore.ItemRecord existing, LocalItemStore.TakeResult result) {
+        debugTake(stage, serverName, slot, expectedItemId, requestCount, requestId, response, existing, result, null);
+    }
+
+    private void debugTake(String stage, String serverName, int slot, String expectedItemId,
+                           int requestCount, String requestId, TakeItemResponse response,
+                           LocalItemStore.ItemRecord existing, LocalItemStore.TakeResult result,
+                           Throwable error) {
         ExchangeAPI.Logger logger = runtimeHooks.logger();
         if (logger == null) {
             return;
@@ -405,6 +575,53 @@ public class ExchangeService {
                     .append(" failReason=").append(result.getFailReason())
                     .append(" taken=").append(describeItem(result.getItem()))
                     .append(" newVersion=").append(result.getNewVersion());
+        }
+        if (error != null) {
+            sb.append(" error=").append(error.getClass().getSimpleName())
+                    .append(": ").append(error.getMessage());
+        }
+        logger.info(sb.toString());
+    }
+
+    private void debugSwap(String stage, String serverName, int slot, NeutralItem newItem,
+                           String requestId, SwapItemResponse response,
+                           LocalItemStore.ItemRecord existing, LocalItemStore.SwapResult result) {
+        debugSwap(stage, serverName, slot, newItem, requestId, response, existing, result, null);
+    }
+
+    private void debugSwap(String stage, String serverName, int slot, NeutralItem newItem,
+                           String requestId, SwapItemResponse response,
+                           LocalItemStore.ItemRecord existing, LocalItemStore.SwapResult result,
+                           Throwable error) {
+        ExchangeAPI.Logger logger = runtimeHooks.logger();
+        if (logger == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("[Exchange|Debug][SWAP][").append(stage).append("] ")
+                .append("server=").append(serverName)
+                .append(" slot=").append(slot)
+                .append(" reqId=").append(requestId)
+                .append(" newItem=").append(describeItem(newItem));
+        if (existing != null) {
+            sb.append(" existing=").append(describeRecord(existing));
+        }
+        if (response != null) {
+            sb.append(" responseSuccess=").append(response.isSuccess())
+                    .append(" failReason=").append(response.getFailReason())
+                    .append(" current=").append(describeItem(response.getCurrentItem()))
+                    .append(" taken=").append(describeItem(response.getTakenItem()))
+                    .append(" newVersion=").append(response.getNewVersion());
+        }
+        if (result != null) {
+            sb.append(" resultSuccess=").append(result.isSuccess())
+                    .append(" failReason=").append(result.getFailReason())
+                    .append(" taken=").append(describeItem(result.getTakenItem()))
+                    .append(" newVersion=").append(result.getNewVersion());
+        }
+        if (error != null) {
+            sb.append(" error=").append(error.getClass().getSimpleName())
+                    .append(": ").append(error.getMessage());
         }
         logger.info(sb.toString());
     }
@@ -517,6 +734,15 @@ public class ExchangeService {
                     refreshOpenViews(sourceServerName(conn));
                 }
             }
+            case SWAP_ITEM -> {
+                SwapItemResponse resp = handleRemoteSwap((SwapItemRequest) message);
+                conn.send(FrameType.SWAP_ITEM_RESPONSE, resp);
+                if (resp.isSuccess()) {
+                    broadcastInventoryUpdate(conn, List.of(((SwapItemRequest) message).getSlot()),
+                            localItemStore.getLastModifiedTimestamp());
+                    refreshOpenViews(sourceServerName(conn));
+                }
+            }
             case PUSH_UPDATE -> {
                 PushUpdate update = (PushUpdate) message;
                 if (update == null) return;
@@ -623,6 +849,33 @@ public class ExchangeService {
         public boolean isSuccess() { return success; }
         public String getFailReason() { return failReason; }
         public NeutralItem getItemsToGive() { return itemsToGive; }
+        public int getNewVersion() { return newVersion; }
+    }
+
+    public static class SwapResult {
+        private final boolean success;
+        private final String failReason;
+        private final NeutralItem takenItem;
+        private final int newVersion;
+
+        private SwapResult(boolean success, String failReason, NeutralItem takenItem, int newVersion) {
+            this.success = success;
+            this.failReason = failReason;
+            this.takenItem = takenItem;
+            this.newVersion = newVersion;
+        }
+
+        public static SwapResult success(NeutralItem takenItem, int newVersion) {
+            return new SwapResult(true, null, takenItem, newVersion);
+        }
+
+        public static SwapResult fail(String reason) {
+            return new SwapResult(false, reason, null, -1);
+        }
+
+        public boolean isSuccess() { return success; }
+        public String getFailReason() { return failReason; }
+        public NeutralItem getTakenItem() { return takenItem; }
         public int getNewVersion() { return newVersion; }
     }
 }
