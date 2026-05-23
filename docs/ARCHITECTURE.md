@@ -560,21 +560,20 @@ scheduleReconnect(server)
 
 ```
 1. touchesIncompatibleItem() → REJECT
-2. isLocal() → LOCAL_APPLY (走原版 super.clicked)
-3. !touchesExchangeSpace() → PASS_TO_LOADER (原版处理)
-4. !isOnline() → REFRESH ("目标服务器离线")
-5. QUICK_MOVE → decideQuickMove
+2. !touchesExchangeSpace() → PASS_TO_LOADER (原版处理)
+3. !isOnline() → REFRESH ("目标服务器离线")
+4. QUICK_MOVE → decideQuickMove
    └→ 从交换空间拖: TAKE_REMOTE
      从背包拖: PUT_REMOTE (含 findTargetSlot 找空槽/合并)
-6. PICKUP → decidePickup
+5. PICKUP → decidePickup
    └→ 空手点: TAKE_REMOTE (button=1 取一半)
      手上有点: PUT_REMOTE (都放或放 1 个)
-7. SWAP → decideSwap
+6. SWAP → decideSwap
    └→ 快捷栏有物: PUT_REMOTE, 空手取: TAKE_REMOTE
-8. 其他 (QUICK_CRAFT/PICKUP_ALL/THROW/CLONE) → REFRESH ("暂不支持")
+7. 其他 (QUICK_CRAFT/PICKUP_ALL/THROW/CLONE) → REFRESH ("暂不支持")
 ```
 
-本地模式: 先拍快照 → `super.clicked()` 原版处理 → 再拍快照 → 比对差异 → `applyLocalSnapshotAsync()` → `publishLocalInventoryUpdate()` 广播。
+本地模式不再走容器快照同步。菜单层对本地和远端都产出同一类 `PUT_REMOTE` / `TAKE_REMOTE` / `SWAP_REMOTE` 操作；core 对本地目标使用进程内 loopback，构造同样的 request 并进入 `handleRemotePut/Take/Swap`，因此本地也经过版本检查、slot lock、幂等记录、兼容性检查和统一刷新/广播。
 
 # 9. 配置管理
 
