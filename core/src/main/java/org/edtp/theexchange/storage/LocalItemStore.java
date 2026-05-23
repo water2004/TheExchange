@@ -60,14 +60,6 @@ public class LocalItemStore {
         return requireCacheManager().put(scope, slot, item, expectedVersion, addedBy);
     }
 
-    public void replaceSlotFromLocal(int slot, NeutralItem item, String addedBy) {
-        replaceSlotFromLocal(InventoryScope.server(), slot, item, addedBy);
-    }
-
-    public void replaceSlotFromLocal(InventoryScope scope, int slot, NeutralItem item, String addedBy) {
-        requireCacheManager().replaceFromLocal(scope, slot, item, addedBy);
-    }
-
     public TakeResult takeItem(int slot, String expectedItemId, int expectedVersion,
                                int requestCount) {
         return takeItem(InventoryScope.server(), slot, expectedItemId, expectedVersion, requestCount);

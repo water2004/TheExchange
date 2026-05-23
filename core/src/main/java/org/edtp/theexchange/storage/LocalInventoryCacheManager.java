@@ -115,12 +115,6 @@ public final class LocalInventoryCacheManager {
         return LocalItemStore.SwapResult.success(result.item(), result.newVersion());
     }
 
-    public void replaceFromLocal(InventoryScope scope, int slot, NeutralItem item, String addedBy) {
-        LocalInventoryCache cache = getOrLoad(scope);
-        cache.replaceSlot(slot, item);
-        scheduleFlush(scope, cache);
-    }
-
     public void flushAll() {
         List<Map.Entry<InventoryScope, LocalInventoryCache>> entries;
         lock.lock();

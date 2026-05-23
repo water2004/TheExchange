@@ -52,11 +52,6 @@ public final class LocalInventoryCache extends AbstractSlotInventoryCache {
         return swapSlot(slot, newItem, expectedItemId, expectedVersion, takeCount);
     }
 
-    public void replaceSlot(int slot, NeutralItem item) {
-        setSlotIncremented(slot, item);
-        lastModifiedAt = System.currentTimeMillis();
-    }
-
     @Override
     protected long metadataAt() {
         return lastModifiedAt;

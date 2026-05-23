@@ -403,30 +403,6 @@ public abstract class AbstractSlotInventoryCache {
         }
     }
 
-    protected final void setSlotIncremented(int slot, NeutralItem item) {
-        if (slot < 0) {
-            return;
-        }
-        SlotState state = stateForWrite(slot);
-        if (state == null) {
-            return;
-        }
-        state.lock.lock();
-        try {
-            touch();
-            int newVersion = state.version + 1;
-            state.item = copyOf(item);
-            if (state.item != null) {
-                state.item.setVersion(newVersion);
-            }
-            state.version = newVersion;
-            markDirty(state);
-            onMutated();
-        } finally {
-            state.lock.unlock();
-        }
-    }
-
     protected final SlotState stateForRead(int slot) {
         if (slot < 0) {
             return null;

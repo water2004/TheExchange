@@ -212,12 +212,6 @@ public class TheExchangeCore {
         return future.thenCompose(inner -> inner);
     }
 
-    public CompletableFuture<Void> applyLocalSnapshotAsync(List<NeutralItem> before,
-                                                           List<NeutralItem> after,
-                                                           PlayerExchangeContext player) {
-        return executeCore(() -> menuInteractionService.applyLocalSnapshot(before, after, player));
-    }
-
     public CompletableFuture<ExchangeMutationResult> putRemoteAsync(String serverName, int slot,
                                                                     NeutralItem item,
                                                                     PlayerExchangeContext player) {
@@ -427,7 +421,7 @@ public class TheExchangeCore {
         ExchangeService nextExchangeService = new ExchangeService(nextNetworkManager, localItemStore,
                 operationLogger, nextCacheManager, compatibilityChecker, api.getItemSerializer(), nextSyncEngine,
                 exchangeServiceHooks(), requestTimeoutMs(config));
-        MenuInteractionService nextMenuInteractionService = new MenuInteractionService(nextExchangeService, localItemStore);
+        MenuInteractionService nextMenuInteractionService = new MenuInteractionService(nextExchangeService);
 
         HeartbeatManager nextHeartbeatManager = null;
         if (nextNetworkManager != null) {

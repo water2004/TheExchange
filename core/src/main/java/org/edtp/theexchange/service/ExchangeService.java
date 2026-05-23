@@ -82,48 +82,64 @@ public class ExchangeService {
     public CompletableFuture<PutResult> putNeutralItemAsync(String serverName, int slot,
                                                             String playerUuid, String playerName,
                                                             NeutralItem item) {
-        if (networkManager == null) {
-            return CompletableFuture.completedFuture(PutResult.fail("网络功能未启用，请检查端口配置"));
-        }
-        Connection conn = networkManager.getConnection(serverName);
-        if (conn == null) {
-            return CompletableFuture.completedFuture(PutResult.fail("目标服务器离线"));
-        }
         if (item == null || item.isEmpty()) {
             return CompletableFuture.completedFuture(PutResult.fail("物品为空"));
         }
-        if (syncEngine == null) {
-            return CompletableFuture.completedFuture(PutResult.fail("同步引擎未初始化"));
+        boolean localTarget = isLocalTarget(serverName);
+        Connection conn = null;
+        if (!localTarget) {
+            if (networkManager == null) {
+                return CompletableFuture.completedFuture(PutResult.fail("网络功能未启用，请检查端口配置"));
+            }
+            conn = networkManager.getConnection(serverName);
+            if (conn == null) {
+                return CompletableFuture.completedFuture(PutResult.fail("目标服务器离线"));
+            }
+            if (syncEngine == null) {
+                return CompletableFuture.completedFuture(PutResult.fail("同步引擎未初始化"));
+            }
+            NeutralItem cached = cacheManager.getSlot(serverName, InventoryScope.server(), slot);
+            if (cached != null && cached.isIncompatible()) {
+                return CompletableFuture.completedFuture(PutResult.fail("不兼容物品禁止操作"));
+            }
         }
-        NeutralItem cached = cacheManager.getSlot(serverName, InventoryScope.server(), slot);
-        if (cached != null && cached.isIncompatible()) {
-            return CompletableFuture.completedFuture(PutResult.fail("不兼容物品禁止操作"));
-        }
-        int expectedVersion = cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
+        int expectedVersion = localTarget
+                ? localSlotVersion(slot)
+                : cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
         String requestId = UUID.randomUUID().toString();
         PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
                 requestId, playerUuid, playerName);
         long opGeneration = runtimeHooks.currentGeneration();
+        if (localTarget) {
+            return runtimeHooks.submitIfGeneration(opGeneration,
+                    () -> finishRemotePut(serverName, slot, playerUuid, playerName, item,
+                            requestId, handleRemotePut(request), null, true));
+        }
         return conn.<PutItemResponse>sendAsync(
                         FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, requestTimeoutMs)
                 .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemotePut(serverName, slot, playerUuid,
-                        playerName, item, requestId, response, error)))
+                        playerName, item, requestId, response, error, false)))
                 .thenCompose(future -> future);
     }
 
     public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot, int requestCount,
                                                        String playerUuid, String playerName) {
-        if (syncEngine == null) {
+        boolean localTarget = isLocalTarget(serverName);
+        if (!localTarget && syncEngine == null) {
             return CompletableFuture.completedFuture(TakeResult.fail("同步引擎未初始化"));
         }
-        NeutralItem expected = cacheManager.getSlot(serverName, InventoryScope.server(), slot);
+        NeutralItem expected = localTarget
+                ? localSlotItem(slot)
+                : cacheManager.getSlot(serverName, InventoryScope.server(), slot);
         if (expected == null || expected.isEmpty()) {
             return CompletableFuture.completedFuture(TakeResult.fail("物品已变化，请重试"));
         }
         if (expected.isIncompatible()) {
             return CompletableFuture.completedFuture(TakeResult.fail("不兼容物品禁止操作"));
         }
-        int expectedVersion = cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
+        int expectedVersion = localTarget
+                ? localSlotVersion(slot)
+                : cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
         return takeItemAsync(serverName, slot, expected.getItemId(),
                 expectedVersion, requestCount, playerUuid, playerName);
     }
@@ -132,12 +148,16 @@ public class ExchangeService {
                                                        String expectedItemId, int expectedVersion,
                                                        int requestCount,
                                                        String playerUuid, String playerName) {
-        if (networkManager == null) {
-            return CompletableFuture.completedFuture(TakeResult.fail("网络功能未启用，请检查端口配置"));
-        }
-        Connection conn = networkManager.getConnection(serverName);
-        if (conn == null) {
-            return CompletableFuture.completedFuture(TakeResult.fail("目标服务器离线"));
+        boolean localTarget = isLocalTarget(serverName);
+        Connection conn = null;
+        if (!localTarget) {
+            if (networkManager == null) {
+                return CompletableFuture.completedFuture(TakeResult.fail("网络功能未启用，请检查端口配置"));
+            }
+            conn = networkManager.getConnection(serverName);
+            if (conn == null) {
+                return CompletableFuture.completedFuture(TakeResult.fail("目标服务器离线"));
+            }
         }
 
         String requestId = UUID.randomUUID().toString();
@@ -145,11 +165,16 @@ public class ExchangeService {
                 expectedVersion, requestCount, requestId, playerUuid, playerName);
 
         long opGeneration = runtimeHooks.currentGeneration();
+        if (localTarget) {
+            return runtimeHooks.submitIfGeneration(opGeneration,
+                    () -> finishRemoteTake(serverName, slot, expectedItemId, requestCount,
+                            playerUuid, playerName, requestId, handleRemoteTake(request), null, true));
+        }
         return conn.<TakeItemResponse>sendAsync(
                         FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, requestTimeoutMs)
                 .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemoteTake(serverName, slot,
                         expectedItemId, requestCount, playerUuid, playerName,
-                        requestId, response, error)))
+                        requestId, response, error, false)))
                 .thenCompose(future -> future);
     }
 
@@ -158,73 +183,85 @@ public class ExchangeService {
                                                        String expectedItemId,
                                                        int takeCount,
                                                        String playerUuid, String playerName) {
-        if (networkManager == null) {
-            return CompletableFuture.completedFuture(SwapResult.fail("网络功能未启用，请检查端口配置"));
-        }
-        Connection conn = networkManager.getConnection(serverName);
-        if (conn == null) {
-            return CompletableFuture.completedFuture(SwapResult.fail("目标服务器离线"));
-        }
         if (newItem == null || newItem.isEmpty()) {
             return CompletableFuture.completedFuture(SwapResult.fail("物品为空"));
         }
         if (newItem.isIncompatible()) {
             return CompletableFuture.completedFuture(SwapResult.fail("不兼容物品禁止操作"));
         }
-        NeutralItem expected = cacheManager.getSlot(serverName, InventoryScope.server(), slot);
+        boolean localTarget = isLocalTarget(serverName);
+        Connection conn = null;
+        if (!localTarget) {
+            if (networkManager == null) {
+                return CompletableFuture.completedFuture(SwapResult.fail("网络功能未启用，请检查端口配置"));
+            }
+            conn = networkManager.getConnection(serverName);
+            if (conn == null) {
+                return CompletableFuture.completedFuture(SwapResult.fail("目标服务器离线"));
+            }
+        }
+        NeutralItem expected = localTarget
+                ? localSlotItem(slot)
+                : cacheManager.getSlot(serverName, InventoryScope.server(), slot);
         if (expected == null || expected.isEmpty()) {
             return CompletableFuture.completedFuture(SwapResult.fail("物品已变化，请重试"));
         }
         if (expected.isIncompatible()) {
             return CompletableFuture.completedFuture(SwapResult.fail("不兼容物品禁止操作"));
         }
-        int expectedVersion = cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
+        int expectedVersion = localTarget
+                ? localSlotVersion(slot)
+                : cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
         String requestId = UUID.randomUUID().toString();
         SwapItemRequest request = new SwapItemRequest(slot, newItem, expectedVersion,
                 expectedItemId, takeCount, requestId, playerUuid, playerName);
 
         long opGeneration = runtimeHooks.currentGeneration();
+        if (localTarget) {
+            return runtimeHooks.submitIfGeneration(opGeneration,
+                    () -> finishRemoteSwap(serverName, slot, playerUuid, playerName,
+                            newItem, requestId, handleRemoteSwap(request), null, true));
+        }
         return conn.<SwapItemResponse>sendAsync(
                         FrameType.SWAP_ITEM, request, FrameType.SWAP_ITEM_RESPONSE, requestTimeoutMs)
                 .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration,
                         () -> finishRemoteSwap(serverName, slot, playerUuid, playerName,
-                                newItem, requestId, response, error)))
+                                newItem, requestId, response, error, false)))
                 .thenCompose(future -> future);
     }
 
     private PutResult finishRemotePut(String serverName, int slot, String playerUuid,
                                       String playerName, NeutralItem item, String requestId,
-                                      PutItemResponse response, Throwable error) {
+                                      PutItemResponse response, Throwable error,
+                                      boolean localLoopback) {
         if (error != null || response == null) {
-            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+            logRequester(localLoopback, requestId, OperationType.PUT, playerUuid, playerName,
                     serverName, item.getItemId(), item.getCount(), false,
                     error != null ? error.getMessage() : "TIMEOUT");
             return PutResult.fail("请求超时，物品已退回");
         }
 
         if (response.isSuccess()) {
-            operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+            logRequester(localLoopback, requestId, OperationType.PUT, playerUuid, playerName,
                     serverName, item.getItemId(), item.getCount(), true, null);
-            cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, response.getCurrentItem(),
-                    response.getNewVersion());
-            redrawOpenViews(serverName);
+            finishSuccessfulMutation(serverName, slot, response.getCurrentItem(),
+                    response.getNewVersion(), localLoopback);
             return PutResult.success(response.getCurrentItem());
         }
 
-        operationLogger.log(requestId, OperationType.PUT, playerUuid, playerName,
+        logRequester(localLoopback, requestId, OperationType.PUT, playerUuid, playerName,
                 serverName, item.getItemId(), item.getCount(), false, response.getFailReason());
-        cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, response.getCurrentItem(),
-                response.getNewVersion());
-        redrawOpenViews(serverName);
+        finishFailedMutation(serverName, slot, response.getCurrentItem(),
+                response.getNewVersion(), localLoopback);
         return PutResult.fail(response.getFailReason());
     }
 
     private TakeResult finishRemoteTake(String serverName, int slot, String expectedItemId,
                                         int requestCount, String playerUuid, String playerName,
                                         String requestId, TakeItemResponse response,
-                                        Throwable error) {
+                                        Throwable error, boolean localLoopback) {
         if (error != null || response == null) {
-            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+            logRequester(localLoopback, requestId, OperationType.TAKE, playerUuid, playerName,
                     serverName, expectedItemId, requestCount, false,
                     error != null ? error.getMessage() : "TIMEOUT");
             return TakeResult.fail("请求超时");
@@ -233,33 +270,32 @@ public class ExchangeService {
         if (response.isSuccess()) {
             if (response.getItemsToGive() == null || response.getItemsToGive().isEmpty()
                     || response.getItemsToGive().isIncompatible()) {
-                operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+                logRequester(localLoopback, requestId, OperationType.TAKE, playerUuid, playerName,
                         serverName, expectedItemId, requestCount, false, "INCOMPATIBLE");
                 debugTake("rejectResponse", serverName, slot, expectedItemId, requestCount,
                         requestId, response, null, null);
                 return TakeResult.fail("不兼容物品禁止操作");
             }
-            operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+            logRequester(localLoopback, requestId, OperationType.TAKE, playerUuid, playerName,
                     serverName, expectedItemId, requestCount, true, null);
-            cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, response.getCurrentItem(),
-                    response.getNewVersion());
-            redrawOpenViews(serverName);
+            finishSuccessfulMutation(serverName, slot, response.getCurrentItem(),
+                    response.getNewVersion(), localLoopback);
             return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
         }
 
-        operationLogger.log(requestId, OperationType.TAKE, playerUuid, playerName,
+        logRequester(localLoopback, requestId, OperationType.TAKE, playerUuid, playerName,
                 serverName, expectedItemId, requestCount, false, response.getFailReason());
-        cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, response.getCurrentItem(),
-                response.getNewVersion());
-        redrawOpenViews(serverName);
+        finishFailedMutation(serverName, slot, response.getCurrentItem(),
+                response.getNewVersion(), localLoopback);
         return TakeResult.fail(response.getFailReason());
     }
 
     private SwapResult finishRemoteSwap(String serverName, int slot, String playerUuid,
                                         String playerName, NeutralItem newItem, String requestId,
-                                        SwapItemResponse response, Throwable error) {
+                                        SwapItemResponse response, Throwable error,
+                                        boolean localLoopback) {
         if (error != null || response == null) {
-            operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+            logRequester(localLoopback, requestId, OperationType.SWAP, playerUuid, playerName,
                     serverName, newItem.getItemId(), newItem.getCount(), false,
                     error != null ? error.getMessage() : "TIMEOUT");
             return SwapResult.fail("请求超时，物品已退回");
@@ -268,24 +304,22 @@ public class ExchangeService {
         if (response.isSuccess()) {
             if (response.getTakenItem() == null || response.getTakenItem().isEmpty()
                     || response.getTakenItem().isIncompatible()) {
-                operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+                logRequester(localLoopback, requestId, OperationType.SWAP, playerUuid, playerName,
                         serverName, newItem.getItemId(), newItem.getCount(), false, "INCOMPATIBLE");
                 debugSwap("rejectResponse", serverName, slot, newItem, requestId, response, null, null);
                 return SwapResult.fail("不兼容物品禁止操作");
             }
-            operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+            logRequester(localLoopback, requestId, OperationType.SWAP, playerUuid, playerName,
                     serverName, newItem.getItemId(), newItem.getCount(), true, null);
-            cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot,
-                    response.getCurrentItem(), response.getNewVersion());
-            redrawOpenViews(serverName);
+            finishSuccessfulMutation(serverName, slot, response.getCurrentItem(),
+                    response.getNewVersion(), localLoopback);
             return SwapResult.success(response.getTakenItem(), response.getNewVersion());
         }
 
-        operationLogger.log(requestId, OperationType.SWAP, playerUuid, playerName,
+        logRequester(localLoopback, requestId, OperationType.SWAP, playerUuid, playerName,
                 serverName, newItem.getItemId(), newItem.getCount(), false, response.getFailReason());
-        cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot,
-                response.getCurrentItem(), response.getNewVersion());
-        redrawOpenViews(serverName);
+        finishFailedMutation(serverName, slot, response.getCurrentItem(),
+                response.getNewVersion(), localLoopback);
         return SwapResult.fail(response.getFailReason());
     }
 
@@ -570,6 +604,53 @@ public class ExchangeService {
         remember(request.getRequestId(), response.isSuccess(), response.getFailReason(),
                 response.getCurrentItem(), response.getTakenItem(), response.getNewVersion());
         return response;
+    }
+
+    private boolean isLocalTarget(String serverName) {
+        if (serverName == null || serverName.isBlank()) {
+            return false;
+        }
+        return "local".equalsIgnoreCase(serverName)
+                || serverName.equalsIgnoreCase(runtimeHooks.localServerName());
+    }
+
+    private NeutralItem localSlotItem(int slot) {
+        LocalItemStore.ItemRecord record = localItemStore.getItem(slot);
+        return record != null ? record.item() : null;
+    }
+
+    private int localSlotVersion(int slot) {
+        LocalItemStore.ItemRecord record = localItemStore.getItem(slot);
+        return record != null ? record.version() : 0;
+    }
+
+    private void logRequester(boolean localLoopback, String requestId, OperationType type,
+                              String playerUuid, String playerName, String serverName,
+                              String itemId, int count, boolean success, String failReason) {
+        if (localLoopback) {
+            return;
+        }
+        operationLogger.log(requestId, type, playerUuid, playerName,
+                serverName, itemId, count, success, failReason);
+    }
+
+    private void finishSuccessfulMutation(String serverName, int slot, NeutralItem currentItem,
+                                          int newVersion, boolean localLoopback) {
+        if (localLoopback) {
+            publishLocalInventoryUpdate(List.of(slot));
+            redrawOpenViews(serverName);
+            return;
+        }
+        cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, currentItem, newVersion);
+        redrawOpenViews(serverName);
+    }
+
+    private void finishFailedMutation(String serverName, int slot, NeutralItem currentItem,
+                                      int newVersion, boolean localLoopback) {
+        if (!localLoopback) {
+            cacheManager.updateCacheSlot(serverName, InventoryScope.server(), slot, currentItem, newVersion);
+        }
+        redrawOpenViews(serverName);
     }
 
     private void remember(String requestId, boolean success, String failReason,

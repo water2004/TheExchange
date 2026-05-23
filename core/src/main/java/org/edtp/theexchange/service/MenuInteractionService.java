@@ -4,25 +4,18 @@ import org.edtp.theexchange.model.ExchangeInteraction;
 import org.edtp.theexchange.model.ExchangeInteractionResult;
 import org.edtp.theexchange.model.MenuClickType;
 import org.edtp.theexchange.model.NeutralItem;
-import org.edtp.theexchange.model.PlayerExchangeContext;
 
 public class MenuInteractionService {
     private static final int EXCHANGE_SLOTS = 54;
     private final ExchangeService exchangeService;
-    private final org.edtp.theexchange.storage.LocalItemStore localItemStore;
 
-    public MenuInteractionService(ExchangeService exchangeService,
-                                  org.edtp.theexchange.storage.LocalItemStore localItemStore) {
+    public MenuInteractionService(ExchangeService exchangeService) {
         this.exchangeService = exchangeService;
-        this.localItemStore = localItemStore;
     }
 
     public ExchangeInteractionResult decide(ExchangeInteraction input) {
         if (touchesIncompatibleItem(input)) {
             return ExchangeInteractionResult.reject("不兼容物品禁止操作");
-        }
-        if (input.isLocal()) {
-            return ExchangeInteractionResult.localApply();
         }
         if (!touchesExchangeSpace(input)) {
             return ExchangeInteractionResult.passToLoader();
@@ -150,28 +143,6 @@ public class MenuInteractionService {
 
     private boolean isEmpty(NeutralItem item) {
         return item == null || item.isEmpty();
-    }
-
-    public void applyLocalSnapshot(java.util.List<NeutralItem> before,
-                                   java.util.List<NeutralItem> after,
-                                   PlayerExchangeContext player) {
-        java.util.List<Integer> changed = new java.util.ArrayList<>();
-        for (int i = 0; i < EXCHANGE_SLOTS; i++) {
-            NeutralItem prev = i < before.size() ? before.get(i) : null;
-            NeutralItem current = i < after.size() ? after.get(i) : null;
-            if (sameItemState(prev, current)) continue;
-            localItemStore.replaceSlotFromLocal(i, current, player.uuid());
-            changed.add(i);
-        }
-        if (!changed.isEmpty()) {
-            exchangeService.publishLocalInventoryUpdate(changed);
-        }
-    }
-
-    private boolean sameItemState(NeutralItem a, NeutralItem b) {
-        if (isEmpty(a) && isEmpty(b)) return true;
-        if (isEmpty(a) || isEmpty(b)) return false;
-        return a.getCount() == b.getCount() && a.sameStackKind(b);
     }
 
 }

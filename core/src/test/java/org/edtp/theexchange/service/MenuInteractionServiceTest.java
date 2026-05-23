@@ -15,7 +15,7 @@ class MenuInteractionServiceTest {
 
     @Test
     void rejectsIncompatibleCarriedItemBeforePut() {
-        MenuInteractionService service = new MenuInteractionService(null, null);
+        MenuInteractionService service = new MenuInteractionService(null);
         NeutralItem carried = item("minecraft:barrier", 32, true);
         ExchangeInteraction input = baseInteraction(0, MenuClickType.PICKUP, null, carried, null);
 
@@ -27,7 +27,7 @@ class MenuInteractionServiceTest {
 
     @Test
     void rejectsIncompatibleRemoteItemBeforeTake() {
-        MenuInteractionService service = new MenuInteractionService(null, null);
+        MenuInteractionService service = new MenuInteractionService(null);
         NeutralItem slotItem = item("minecraft:barrier", 32, true);
         ExchangeInteraction input = baseInteraction(0, MenuClickType.PICKUP, slotItem, null, null);
 

@@ -100,7 +100,10 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         if (core == null || !core.isInitialized()) {
             return;
         }
-        core.openRemoteCachedViewAsync(serverName).whenComplete((state, error) ->
+        var future = local
+                ? core.openLocalViewAsync(serverName)
+                : core.openRemoteCachedViewAsync(serverName);
+        future.whenComplete((state, error) ->
                 core.getApi().runOnMainThread(() -> {
                     if (error == null && state != null && isViewingServer(state.getServerName())) {
                         applyViewState(state);
@@ -171,10 +174,6 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         switch (decision.getAction()) {
             case PASS_TO_LOADER -> {
                 super.clicked(slotIndex, buttonNum, clickType, player);
-                return;
-            }
-            case LOCAL_APPLY -> {
-                handleLocalClick(slotIndex, buttonNum, clickType, player);
                 return;
             }
             case REJECT -> {
@@ -414,39 +413,9 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         }
     }
 
-    private void handleLocalClick(int slotIndex, int buttonNum, ClickType clickType, Player player) {
-        java.util.List<NeutralItem> before = snapshotNeutralItems();
-        super.clicked(slotIndex, buttonNum, clickType, player);
-        TheExchangeCore core = TheExchangeCore.getInstance();
-        if (core == null || !core.isInitialized()) return;
-        java.util.List<NeutralItem> after = snapshotNeutralItems();
-        core.applyLocalSnapshotAsync(before, after, playerContext(player))
-                .whenComplete((ignored, error) -> {
-                    if (error != null) {
-                        core.getApi().getLogger().error("Failed to persist local exchange snapshot", error);
-                    }
-                });
-    }
-
     @Override
     public ItemStack quickMoveStack(Player player, int slotIndex) {
         if (slotIndex < 0 || slotIndex >= this.slots.size()) return ItemStack.EMPTY;
-        if (local) {
-            Slot slot = this.slots.get(slotIndex);
-            if (!slot.hasItem()) return ItemStack.EMPTY;
-            ItemStack sourceStack = slot.getItem();
-            ItemStack copy = sourceStack.copy();
-            boolean moved = slotIndex < 54
-                    ? moveItemStackTo(sourceStack, 54, 90, true)
-                    : moveItemStackTo(sourceStack, 0, 54, false);
-            if (!moved) return ItemStack.EMPTY;
-            if (sourceStack.isEmpty()) {
-                slot.setByPlayer(ItemStack.EMPTY);
-            } else {
-                slot.setChanged();
-            }
-            return copy;
-        }
         ItemStack before = this.slots.get(slotIndex).getItem().copy();
         clicked(slotIndex, 0, ClickType.QUICK_MOVE, player);
         return before;
