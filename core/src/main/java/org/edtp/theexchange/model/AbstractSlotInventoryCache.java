@@ -337,7 +337,9 @@ public abstract class AbstractSlotInventoryCache {
     }
 
     protected final Result swapSlot(int slot, NeutralItem newItem, String expectedItemId,
-                                    int expectedVersion, int takeCount) {
+                                    int expectedVersion, int takeCount,
+                                    boolean boundedMerge,
+                                    java.util.function.ToIntFunction<NeutralItem> maxStackSizeProvider) {
         if (slot < 0) {
             return Result.fail("INVALID_SLOT");
         }
@@ -363,6 +365,34 @@ public abstract class AbstractSlotInventoryCache {
             }
             if (takeCount <= 0 || current.getCount() != takeCount) {
                 return Result.fail("INSUFFICIENT");
+            }
+            if (boundedMerge) {
+                if (!current.sameStackKind(newItem)) {
+                    return Result.fail("ITEM_MISMATCH");
+                }
+                int maxStack = maxStackSizeProvider != null
+                        ? Math.max(1, maxStackSizeProvider.applyAsInt(current.copy()))
+                        : 64;
+                int capacity = Math.max(0, maxStack - current.getCount());
+                if (capacity <= 0) {
+                    return Result.fail("STACK_FULL");
+                }
+                int inserted = Math.min(capacity, newItem.getCount());
+                int remaining = newItem.getCount() - inserted;
+                int newVersion = state.version + 1;
+                current.setCount(current.getCount() + inserted);
+                current.setVersion(newVersion);
+                state.item = current;
+                state.version = newVersion;
+                markDirty(state);
+                onMutated();
+                NeutralItem remainder = null;
+                if (remaining > 0) {
+                    remainder = copyOf(newItem);
+                    remainder.setCount(remaining);
+                    remainder.setVersion(newVersion);
+                }
+                return Result.success(remainder, newVersion);
             }
             NeutralItem taken = current.copy();
             taken.setCount(takeCount);

@@ -242,11 +242,12 @@ public class TheExchangeCore {
                                                                      NeutralItem item,
                                                                      String expectedItemId,
                                                                      int takeCount,
+                                                                     boolean boundedMerge,
                                                                      PlayerExchangeContext player) {
         long opGeneration = generation.get();
         return submit(() -> exchangeService.swapItemAsync(
                         serverName, slot, item, expectedItemId, takeCount,
-                        player.uuid(), player.name()))
+                        boundedMerge, player.uuid(), player.name()))
                 .thenCompose(future -> future)
                 .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()

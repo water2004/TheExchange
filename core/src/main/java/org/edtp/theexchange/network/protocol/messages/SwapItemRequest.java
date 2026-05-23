@@ -8,6 +8,7 @@ public class SwapItemRequest implements CorrelatedMessage {
     private int expectedVersion;
     private String expectedItemId;
     private int takeCount;
+    private boolean boundedMerge;
     private String requestId;
     private String playerUuid;
     private String playerName;
@@ -15,13 +16,14 @@ public class SwapItemRequest implements CorrelatedMessage {
     public SwapItemRequest() {}
 
     public SwapItemRequest(int slot, NeutralItem newItem, int expectedVersion,
-                           String expectedItemId, int takeCount, String requestId,
-                           String playerUuid, String playerName) {
+                           String expectedItemId, int takeCount, boolean boundedMerge,
+                           String requestId, String playerUuid, String playerName) {
         this.slot = slot;
         this.newItem = newItem;
         this.expectedVersion = expectedVersion;
         this.expectedItemId = expectedItemId;
         this.takeCount = takeCount;
+        this.boundedMerge = boundedMerge;
         this.requestId = requestId;
         this.playerUuid = playerUuid;
         this.playerName = playerName;
@@ -41,6 +43,9 @@ public class SwapItemRequest implements CorrelatedMessage {
 
     public int getTakeCount() { return takeCount; }
     public void setTakeCount(int takeCount) { this.takeCount = takeCount; }
+
+    public boolean isBoundedMerge() { return boundedMerge; }
+    public void setBoundedMerge(boolean boundedMerge) { this.boundedMerge = boundedMerge; }
 
     @Override
     public String getRequestId() { return requestId; }

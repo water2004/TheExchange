@@ -182,6 +182,7 @@ public class ExchangeService {
                                                        NeutralItem newItem,
                                                        String expectedItemId,
                                                        int takeCount,
+                                                       boolean boundedMerge,
                                                        String playerUuid, String playerName) {
         if (newItem == null || newItem.isEmpty()) {
             return CompletableFuture.completedFuture(SwapResult.fail("物品为空"));
@@ -214,7 +215,7 @@ public class ExchangeService {
                 : cacheManager.getSlotVersion(serverName, InventoryScope.server(), slot);
         String requestId = UUID.randomUUID().toString();
         SwapItemRequest request = new SwapItemRequest(slot, newItem, expectedVersion,
-                expectedItemId, takeCount, requestId, playerUuid, playerName);
+                expectedItemId, takeCount, boundedMerge, requestId, playerUuid, playerName);
 
         long opGeneration = runtimeHooks.currentGeneration();
         if (localTarget) {
@@ -302,8 +303,8 @@ public class ExchangeService {
         }
 
         if (response.isSuccess()) {
-            if (response.getTakenItem() == null || response.getTakenItem().isEmpty()
-                    || response.getTakenItem().isIncompatible()) {
+            if (response.getTakenItem() != null && !response.getTakenItem().isEmpty()
+                    && response.getTakenItem().isIncompatible()) {
                 logRequester(localLoopback, requestId, OperationType.SWAP, playerUuid, playerName,
                         serverName, newItem.getItemId(), newItem.getCount(), false, "INCOMPATIBLE");
                 debugSwap("rejectResponse", serverName, slot, newItem, requestId, response, null, null);
@@ -525,7 +526,7 @@ public class ExchangeService {
 
             LocalItemStore.SwapResult result = localItemStore.swapItem(request.getSlot(), newItem,
                     request.getExpectedItemId(), request.getExpectedVersion(),
-                    request.getTakeCount(), request.getPlayerUuid());
+                    request.getTakeCount(), request.isBoundedMerge(), request.getPlayerUuid());
             LocalItemStore.ItemRecord after = localItemStore.getItem(request.getSlot());
             debugSwap("storeResult", "local", request.getSlot(), newItem,
                     request.getRequestId(), null, after, result);

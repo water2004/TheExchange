@@ -31,11 +31,28 @@ import org.edtp.theexchange.model.PlayerExchangeContext;
  */
 public class ExchangeMenu extends AbstractContainerMenu implements RefreshableExchangeView {
 
+    private enum SourceKind {
+        CARRIED,
+        SLOT
+    }
+
+    private record SourceStack(ItemStack stack, SourceKind kind, int slotIndex) {
+        private boolean isEmpty() {
+            return stack == null || stack.isEmpty();
+        }
+    }
+
+    private record PickupAllTarget(int slot, int count) {
+    }
+
     private final ExchangeContainer exchangeContainer;
     private final String serverName;
     private final boolean local;
     private volatile boolean online;
     private volatile boolean refreshing;
+    private int exchangeQuickCraftType = -1;
+    private int exchangeQuickCraftStatus;
+    private final java.util.Set<Slot> exchangeQuickCraftSlots = new java.util.LinkedHashSet<>();
 
     public ExchangeMenu(int containerId, Inventory playerInventory,
                          ExchangeViewState state) {
@@ -165,11 +182,21 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
     public void clicked(int slotIndex, int buttonNum, ClickType clickType, Player player) {
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized() || core.getMenuInteractionService() == null) {
+            debugMenuChat("coreUnavailable", "Exchange 正在重载，请稍后再试",
+                    slotIndex, buttonNum, clickType, null, null, null);
             player.displayClientMessage(Component.literal("Exchange 正在重载，请稍后再试"), false);
             return;
         }
-        ExchangeInteractionResult decision = core.getMenuInteractionService()
-                .decide(buildInteraction(slotIndex, buttonNum, clickType, player));
+        if (clickType == ClickType.QUICK_CRAFT) {
+            handleQuickCraft(slotIndex, buttonNum, player);
+            return;
+        }
+        if (clickType == ClickType.PICKUP_ALL) {
+            handlePickupAll(buttonNum, player);
+            return;
+        }
+        ExchangeInteraction interaction = buildInteraction(slotIndex, buttonNum, clickType, player);
+        ExchangeInteractionResult decision = core.getMenuInteractionService().decide(interaction);
 
         switch (decision.getAction()) {
             case PASS_TO_LOADER -> {
@@ -178,12 +205,16 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
             }
             case REJECT -> {
                 if (decision.getMessage() != null) {
+                    debugMenuChat("decisionReject", decision.getMessage(),
+                            slotIndex, buttonNum, clickType, interaction, decision, null);
                     player.displayClientMessage(Component.literal(decision.getMessage()), false);
                 }
                 return;
             }
             case REFRESH -> {
                 if (decision.getMessage() != null) {
+                    debugMenuChat("decisionRefresh", decision.getMessage(),
+                            slotIndex, buttonNum, clickType, interaction, decision, null);
                     player.displayClientMessage(Component.literal(decision.getMessage()), false);
                 }
                 refreshFromCache();
@@ -204,6 +235,189 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         }
     }
 
+    private void handleQuickCraft(int slotIndex, int buttonNum, Player player) {
+        int previousStatus = exchangeQuickCraftStatus;
+        exchangeQuickCraftStatus = getQuickcraftHeader(buttonNum);
+        if ((previousStatus != 1 || exchangeQuickCraftStatus != 2)
+                && previousStatus != exchangeQuickCraftStatus) {
+            resetExchangeQuickCraft();
+        } else if (getCarried().isEmpty()) {
+            resetExchangeQuickCraft();
+        } else if (exchangeQuickCraftStatus == 0) {
+            exchangeQuickCraftType = getQuickcraftType(buttonNum);
+            if (isValidQuickcraftType(exchangeQuickCraftType, player)) {
+                exchangeQuickCraftStatus = 1;
+                exchangeQuickCraftSlots.clear();
+            } else {
+                resetExchangeQuickCraft();
+            }
+        } else if (exchangeQuickCraftStatus == 1) {
+            if (slotIndex < 0 || slotIndex >= this.slots.size()) return;
+            Slot slot = this.slots.get(slotIndex);
+            ItemStack carried = getCarried();
+            if (canQuickCraftTo(slot, carried, exchangeQuickCraftSlots.size())) {
+                exchangeQuickCraftSlots.add(slot);
+            }
+        } else if (exchangeQuickCraftStatus == 2) {
+            finishQuickCraft(player);
+        } else {
+            resetExchangeQuickCraft();
+        }
+    }
+
+    private boolean canQuickCraftTo(Slot slot, ItemStack carried, int selectedSlots) {
+        return slot != null
+                && canItemQuickReplace(slot, carried, true)
+                && slot.mayPlace(carried)
+                && (exchangeQuickCraftType == 2 || carried.getCount() > selectedSlots)
+                && canDragTo(slot);
+    }
+
+    private void finishQuickCraft(Player player) {
+        if (exchangeQuickCraftSlots.isEmpty()) {
+            resetExchangeQuickCraft();
+            return;
+        }
+        if (exchangeQuickCraftSlots.size() == 1) {
+            int slot = exchangeQuickCraftSlots.iterator().next().index;
+            int button = exchangeQuickCraftType;
+            resetExchangeQuickCraft();
+            clicked(slot, button, ClickType.PICKUP, player);
+            return;
+        }
+        ItemStack source = getCarried().copy();
+        if (source.isEmpty()) {
+            resetExchangeQuickCraft();
+            return;
+        }
+        java.util.Set<Slot> quickCraftSlotSet = new java.util.LinkedHashSet<>(exchangeQuickCraftSlots);
+        java.util.List<Slot> slots = new java.util.ArrayList<>(quickCraftSlotSet);
+        int quickCraftType = exchangeQuickCraftType;
+        resetExchangeQuickCraft();
+        int slotCount = slots.size();
+        for (Slot slot : slots) {
+            ItemStack carried = getCarried();
+            if (carried.isEmpty()) break;
+            if (!canItemQuickReplace(slot, carried, true)
+                    || !slot.mayPlace(carried)
+                    || (quickCraftType != 2 && source.getCount() < slotCount)
+                    || !canDragTo(slot)) {
+                continue;
+            }
+            int existingCount = slot.hasItem() ? slot.getItem().getCount() : 0;
+            int maxSize = Math.min(source.getMaxStackSize(), slot.getMaxStackSize(source));
+            int newCount = Math.min(getQuickCraftPlaceCount(quickCraftSlotSet, quickCraftType, source) + existingCount,
+                    maxSize);
+            int insertCount = newCount - existingCount;
+            if (insertCount <= 0) continue;
+            if (slot.index < 54) {
+                ExchangeInteractionResult decision = ExchangeInteractionResult.putRemote(slot.index,
+                        neutralFromStack(source.copyWithCount(insertCount)), insertCount);
+                applyRemotePut(decision, slot.index, 0, ClickType.QUICK_CRAFT, player);
+            } else {
+                ItemStack nowCarried = getCarried();
+                if (nowCarried.isEmpty()) break;
+                int actualInsert = Math.min(insertCount, nowCarried.getCount());
+                slot.setByPlayer(source.copyWithCount(existingCount + actualInsert));
+                nowCarried.shrink(actualInsert);
+                setCarried(nowCarried.isEmpty() ? ItemStack.EMPTY : nowCarried);
+                broadcastChanges();
+            }
+        }
+    }
+
+    private void resetExchangeQuickCraft() {
+        exchangeQuickCraftStatus = 0;
+        exchangeQuickCraftType = -1;
+        exchangeQuickCraftSlots.clear();
+    }
+
+    private void handlePickupAll(int buttonNum, Player player) {
+        ItemStack carried = getCarried();
+        if (carried.isEmpty()) {
+            return;
+        }
+        NeutralItem carriedNeutral = neutralFromStack(carried);
+        if (carriedNeutral == null || carriedNeutral.isIncompatible()) {
+            return;
+        }
+        java.util.List<PickupAllTarget> targets = pickupAllTargets(buttonNum, carriedNeutral, carried.getMaxStackSize());
+        if (targets.isEmpty()) {
+            return;
+        }
+        takePickupAllTarget(targets, 0, buttonNum, player);
+    }
+
+    private java.util.List<PickupAllTarget> pickupAllTargets(int buttonNum, NeutralItem carried, int maxStackSize) {
+        java.util.List<PickupAllTarget> targets = new java.util.ArrayList<>();
+        int currentCount = carried.getCount();
+        int start = buttonNum == 0 ? 0 : 53;
+        int step = buttonNum == 0 ? 1 : -1;
+        for (int pass = 0; pass < 2 && currentCount < maxStackSize; pass++) {
+            for (int slot = start; slot >= 0 && slot < 54 && currentCount < maxStackSize; slot += step) {
+                NeutralItem item = neutralFromStack(exchangeContainer.getItem(slot));
+                if (item == null || item.isEmpty() || item.isIncompatible() || !item.sameStackKind(carried)) {
+                    continue;
+                }
+                if (pass == 0 && item.getCount() == maxStackSize) {
+                    continue;
+                }
+                int takeCount = Math.min(item.getCount(), maxStackSize - currentCount);
+                if (takeCount <= 0) continue;
+                targets.add(new PickupAllTarget(slot, takeCount));
+                currentCount += takeCount;
+            }
+        }
+        return targets;
+    }
+
+    private void takePickupAllTarget(java.util.List<PickupAllTarget> targets, int index,
+                                     int buttonNum, Player player) {
+        if (index >= targets.size() || getCarried().isEmpty()) {
+            refreshFromMemory();
+            return;
+        }
+        ItemStack carried = getCarried();
+        NeutralItem carriedNeutral = neutralFromStack(carried);
+        if (carriedNeutral == null || carriedNeutral.isIncompatible()
+                || carried.getCount() >= carried.getMaxStackSize()) {
+            refreshFromMemory();
+            return;
+        }
+        PickupAllTarget target = targets.get(index);
+        NeutralItem slotItem = neutralFromStack(exchangeContainer.getItem(target.slot()));
+        if (slotItem == null || slotItem.isEmpty() || slotItem.isIncompatible()
+                || !slotItem.sameStackKind(carriedNeutral)) {
+            takePickupAllTarget(targets, index + 1, buttonNum, player);
+            return;
+        }
+        int count = Math.min(target.count(), carried.getMaxStackSize() - carried.getCount());
+        count = Math.min(count, slotItem.getCount());
+        if (count <= 0) {
+            takePickupAllTarget(targets, index + 1, buttonNum, player);
+            return;
+        }
+        final int takeCount = count;
+
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || !core.isInitialized()) return;
+        core.takeRemoteAsync(serverName, target.slot(), takeCount, playerContext(player))
+                .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
+                    if (error != null || result == null || !result.isSuccess()) {
+                        String message = error != null
+                                ? "取出失败: " + rootMessage(error)
+                                : result.getFailReason() != null ? result.getFailReason() : "取出失败";
+                        debugMenuChat("pickupAllTakeFailed", message, target.slot(), buttonNum,
+                                ClickType.PICKUP_ALL, null,
+                                ExchangeInteractionResult.takeRemote(target.slot(), takeCount), error);
+                        refreshFromMemory();
+                        return;
+                    }
+                    applyTakenItem(result, buttonNum, ClickType.PICKUP_ALL, player);
+                    takePickupAllTarget(targets, index + 1, buttonNum, player);
+                }));
+    }
+
     private ExchangeInteraction buildInteraction(int slotIndex, int buttonNum,
                                                  ClickType clickType, Player player) {
         return new ExchangeInteraction(
@@ -218,6 +432,51 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                 neutralFromHotbar(buttonNum),
                 snapshotNeutralItems(),
                 new PlayerExchangeContext(player.getUUID().toString(), player.getName().getString()));
+    }
+
+    private void debugMenuChat(String stage, String message, int slotIndex, int buttonNum,
+                               ClickType clickType, ExchangeInteraction interaction,
+                               ExchangeInteractionResult decision, Throwable error) {
+        TheExchangeCore core = TheExchangeCore.getInstance();
+        if (core == null || core.getApi() == null) return;
+        StringBuilder sb = new StringBuilder("[Exchange|Debug][MENU][chatError]");
+        sb.append(" stage=").append(stage)
+                .append(" server=").append(serverName)
+                .append(" local=").append(local)
+                .append(" online=").append(online)
+                .append(" slot=").append(slotIndex)
+                .append(" button=").append(buttonNum)
+                .append(" mcClick=").append(clickType)
+                .append(" mappedClick=").append(String.valueOf(interaction != null ? interaction.getClickType() : null))
+                .append(" message=").append(message)
+                .append(" action=").append(decision != null ? decision.getAction() : null)
+                .append(" targetSlot=").append(decision != null ? decision.getTargetSlot() : -1)
+                .append(" count=").append(decision != null ? decision.getCount() : 0)
+                .append(" boundedMerge=").append(decision != null && decision.isBoundedMerge())
+                .append(" expectedItem=").append(decision != null ? decision.getExpectedItemId() : null)
+                .append(" slotItem=").append(describeNeutral(interaction != null ? interaction.getSlotItem() : neutralFromSlot(slotIndex)))
+                .append(" carried=").append(describeNeutral(interaction != null ? interaction.getCarriedItem() : neutralFromStack(getCarried())))
+                .append(" hotbar=").append(describeNeutral(interaction != null ? interaction.getHotbarItem() : neutralFromHotbar(buttonNum)));
+        if (decision != null) {
+            sb.append(" decisionItem=").append(describeNeutral(decision.getItem()));
+        }
+        if (error != null) {
+            sb.append(" error=").append(rootMessage(error));
+        }
+        core.getApi().getLogger().info(sb.toString());
+    }
+
+    private String describeNeutral(NeutralItem item) {
+        if (item == null) return "null";
+        byte[] extra = item.getExtraData();
+        return "{id=" + item.getItemId()
+                + ",count=" + item.getCount()
+                + ",incompatible=" + item.isIncompatible()
+                + ",extraLen=" + (extra == null ? -1 : extra.length)
+                + ",extraHash=" + java.util.Arrays.hashCode(extra)
+                + ",source=" + item.getSourceVersion()
+                + ",version=" + item.getVersion()
+                + "}";
     }
 
     private MenuClickType mapClickType(ClickType input) {
@@ -260,37 +519,42 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized()) return;
 
-        ItemStack inFlight = removeSourceStack(decision.getCount(), slotIndex, buttonNum, clickType);
+        SourceStack inFlight = removeSourceStack(decision.getCount(), slotIndex, buttonNum, clickType);
         if (inFlight.isEmpty()) {
+            debugMenuChat("putSourceMissing", "物品已变化，请重试",
+                    slotIndex, buttonNum, clickType, null, decision, null);
             player.displayClientMessage(Component.literal("物品已变化，请重试"), false);
             refreshFromCache();
             return;
         }
 
-        NeutralItem item = neutralFromStack(inFlight);
+        NeutralItem item = neutralFromStack(inFlight.stack());
         core.putRemoteAsync(serverName, decision.getTargetSlot(), item, playerContext(player))
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
-                        giveOrDrop(player, inFlight);
-                        player.displayClientMessage(Component.literal(error != null
+                        restoreSourceStack(player, inFlight);
+                        String message = error != null
                                 ? "放入失败: " + rootMessage(error)
-                                : result.getFailReason() != null ? result.getFailReason() : "放入失败"), false);
+                                : result.getFailReason() != null ? result.getFailReason() : "放入失败";
+                        debugMenuChat("putFailed", message, slotIndex, buttonNum,
+                                clickType, null, decision, error);
+                        player.displayClientMessage(Component.literal(message), false);
                     }
                     refreshFromMemory();
                 }));
     }
 
-    private ItemStack removeSourceStack(int count, int slotIndex, int buttonNum,
-                                        ClickType clickType) {
-        if (count <= 0) return ItemStack.EMPTY;
-        if (clickType == ClickType.PICKUP) {
+    private SourceStack removeSourceStack(int count, int slotIndex, int buttonNum,
+                                          ClickType clickType) {
+        if (count <= 0) return emptySource();
+        if (clickType == ClickType.PICKUP || clickType == ClickType.QUICK_CRAFT) {
             ItemStack carried = getCarried();
-            if (carried.isEmpty() || carried.getCount() < count) return ItemStack.EMPTY;
+            if (carried.isEmpty() || carried.getCount() < count) return emptySource();
             ItemStack removed = carried.copyWithCount(count);
             carried.shrink(count);
             setCarried(carried.isEmpty() ? ItemStack.EMPTY : carried);
             broadcastChanges();
-            return removed;
+            return new SourceStack(removed, SourceKind.CARRIED, -1);
         }
         if (clickType == ClickType.SWAP && buttonNum >= 0 && buttonNum <= 8) {
             return removeFromSlot(81 + buttonNum, count);
@@ -298,11 +562,11 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         return removeFromSlot(slotIndex, count);
     }
 
-    private ItemStack removeFromSlot(int slotIndex, int count) {
-        if (slotIndex < 0 || slotIndex >= this.slots.size()) return ItemStack.EMPTY;
+    private SourceStack removeFromSlot(int slotIndex, int count) {
+        if (slotIndex < 0 || slotIndex >= this.slots.size()) return emptySource();
         Slot slot = this.slots.get(slotIndex);
         ItemStack source = slot.getItem();
-        if (source.isEmpty() || source.getCount() < count) return ItemStack.EMPTY;
+        if (source.isEmpty() || source.getCount() < count) return emptySource();
         ItemStack removed = source.copyWithCount(count);
         source.shrink(count);
         if (source.isEmpty()) {
@@ -311,7 +575,11 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
             slot.setChanged();
         }
         broadcastChanges();
-        return removed;
+        return new SourceStack(removed, SourceKind.SLOT, slotIndex);
+    }
+
+    private SourceStack emptySource() {
+        return new SourceStack(ItemStack.EMPTY, SourceKind.CARRIED, -1);
     }
 
     private void giveOrDrop(Player player, ItemStack stack) {
@@ -325,6 +593,52 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         dropAtPlayer(player, remaining);
     }
 
+    private void restoreSourceStack(Player player, SourceStack source) {
+        if (source == null || source.isEmpty()) return;
+        if (player.isRemoved() || player.containerMenu != this) {
+            giveOrDrop(player, source.stack());
+            return;
+        }
+        if (!placeAtSource(source.stack(), source.kind(), source.slotIndex())) {
+            giveOrDrop(player, source.stack());
+        }
+        broadcastChanges();
+    }
+
+    private boolean placeAtSource(ItemStack stack, SourceKind kind, int slotIndex) {
+        if (stack == null || stack.isEmpty()) return true;
+        if (kind == SourceKind.CARRIED) {
+            ItemStack carried = getCarried();
+            if (carried.isEmpty()) {
+                setCarried(stack);
+                return true;
+            }
+            if (ItemStack.isSameItemSameComponents(carried, stack)) {
+                int max = carried.getMaxStackSize();
+                if (carried.getCount() + stack.getCount() <= max) {
+                    carried.grow(stack.getCount());
+                    setCarried(carried);
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (slotIndex < 0 || slotIndex >= this.slots.size()) return false;
+        Slot slot = this.slots.get(slotIndex);
+        ItemStack existing = slot.getItem();
+        if (existing.isEmpty() && slot.mayPlace(stack)) {
+            slot.setByPlayer(stack);
+            return true;
+        }
+        if (ItemStack.isSameItemSameComponents(existing, stack)
+                && existing.getCount() + stack.getCount() <= slot.getMaxStackSize(stack)) {
+            existing.grow(stack.getCount());
+            slot.setByPlayer(existing);
+            return true;
+        }
+        return false;
+    }
+
     private void applyRemoteTake(ExchangeInteractionResult decision, int buttonNum,
                                  ClickType clickType, Player player) {
         TheExchangeCore core = TheExchangeCore.getInstance();
@@ -332,9 +646,12 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         core.takeRemoteAsync(serverName, decision.getTargetSlot(), decision.getCount(), playerContext(player))
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
-                        player.displayClientMessage(Component.literal(error != null
+                        String message = error != null
                                 ? "取出失败: " + rootMessage(error)
-                                : result.getFailReason() != null ? result.getFailReason() : "取出失败"), false);
+                                : result.getFailReason() != null ? result.getFailReason() : "取出失败";
+                        debugMenuChat("takeFailed", message, decision.getTargetSlot(), buttonNum,
+                                clickType, null, decision, error);
+                        player.displayClientMessage(Component.literal(message), false);
                         refreshFromMemory();
                         return;
                     }
@@ -349,39 +666,79 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         if (core == null || !core.isInitialized()) return;
 
         int putCount = decision.getItem() == null ? 0 : decision.getItem().getCount();
-        ItemStack inFlight = removeSourceStack(putCount, slotIndex, buttonNum, clickType);
+        SourceStack inFlight = removeSourceStack(putCount, slotIndex, buttonNum, clickType);
         if (inFlight.isEmpty()) {
+            debugMenuChat("swapSourceMissing", "物品已变化，请重试",
+                    slotIndex, buttonNum, clickType, null, decision, null);
             player.displayClientMessage(Component.literal("物品已变化，请重试"), false);
             refreshFromCache();
             return;
         }
 
-        NeutralItem item = neutralFromStack(inFlight);
+        NeutralItem item = neutralFromStack(inFlight.stack());
         core.swapRemoteAsync(serverName, decision.getTargetSlot(), item,
-                        decision.getExpectedItemId(), decision.getCount(), playerContext(player))
+                        decision.getExpectedItemId(), decision.getCount(),
+                        decision.isBoundedMerge(), playerContext(player))
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
-                        giveOrDrop(player, inFlight);
-                        player.displayClientMessage(Component.literal(error != null
+                        restoreSourceStack(player, inFlight);
+                        String message = error != null
                                 ? "交换失败: " + rootMessage(error)
-                                : result.getFailReason() != null ? result.getFailReason() : "交换失败"), false);
+                                : result.getFailReason() != null ? result.getFailReason() : "交换失败";
+                        debugMenuChat("swapFailed", message, slotIndex, buttonNum,
+                                clickType, null, decision, error);
+                        player.displayClientMessage(Component.literal(message), false);
                         refreshFromMemory();
                         return;
                     }
-                    applyTakenItem(result, buttonNum, clickType, player);
+                    applySwappedItem(result, inFlight, decision.isBoundedMerge(), player);
                     refreshFromMemory();
                 }));
     }
 
-    private void applyTakenItem(ExchangeMutationResult result, int buttonNum,
-                                ClickType clickType, Player player) {
+    private void applySwappedItem(ExchangeMutationResult result, SourceStack source,
+                                  boolean allowEmptyResult, Player player) {
+        if (allowEmptyResult && (result.getItem() == null || result.getItem().isEmpty())) {
+            broadcastChanges();
+            return;
+        }
         if (result.getItem() == null || result.getItem().isEmpty() || result.getItem().isIncompatible()) {
+            debugMenuChat("swapDeserializeRejected", "不兼容物品禁止操作",
+                    source.slotIndex(), -1, ClickType.PICKUP, null, null, null);
             player.displayClientMessage(Component.literal("不兼容物品禁止操作"), false);
             return;
         }
         ExchangeAPI api = TheExchangeCore.getInstance().getApi();
         Object itemObj = api.getItemSerializer().deserialize(result.getItem());
         if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) {
+            debugMenuChat("swapDeserializeFailed", "不兼容物品禁止操作",
+                    source.slotIndex(), -1, ClickType.PICKUP, null, null, null);
+            player.displayClientMessage(Component.literal("不兼容物品禁止操作"), false);
+            return;
+        }
+        if (player.isRemoved() || player.containerMenu != this) {
+            giveOrDrop(player, giveStack);
+            return;
+        }
+        if (!placeAtSource(giveStack, source.kind(), source.slotIndex())) {
+            giveOrDrop(player, giveStack);
+        }
+        broadcastChanges();
+    }
+
+    private void applyTakenItem(ExchangeMutationResult result, int buttonNum,
+                                ClickType clickType, Player player) {
+        if (result.getItem() == null || result.getItem().isEmpty() || result.getItem().isIncompatible()) {
+            debugMenuChat("takeDeserializeRejected", "不兼容物品禁止操作",
+                    -1, buttonNum, clickType, null, null, null);
+            player.displayClientMessage(Component.literal("不兼容物品禁止操作"), false);
+            return;
+        }
+        ExchangeAPI api = TheExchangeCore.getInstance().getApi();
+        Object itemObj = api.getItemSerializer().deserialize(result.getItem());
+        if (!(itemObj instanceof ItemStack giveStack) || giveStack.isEmpty()) {
+            debugMenuChat("takeDeserializeFailed", "不兼容物品禁止操作",
+                    -1, buttonNum, clickType, null, null, null);
             player.displayClientMessage(Component.literal("不兼容物品禁止操作"), false);
             return;
         }
@@ -391,7 +748,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
             return;
         }
 
-        if (clickType == ClickType.PICKUP) {
+        if (clickType == ClickType.PICKUP || clickType == ClickType.PICKUP_ALL) {
             ItemStack carried = getCarried();
             if (carried.isEmpty()) {
                 setCarried(giveStack);

@@ -48,8 +48,10 @@ public final class LocalInventoryCache extends AbstractSlotInventoryCache {
     }
 
     public Result swap(int slot, NeutralItem newItem, String expectedItemId,
-                       int expectedVersion, int takeCount) {
-        return swapSlot(slot, newItem, expectedItemId, expectedVersion, takeCount);
+                       int expectedVersion, int takeCount, boolean boundedMerge,
+                       java.util.function.ToIntFunction<NeutralItem> maxStackSizeProvider) {
+        return swapSlot(slot, newItem, expectedItemId, expectedVersion, takeCount,
+                boundedMerge, maxStackSizeProvider);
     }
 
     @Override

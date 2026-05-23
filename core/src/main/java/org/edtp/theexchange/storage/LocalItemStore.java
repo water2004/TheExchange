@@ -73,14 +73,28 @@ public class LocalItemStore {
     public SwapResult swapItem(int slot, NeutralItem newItem, String expectedItemId,
                                int expectedVersion, int takeCount, String addedBy) {
         return swapItem(InventoryScope.server(), slot, newItem, expectedItemId,
-                expectedVersion, takeCount, addedBy);
+                expectedVersion, takeCount, false, addedBy);
+    }
+
+    public SwapResult swapItem(int slot, NeutralItem newItem, String expectedItemId,
+                               int expectedVersion, int takeCount,
+                               boolean boundedMerge, String addedBy) {
+        return swapItem(InventoryScope.server(), slot, newItem, expectedItemId,
+                expectedVersion, takeCount, boundedMerge, addedBy);
     }
 
     public SwapResult swapItem(InventoryScope scope, int slot, NeutralItem newItem,
                                String expectedItemId, int expectedVersion,
                                int takeCount, String addedBy) {
+        return swapItem(scope, slot, newItem, expectedItemId, expectedVersion,
+                takeCount, false, addedBy);
+    }
+
+    public SwapResult swapItem(InventoryScope scope, int slot, NeutralItem newItem,
+                               String expectedItemId, int expectedVersion,
+                               int takeCount, boolean boundedMerge, String addedBy) {
         return requireCacheManager().swap(scope, slot, newItem, expectedItemId,
-                expectedVersion, takeCount, addedBy);
+                expectedVersion, takeCount, boundedMerge, addedBy);
     }
 
     public long getLastModifiedTimestamp() {

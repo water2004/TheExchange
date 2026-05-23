@@ -238,6 +238,7 @@ public final class MessageCodec {
         out.writeInt(m.getExpectedVersion());
         BinaryIO.writeString(out, m.getExpectedItemId());
         out.writeInt(m.getTakeCount());
+        out.writeBoolean(m.isBoundedMerge());
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
@@ -412,6 +413,7 @@ public final class MessageCodec {
         request.setExpectedVersion(in.readInt());
         request.setExpectedItemId(BinaryIO.readString(in));
         request.setTakeCount(in.readInt());
+        request.setBoundedMerge(in.readBoolean());
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));

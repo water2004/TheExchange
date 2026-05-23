@@ -67,8 +67,44 @@ public class MenuInteractionService {
         if (input.getCarriedItem().isIncompatible()) {
             return ExchangeInteractionResult.reject("不兼容物品禁止操作");
         }
-        int count = input.getButton() == 1 ? 1 : input.getCarriedItem().getCount();
-        return ExchangeInteractionResult.putRemote(input.getSlotIndex(), input.getCarriedItem(), count);
+        NeutralItem remote = input.getSlotItem();
+        if (isEmpty(remote)) {
+            int count = input.getButton() == 1 ? 1 : input.getCarriedItem().getCount();
+            return ExchangeInteractionResult.putRemote(input.getSlotIndex(), input.getCarriedItem(), count);
+        }
+        if (remote.isIncompatible()) {
+            return ExchangeInteractionResult.reject("不兼容物品禁止操作");
+        }
+        if (remote.sameStackKind(input.getCarriedItem())) {
+            int count = input.getButton() == 1 ? 1 : input.getCarriedItem().getCount();
+            int maxStack = maxStackSize(input.getCarriedItem());
+            int capacity = Math.max(0, maxStack - remote.getCount());
+            if (count <= capacity) {
+                return ExchangeInteractionResult.putRemote(input.getSlotIndex(), input.getCarriedItem(), count);
+            }
+            if (capacity > 0) {
+                return ExchangeInteractionResult.boundedMergeRemote(input.getSlotIndex(), input.getCarriedItem(),
+                        remote.getCount(), remote.getItemId());
+            }
+            if (input.getButton() != 1
+                    && input.getCarriedItem().getCount() <= maxStack) {
+                return ExchangeInteractionResult.swapRemote(input.getSlotIndex(), input.getCarriedItem(),
+                        remote.getCount(), remote.getItemId());
+            }
+            return ExchangeInteractionResult.refresh(null);
+        }
+        if (input.getCarriedItem().getCount() <= maxStackSize(input.getCarriedItem())) {
+            return ExchangeInteractionResult.swapRemote(input.getSlotIndex(), input.getCarriedItem(),
+                    remote.getCount(), remote.getItemId());
+        }
+        return ExchangeInteractionResult.refresh(null);
+    }
+
+    private int maxStackSize(NeutralItem item) {
+        if (exchangeService == null) {
+            return 64;
+        }
+        return Math.max(1, exchangeService.getMaxStackSize(item));
     }
 
     private ExchangeInteractionResult decideSwap(ExchangeInteraction input) {
@@ -84,6 +120,13 @@ public class MenuInteractionService {
                 return ExchangeInteractionResult.reject("不兼容物品禁止操作");
             }
             if (!isEmpty(remote)) {
+                if (remote.sameStackKind(input.getHotbarItem())) {
+                    int maxStack = maxStackSize(input.getHotbarItem());
+                    if (remote.getCount() + input.getHotbarItem().getCount() <= maxStack) {
+                        return ExchangeInteractionResult.putRemote(input.getSlotIndex(),
+                                input.getHotbarItem(), input.getHotbarItem().getCount());
+                    }
+                }
                 return ExchangeInteractionResult.swapRemote(input.getSlotIndex(),
                         input.getHotbarItem(), remote.getCount(), remote.getItemId());
             }

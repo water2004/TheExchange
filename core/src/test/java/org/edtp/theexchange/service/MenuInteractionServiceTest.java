@@ -37,6 +37,49 @@ class MenuInteractionServiceTest {
         assertEquals("不兼容物品禁止操作", result.getMessage());
     }
 
+    @Test
+    void sameStackPickupUsesPutWhenSlotHasCapacity() {
+        MenuInteractionService service = new MenuInteractionService(null);
+        NeutralItem slotItem = item("minecraft:ender_eye", 16, false);
+        NeutralItem carried = item("minecraft:ender_eye", 32, false);
+        ExchangeInteraction input = baseInteraction(0, MenuClickType.PICKUP, slotItem, carried, null);
+
+        ExchangeInteractionResult result = service.decide(input);
+
+        assertEquals(ExchangeInteractionResult.Action.PUT_REMOTE, result.getAction());
+        assertFalse(result.isBoundedMerge());
+        assertEquals(32, result.getCount());
+    }
+
+    @Test
+    void sameStackPickupUsesBoundedMergeWhenSlotWouldOverflow() {
+        MenuInteractionService service = new MenuInteractionService(null);
+        NeutralItem slotItem = item("minecraft:ender_eye", 48, false);
+        NeutralItem carried = item("minecraft:ender_eye", 32, false);
+        ExchangeInteraction input = baseInteraction(0, MenuClickType.PICKUP, slotItem, carried, null);
+
+        ExchangeInteractionResult result = service.decide(input);
+
+        assertEquals(ExchangeInteractionResult.Action.SWAP_REMOTE, result.getAction());
+        assertTrue(result.isBoundedMerge());
+        assertEquals(48, result.getCount());
+        assertEquals("minecraft:ender_eye", result.getExpectedItemId());
+    }
+
+    @Test
+    void sameStackPickupUsesFullSwapWhenSlotIsFull() {
+        MenuInteractionService service = new MenuInteractionService(null);
+        NeutralItem slotItem = item("minecraft:ender_eye", 64, false);
+        NeutralItem carried = item("minecraft:ender_eye", 32, false);
+        ExchangeInteraction input = baseInteraction(0, MenuClickType.PICKUP, slotItem, carried, null);
+
+        ExchangeInteractionResult result = service.decide(input);
+
+        assertEquals(ExchangeInteractionResult.Action.SWAP_REMOTE, result.getAction());
+        assertFalse(result.isBoundedMerge());
+        assertEquals(64, result.getCount());
+    }
+
     private ExchangeInteraction baseInteraction(int slot, MenuClickType clickType,
                                                 NeutralItem slotItem, NeutralItem carriedItem,
                                                 NeutralItem hotbarItem) {

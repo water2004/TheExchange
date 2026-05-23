@@ -105,9 +105,10 @@ public final class LocalInventoryCacheManager {
 
     public LocalItemStore.SwapResult swap(InventoryScope scope, int slot, NeutralItem newItem,
                                           String expectedItemId, int expectedVersion,
-                                          int takeCount, String addedBy) {
+                                          int takeCount, boolean boundedMerge, String addedBy) {
         LocalInventoryCache cache = getOrLoad(scope);
-        LocalInventoryCache.Result result = cache.swap(slot, newItem, expectedItemId, expectedVersion, takeCount);
+        LocalInventoryCache.Result result = cache.swap(slot, newItem, expectedItemId, expectedVersion, takeCount,
+                boundedMerge, itemSerializer::getMaxStackSize);
         if (!result.success()) {
             return LocalItemStore.SwapResult.fail(result.failReason());
         }
