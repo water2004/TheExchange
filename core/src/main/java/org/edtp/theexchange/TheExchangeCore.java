@@ -619,15 +619,6 @@ public class TheExchangeCore {
         }
     }
 
-    private void shutdownRuntimeServices(RuntimeBundle runtime) {
-        if (runtime == null) {
-            return;
-        }
-        stopHeartbeat(runtime.heartbeatManager);
-        shutdownNetwork(runtime.networkManager);
-        shutdownRuntimeCaches(runtime);
-    }
-
     private void shutdownFailedReloadRuntime(RuntimeBundle failedRuntime, RuntimeBundle oldRuntime) {
         if (failedRuntime == null) {
             return;

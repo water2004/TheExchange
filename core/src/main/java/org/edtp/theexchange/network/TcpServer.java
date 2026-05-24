@@ -66,7 +66,6 @@ public class TcpServer {
     }
 
     public int getPort() { return port; }
-    public int getConnectionCount() { return connections.size(); }
     public boolean isRunning() { return running; }
 
     public void removeConnection(Connection conn) {

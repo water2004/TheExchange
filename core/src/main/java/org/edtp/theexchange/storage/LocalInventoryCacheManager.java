@@ -61,15 +61,6 @@ public final class LocalInventoryCacheManager {
         return load(scope);
     }
 
-    public boolean hasCachedScope(InventoryScope scope) {
-        lock.lock();
-        try {
-            return caches.containsKey(scope);
-        } finally {
-            lock.unlock();
-        }
-    }
-
     public List<NeutralItem> snapshot(InventoryScope scope) {
         return getOrLoad(scope).snapshot();
     }
@@ -137,19 +128,6 @@ public final class LocalInventoryCacheManager {
         }
         for (Map.Entry<InventoryScope, LocalInventoryCache> entry : entries) {
             flushCache(entry.getKey(), entry.getValue());
-        }
-    }
-
-    public void clear(InventoryScope scope) {
-        LocalInventoryCache removed;
-        lock.lock();
-        try {
-            removed = caches.remove(scope);
-        } finally {
-            lock.unlock();
-        }
-        if (removed != null) {
-            flushCache(scope, removed);
         }
     }
 

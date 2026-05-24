@@ -13,7 +13,6 @@ import java.security.MessageDigest;
 import java.util.Set;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
@@ -31,7 +30,6 @@ public class NetworkManager {
     private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ServerStatus> serverStatus = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AuthFailure> authFailures = new ConcurrentHashMap<>();
-    private final CopyOnWriteArrayList<BiConsumer<String, ServerStatus>> statusListeners = new CopyOnWriteArrayList<>();
 
     private volatile String localServerName;
     private volatile String localPassword;
@@ -267,15 +265,8 @@ public class NetworkManager {
         return serverStatus.getOrDefault(serverName, ServerStatus.OFFLINE);
     }
 
-    public void addStatusListener(BiConsumer<String, ServerStatus> listener) {
-        statusListeners.add(listener);
-    }
-
     private void notifyStatusChange(String serverName, ServerStatus status) {
         System.out.println(TAG + "Status: " + serverName + " → " + status);
-        for (BiConsumer<String, ServerStatus> listener : statusListeners) {
-            listener.accept(serverName, status);
-        }
         if (status == ServerStatus.ONLINE) {
             Consumer<String> handler = onlineHandler;
             if (handler != null) {

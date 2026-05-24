@@ -782,16 +782,6 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         return new PlayerExchangeContext(player.getUUID().toString(), player.getName().getString());
     }
 
-    @Override
-    public void removed(Player player) {
-        super.removed(player);
-    }
-
-    public Component getTitle() {
-        return Component.literal((local ? "[本服] " : (online ? "" : "[离线] "))
-                + serverName + " 的共享空间");
-    }
-
     private String rootMessage(Throwable error) {
         Throwable t = error;
         while (t.getCause() != null) t = t.getCause();

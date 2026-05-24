@@ -11,14 +11,10 @@ import net.minecraft.world.item.ItemStack;
  */
 public class ExchangeSlot extends Slot {
 
-    private final ExchangeContainer exchangeContainer;
-    private final int slotIndex;
     private boolean readOnly;
 
     public ExchangeSlot(ExchangeContainer container, int slot, int x, int y) {
         super(container, slot, x, y);
-        this.exchangeContainer = container;
-        this.slotIndex = slot;
         this.readOnly = !container.isOnline();
     }
 

@@ -31,10 +31,6 @@ public abstract class AbstractSlotInventoryCache {
         return revision.get();
     }
 
-    public final boolean isRevision(long expectedRevision) {
-        return revision.get() == expectedRevision;
-    }
-
     public final boolean isDirty() {
         return dirty;
     }
@@ -97,10 +93,6 @@ public abstract class AbstractSlotInventoryCache {
         } finally {
             state.lock.unlock();
         }
-    }
-
-    public final boolean hasSlot(int slot) {
-        return getVersion(slot) != 0 || getItem(slot) != null;
     }
 
     public final List<Integer> versions() {

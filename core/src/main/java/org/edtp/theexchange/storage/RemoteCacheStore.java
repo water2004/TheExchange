@@ -3,7 +3,6 @@ package org.edtp.theexchange.storage;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -16,49 +15,6 @@ public class RemoteCacheStore {
 
     public RemoteCacheStore(DatabaseManager db) {
         this.db = db;
-    }
-
-    public RemoteSlotSnapshot loadSlot(String serverName, InventoryScope scope, int slot) {
-        db.lock();
-        String sql = "SELECT items_blob, version FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, serverName);
-            ps.setString(2, scope.typeName());
-            ps.setString(3, scope.getScopeId());
-            ps.setInt(4, slot);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    NeutralItem item = NeutralItemBlobCodec.decode(rs.getBytes("items_blob"));
-                    if (item != null) {
-                        item.setVersion(rs.getInt("version"));
-                    }
-                    return new RemoteSlotSnapshot(slot, item, rs.getInt("version"));
-                }
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to load remote slot", e);
-        } finally {
-            db.unlock();
-        }
-        return new RemoteSlotSnapshot(slot, null, 0);
-    }
-
-    public int loadSlotVersion(String serverName, InventoryScope scope, int slot) {
-        db.lock();
-        String sql = "SELECT version FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, serverName);
-            ps.setString(2, scope.typeName());
-            ps.setString(3, scope.getScopeId());
-            ps.setInt(4, slot);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getInt("version") : 0;
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to load remote slot version", e);
-        } finally {
-            db.unlock();
-        }
     }
 
     public void saveSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, int version) {
@@ -76,22 +32,6 @@ public class RemoteCacheStore {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to save remote slot", e);
-        } finally {
-            db.unlock();
-        }
-    }
-
-    public void removeSlot(String serverName, InventoryScope scope, int slot) {
-        db.lock();
-        String sql = "DELETE FROM remote_cache WHERE server_name = ? AND scope_type = ? AND scope_id = ? AND slot = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, serverName);
-            ps.setString(2, scope.typeName());
-            ps.setString(3, scope.getScopeId());
-            ps.setInt(4, slot);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to remove remote slot", e);
         } finally {
             db.unlock();
         }

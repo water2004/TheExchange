@@ -78,24 +78,6 @@ public class DatabaseManager {
         dbLock.unlock();
     }
 
-    public <T> T withLock(SqlWork<T> work) throws SQLException {
-        dbLock.lock();
-        try {
-            return work.run();
-        } finally {
-            dbLock.unlock();
-        }
-    }
-
-    public void withLock(SqlRunnable work) throws SQLException {
-        dbLock.lock();
-        try {
-            work.run();
-        } finally {
-            dbLock.unlock();
-        }
-    }
-
     public void close() {
         dbLock.lock();
         try {
@@ -108,13 +90,4 @@ public class DatabaseManager {
         }
     }
 
-    @FunctionalInterface
-    public interface SqlWork<T> {
-        T run() throws SQLException;
-    }
-
-    @FunctionalInterface
-    public interface SqlRunnable {
-        void run() throws SQLException;
-    }
 }

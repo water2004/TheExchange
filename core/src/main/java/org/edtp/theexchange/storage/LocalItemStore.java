@@ -71,23 +71,10 @@ public class LocalItemStore {
     }
 
     public SwapResult swapItem(int slot, NeutralItem newItem, String expectedItemId,
-                               int expectedVersion, int takeCount, String addedBy) {
-        return swapItem(InventoryScope.server(), slot, newItem, expectedItemId,
-                expectedVersion, takeCount, false, addedBy);
-    }
-
-    public SwapResult swapItem(int slot, NeutralItem newItem, String expectedItemId,
                                int expectedVersion, int takeCount,
                                boolean boundedMerge, String addedBy) {
         return swapItem(InventoryScope.server(), slot, newItem, expectedItemId,
                 expectedVersion, takeCount, boundedMerge, addedBy);
-    }
-
-    public SwapResult swapItem(InventoryScope scope, int slot, NeutralItem newItem,
-                               String expectedItemId, int expectedVersion,
-                               int takeCount, String addedBy) {
-        return swapItem(scope, slot, newItem, expectedItemId, expectedVersion,
-                takeCount, false, addedBy);
     }
 
     public SwapResult swapItem(InventoryScope scope, int slot, NeutralItem newItem,
@@ -103,21 +90,6 @@ public class LocalItemStore {
 
     public long getLastModifiedTimestamp(InventoryScope scope) {
         return requireCacheManager().getOrLoad(scope).getLastModifiedAt();
-    }
-
-    public int getMaxSlot() {
-        return getMaxSlot(InventoryScope.server());
-    }
-
-    public int getMaxSlot(InventoryScope scope) {
-        List<NeutralItem> items = requireCacheManager().snapshot(scope);
-        for (int i = items.size() - 1; i >= 0; i--) {
-            NeutralItem item = items.get(i);
-            if (item != null && !item.isEmpty()) {
-                return i;
-            }
-        }
-        return -1;
     }
 
     ScopeSnapshot loadScopeSnapshot(InventoryScope scope) {

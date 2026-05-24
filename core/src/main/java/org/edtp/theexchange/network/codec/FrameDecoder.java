@@ -5,13 +5,11 @@ import org.edtp.theexchange.network.protocol.FrameType;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
  * Handles TCP framing (sticky packet / half-packet) and frame decoding.
- * Call readFrame() repeatedly until null is returned (needs more data).
  */
 public class FrameDecoder {
 
@@ -84,57 +82,4 @@ public class FrameDecoder {
         return frame;
     }
 
-    /**
-     * Convenience: read a single frame from an InputStream. Blocks until a complete frame arrives.
-     */
-    public static Frame readFrame(InputStream in) throws IOException {
-        byte[] headerBytes = new byte[Frame.HEADER_SIZE];
-        int read = readFully(in, headerBytes);
-        if (read < Frame.HEADER_SIZE) {
-            throw new IOException("Stream closed while reading frame header");
-        }
-
-        ByteBuffer bb = ByteBuffer.wrap(headerBytes).order(ByteOrder.BIG_ENDIAN);
-        int magic = bb.getInt();
-        if (magic != Frame.MAGIC) {
-            throw new IOException("Invalid magic: " + Integer.toHexString(magic));
-        }
-        short version = bb.getShort();
-        if (version != Frame.VERSION) {
-            throw new IOException("Protocol version mismatch: expected " + Frame.VERSION + ", got " + version);
-        }
-        int length = bb.getInt();
-        if (length < 0 || length > MAX_FRAME_SIZE) {
-            throw new IOException("Frame too large: " + length);
-        }
-        FrameType type = FrameType.fromCode(bb.getShort());
-        long sequence = bb.getLong();
-        long timestamp = bb.getLong();
-
-        byte[] payload = null;
-        if (length > 0) {
-            payload = new byte[length];
-            int payloadBytes = readFully(in, payload);
-            if (payloadBytes < length) {
-                throw new IOException("Stream closed while reading frame payload");
-            }
-        }
-
-        return new Frame(type, sequence, timestamp, payload);
-    }
-
-    private static int readFully(InputStream in, byte[] buf) throws IOException {
-        int total = 0;
-        while (total < buf.length) {
-            int r = in.read(buf, total, buf.length - total);
-            if (r < 0) break;
-            total += r;
-        }
-        return total;
-    }
-
-    public void reset() {
-        buffer.reset();
-        headerRead = false;
-    }
 }

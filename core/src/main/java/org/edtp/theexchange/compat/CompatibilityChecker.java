@@ -25,7 +25,4 @@ public class CompatibilityChecker {
         return item;
     }
 
-    public boolean isCompatible(NeutralItem item) {
-        return !item.isIncompatible();
-    }
 }

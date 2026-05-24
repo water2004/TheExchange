@@ -65,8 +65,4 @@ public class SequenceWindow {
         return true;
     }
 
-    public synchronized void reset() {
-        base = 0;
-        window.clear();
-    }
 }

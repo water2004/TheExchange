@@ -69,12 +69,6 @@ public class ExchangeService {
     private record CompletedOp(long completedAt, boolean success, String failReason,
                                NeutralItem currentItem, NeutralItem takenItem, int newVersion) {}
 
-    public CompletableFuture<PutResult> putItemAsync(String serverName, int slot, String playerUuid,
-                                                     String playerName, Object itemStack) {
-        NeutralItem item = itemSerializer.serialize(itemStack);
-        return putNeutralItemAsync(serverName, slot, playerUuid, playerName, item);
-    }
-
     public int getMaxStackSize(NeutralItem item) {
         return itemSerializer.getMaxStackSize(item);
     }
