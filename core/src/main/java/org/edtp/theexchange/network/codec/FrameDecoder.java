@@ -46,6 +46,9 @@ public class FrameDecoder {
             }
 
             short version = bb.getShort();
+            if (version != Frame.VERSION) {
+                throw new IOException("Protocol version mismatch: expected " + Frame.VERSION + ", got " + version);
+            }
             expectedLength = bb.getInt();
             expectedType = FrameType.fromCode(bb.getShort());
             sequence = bb.getLong();
@@ -96,7 +99,10 @@ public class FrameDecoder {
         if (magic != Frame.MAGIC) {
             throw new IOException("Invalid magic: " + Integer.toHexString(magic));
         }
-        bb.getShort(); // version
+        short version = bb.getShort();
+        if (version != Frame.VERSION) {
+            throw new IOException("Protocol version mismatch: expected " + Frame.VERSION + ", got " + version);
+        }
         int length = bb.getInt();
         if (length < 0 || length > MAX_FRAME_SIZE) {
             throw new IOException("Frame too large: " + length);
