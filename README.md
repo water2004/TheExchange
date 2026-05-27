@@ -1,10 +1,15 @@
 # TheExchange — Minecraft 跨服物品交换
 
+> **当前分支说明**  
+> 此分支为 **NeoForge 1.21 移植版本**，Fabric 版本请见相关 Fabric 标签。  
+> 如果某些功能在 NeoForge 上尚未支持，我们会在此说明。
+
 基于 TLS 1.3 加密信道和乐观锁并发控制的跨服共享空间模组，各服务器之间可以互相查看、放入、取出物品。
 
 ## 配置
 
 配置文件位于 `config/theexchange/theexchange.json`，首次启动自动生成。支持热重载。
+> 在 NeoForge 中，配置文件路径与 Fabric 完全一致（使用 `FMLPaths.CONFIGDIR`），无需额外调整。
 
 ```jsonc
 {
@@ -124,19 +129,31 @@
 ## 架构
 
 ```
-core/                         纯 Java 核心库，零 Minecraft 依赖
-  model/                      数据模型、缓存、乐观锁
-  network/                    TCP/TLS 网络协议栈、防重放
-  storage/                    SQLite 持久化、LRU 缓存
-  service/                    业务逻辑、同步引擎、心跳
-  compat/                     跨版本兼容、物品序列化接口
-
-src/                          Fabric 适配层
-  fabric/command/             指令注册
-  fabric/container/           虚拟容器（原版 9×6 GUI）
-  fabric/item/                ItemStack ↔ NeutralItem 序列化
-  fabric/config/              配置文件加载
+TheExchange-Neoforge/ ← NeoForge 1.21 移植 (neoforge-port 分支)
+├── build.gradle ← NeoForge ModDevGradle 构建脚本
+├── gradle.properties ← 模组属性（版本、存档名等）
+├── settings.gradle
+├── src/main/java/org/edtp/theexchange/
+│ ├── Theexchange.java ← @Mod 主入口
+│ ├── TheExchangeCore.java ← 核心生命周期管理（从 core 合并）
+│ ├── api/ ← 平台抽象接口
+│ ├── model/ ← 数据模型、缓存、乐观锁
+│ ├── network/ ← TCP/TLS 网络协议栈
+│ ├── storage/ ← SQLite 持久化、LRU 缓存
+│ ├── service/ ← 业务逻辑、同步引擎、心跳
+│ ├── compat/ ← 跨版本物品序列化接口
+│ ├── config/ ← JSON 配置管理
+│ └── neoforge/ ← NeoForge 平台接入层
+│ ├── NeoForgeExchangeAPI.java
+│ ├── command/ExchangeCommand.java
+│ ├── config/NeoForgeConfigLoader.java
+│ └── item/NeoForgeItemSerializer.java
+└── src/main/resources/
+├── META-INF/neoforge.mods.toml
+└── ... (其他资源)
 ```
+core/ 已整体合并到 src/main/java 中，不再作为独立子项目。
+fabric-*/ 为其他分支的 Fabric 适配层，与本分支无关。
 
 ## 并发基准测试
 

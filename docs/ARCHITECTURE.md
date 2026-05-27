@@ -4,131 +4,42 @@
 
 ---
 
-# 1. 项目结构
+# 1. 项目结构（NeoForge分支）
 
 ```
-TheExchange/
-├── build.gradle                     ← 根容器，仅 subprojects 通用配置
-├── settings.gradle                  ← include 'core', 'fabric-26.1', 'fabric-1.21.11'
-├── gradle.properties                ← 公共版本号 (mod_version, archives_base_name...)
-│
-├── core/                            ← 纯 Java 核心库，零 Minecraft 依赖
-│   ├── build.gradle                 ← java-library, JUnit 5, SQLite, Gson
-│   └── src/
-│       ├── main/java/org/edtp/theexchange/
-│       │   ├── TheExchangeCore.java         ← 核心入口，生命周期管理
-│       │   ├── api/
-│       │   │   ├── ExchangeAPI.java         ← 适配层注入接口 (Logger, ItemSerializer, ConfigLoader...)
-│       │   │   └── RefreshableExchangeView.java  ← GUI 刷新接口
-│       │   ├── model/
-│       │   │   ├── AbstractSlotInventoryCache.java ← 槽位缓存基类 (StampedLock 并发)
-│       │   │   ├── CachedInventory.java           ← 远端缓存
-│       │   │   ├── ExchangeInteraction.java       ← 玩家交互抽象
-│       │   │   ├── ExchangeInteractionResult.java ← 交互决策结果
-│       │   │   ├── ExchangeMutationResult.java    ← PUT/TAKE 操作结果
-│       │   │   ├── ExchangeViewState.java         ← GUI 视图状态
-│       │   │   ├── InventoryScope.java            ← SERVER/PLAYER 作用域
-│       │   │   ├── MenuClickType.java             ← 点击类型枚举
-│       │   │   ├── NeutralItem.java               ← 中立物品模型
-│       │   │   ├── OperationType.java             ← PUT/TAKE 枚举
-│       │   │   ├── PlayerExchangeContext.java     ← 玩家上下文
-│       │   │   ├── RemoteServer.java              ← 远端服务器配置
-│       │   │   └── ServerStatus.java              ← ONLINE/OFFLINE 枚举
-│       │   ├── network/
-│       │   │   ├── NetworkManager.java            ← 网络总控
-│       │   │   ├── TcpServer.java                 ← 入站连接 accept
-│       │   │   ├── TcpClient.java                 ← 出站连接 + TOFU 公钥校验
-│       │   │   ├── Connection.java                ← 单连接 (1 read + 1 sendAsync 并发)
-│       │   │   ├── codec/
-│       │   │   │   ├── FrameDecoder.java          ← 帧解码 (粘包/半包处理, 10MB 上限)
-│       │   │   │   ├── FrameEncoder.java          ← 帧编码
-│       │   │   │   └── MessageCodec.java          ← Payload ↔ 二进制序列化
-│       │   │   ├── protocol/
-│       │   │   │   ├── FrameType.java             ← 帧类型枚举 (20 种)
-│       │   │   │   ├── Frame.java                 ← 帧结构 (28B 头)
-│       │   │   │   ├── CorrelatedMessage.java     ← 请求/响应关联接口
-│       │   │   │   └── messages/                  ← 22 种消息体 POJO
-│       │   │   ├── sequence/
-│       │   │   │   └── SequenceWindow.java        ← 防重放滑动窗口 (1024 位 + 60s)
-│       │   │   └── tls/
-│       │   │       ├── TlsContext.java            ← TLS 上下文 (服务端自签 + 客户端宽松握手)
-│       │   │       ├── SelfSignedCert.java        ← keytool 生成 PKCS12 证书
-│       │   │       └── PinnedPeerKeyStore.java    ← TOFU 公钥固定 (known-peers.properties)
-│       │   ├── storage/
-│       │   │   ├── DatabaseManager.java           ← SQLite 连接管理 + WAL + ReentrantLock
-│       │   │   ├── LocalItemStore.java            ← 本服库存 facade
-│       │   │   ├── LocalInventoryCache.java       ← 本服库存 in-memory LRU
-│       │   │   ├── LocalInventoryCacheManager.java ← 本服缓存管理器 (异步 writer 刷盘)
-│       │   │   ├── RemoteCacheStore.java          ← 远端缓存 DB 操作
-│       │   │   ├── OperationLogger.java           ← 操作日志 (requestId UNIQUE 幂等)
-│       │   │   └── NeutralItemBlobCodec.java      ← NeutralItem ↔ BLOB
-│       │   ├── service/
-│       │   │   ├── ExchangeService.java           ← PUT/TAKE 业务逻辑 + 消息路由
-│       │   │   ├── ServerRegistry.java            ← 远端服务器注册表
-│       │   │   ├── CacheManager.java              ← 远端缓存管理 (LRU + 异步刷盘)
-│       │   │   ├── SyncEngine.java                ← 增量同步 (槽位版本比对)
-│       │   │   ├── HeartbeatManager.java          ← 心跳/超时/指数退避重连
-│       │   │   └── MenuInteractionService.java    ← GUI 交互决策 (decide)
-│       │   ├── config/
-│       │   │   └── ExchangeConfigManager.java     ← JSON 配置解析/校验/热重载
-│       │   ├── compat/
-│       │   │   ├── ItemSerializer.java            ← 物品序列化接口 (适配层实现)
-│       │   │   └── CompatibilityChecker.java      ← 兼容性检查 + 标记
-│       │   └── util/
-│       │       └── BinaryIO.java                  ← 定长字段二进制读写
-│       └── test/java/org/edtp/theexchange/
-│           ├── concurrency/
-│           │   ├── ConcurrencyStressTest.java     ← 正确性测试 (乐观锁/守恒/快照)
-│           │   └── ConcurrencyBenchmark.java      ← 吞吐基准 (Tag("bench"), 默认跳过)
-│           ├── compat/
-│           │   └── CompatibilityCheckerTest.java
-│           └── service/
-│               └── MenuInteractionServiceTest.java
-│
-├── fabric-26.1/                      ← Fabric 26.1.x 适配层
-│   ├── build.gradle                  ← net.fabricmc.fabric-loom 1.15.5, Java 25
-│   └── src/
-│       ├── main/java/org/edtp/theexchange/
-│       │   ├── Theexchange.java              ← ModInitializer 入口
-│       │   └── fabric/
-│       │       ├── FabricExchangeAPI.java    ← ExchangeAPI 实现
-│       │       ├── command/ExchangeCommand.java  ← /exchange 指令注册 + 自动补全
-│       │       ├── config/FabricConfigLoader.java ← 配置文件加载
-│       │       ├── container/
-│       │       │   ├── ExchangeMenu.java     ← AbstractContainerMenu (gui 交互)
-│       │       │   ├── ExchangeContainer.java ← SimpleContainer
-│       │       │   └── ExchangeSlot.java     ← Slot 子类 (只读控制)
-│       │       └── item/
-│       │           └── FabricItemSerializer.java ← ItemStack.CODEC 序列化
-│       ├── client/java/.../TheexchangeClient.java
-│       └── client/java/.../TheexchangeDataGenerator.java
-│       └── resources/fabric.mod.json
-│
-├── fabric-1.21.11/                   ← Fabric 1.21.11 适配层
-│   ├── build.gradle                  ← fabric-loom 1.15-SNAPSHOT, Java 21
-│   ├── gradle.properties            ← 覆盖 minecraft/fabric/loader 版本
-│   └── src/                         ← 同 26.1 结构
-│       └── (代码几乎相同, 仅 API 差异点不同)
-│           · ContainerInput → ClickType
-│           · sendSystemMessage → displayClientMessage(c, false)
-│
-├── docs/
-│   ├── ARCHITECTURE.md               ← 本文件
-│   └── REQUIREMENTS.md               ← 需求文档
-│
-├── bench.sh / bench.ps1              ← 一键基准测试 + 图表生成
-├── bench_plot.py                     ← matplotlib 绘图脚本
-└── README.md
+TheExchange
+├── build.gradle ← NeoForge ModDevGradle 构建
+├── gradle.properties
+├── settings.gradle
+├── src/main/java/org/edtp/theexchange/
+│ ├── Theexchange.java ← @Mod 主类，生命周期注册
+│ ├── TheExchangeCore.java ← 核心入口（原 core 模块已合并至此）
+│ ├── api/
+│ │ ├── ExchangeAPI.java
+│ │ └── RefreshableExchangeView.java
+│ ├── model/ ← NeutralItem, CachedInventory...
+│ ├── network/ ← NetworkManager, TLS, 防重放...
+│ ├── storage/ ← DatabaseManager, LocalItemStore...
+│ ├── service/ ← ExchangeService, SyncEngine...
+│ ├── compat/ ← ItemSerializer 接口
+│ ├── config/ ← ExchangeConfigManager
+│ └── neoforge/ ← NeoForge 平台适配层
+│ ├── NeoForgeExchangeAPI.java
+│ ├── command/ExchangeCommand.java
+│ ├── config/NeoForgeConfigLoader.java
+│ └── item/NeoForgeItemSerializer.java
+└── src/main/resources/
+└── META-INF/neoforge.mods.toml
 ```
 
-依赖关系：`fabric-*` 依赖 `core`，`core` 不依赖任何 MC API。fabric 模块间互相独立，各自构建产出独立 JAR。
+原 Fabric 多模块中的 core/ 代码已完全内聚到主模块，无需额外子项目。
 
 # 2. 核心初始化
 
 ## 2.1 启动流程
 
 ```
-Theexchange.onInitialize()                   // Fabric ModInitializer
+Theexchange.onRegisterCommands()
   → CommandRegistrationCallback               // 注册 /exchange 指令树
   → ServerLifecycleEvents.SERVER_STARTED
     → new FabricExchangeAPI(server)           // 适配层实例化
@@ -324,58 +235,58 @@ validate(sequence, timestamp):
 ```sql
 -- 本服权威库存 (交换空间)
 CREATE TABLE exchange_items (
-    scope_type  TEXT    NOT NULL,         -- 'SERVER' | 'PLAYER'
-    scope_id    TEXT    NOT NULL,         -- '' 或 playerUUID
-    slot        INTEGER NOT NULL,         -- 槽位号 0~53+
-    item_data   BLOB,                     -- NeutralItemBlobCodec 编码
-    added_by    TEXT,
-    added_at    INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    version     INTEGER NOT NULL,         -- 乐观锁版本号
-    PRIMARY KEY (scope_type, scope_id, slot)
+                                scope_type  TEXT    NOT NULL,         -- 'SERVER' | 'PLAYER'
+                                scope_id    TEXT    NOT NULL,         -- '' 或 playerUUID
+                                slot        INTEGER NOT NULL,         -- 槽位号 0~53+
+                                item_data   BLOB,                     -- NeutralItemBlobCodec 编码
+                                added_by    TEXT,
+                                added_at    INTEGER NOT NULL,
+                                updated_at  INTEGER NOT NULL,
+                                version     INTEGER NOT NULL,         -- 乐观锁版本号
+                                PRIMARY KEY (scope_type, scope_id, slot)
 );
 
 -- 远端库存缓存
 CREATE TABLE remote_cache (
-    server_name  TEXT    NOT NULL,
-    scope_type   TEXT    NOT NULL,
-    scope_id     TEXT    NOT NULL,
-    slot         INTEGER NOT NULL,
-    items_blob   BLOB,                   -- NeutralItemBlobCodec 编码
-    version      INTEGER NOT NULL,
-    synced_at    INTEGER NOT NULL,
-    PRIMARY KEY (server_name, scope_type, scope_id, slot)
+                              server_name  TEXT    NOT NULL,
+                              scope_type   TEXT    NOT NULL,
+                              scope_id     TEXT    NOT NULL,
+                              slot         INTEGER NOT NULL,
+                              items_blob   BLOB,                   -- NeutralItemBlobCodec 编码
+                              version      INTEGER NOT NULL,
+                              synced_at    INTEGER NOT NULL,
+                              PRIMARY KEY (server_name, scope_type, scope_id, slot)
 );
 
 -- 操作审计日志 (幂等)
 CREATE TABLE operation_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp    INTEGER NOT NULL,
-    op_type      TEXT    NOT NULL,        -- 'PUT' | 'TAKE'
-    scope_type   TEXT    NOT NULL,
-    scope_id     TEXT    NOT NULL,
-    player_uuid  TEXT    NOT NULL,
-    player_name  TEXT    NOT NULL,
-    server_name  TEXT    NOT NULL,
-    item_id      TEXT    NOT NULL,
-    quantity     INTEGER NOT NULL,
-    result       TEXT    NOT NULL,        -- 'SUCCESS' | 'FAIL'
-    fail_reason  TEXT,
-    request_id   TEXT    NOT NULL UNIQUE  -- 幂等键
+                               id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                               timestamp    INTEGER NOT NULL,
+                               op_type      TEXT    NOT NULL,        -- 'PUT' | 'TAKE'
+                               scope_type   TEXT    NOT NULL,
+                               scope_id     TEXT    NOT NULL,
+                               player_uuid  TEXT    NOT NULL,
+                               player_name  TEXT    NOT NULL,
+                               server_name  TEXT    NOT NULL,
+                               item_id      TEXT    NOT NULL,
+                               quantity     INTEGER NOT NULL,
+                               result       TEXT    NOT NULL,        -- 'SUCCESS' | 'FAIL'
+                               fail_reason  TEXT,
+                               request_id   TEXT    NOT NULL UNIQUE  -- 幂等键
 );
 
 -- 库存元数据
 CREATE TABLE inventory_metadata (
-    scope_type    TEXT NOT NULL,
-    scope_id      TEXT NOT NULL,
-    last_modified INTEGER NOT NULL,
-    PRIMARY KEY (scope_type, scope_id)
+                                    scope_type    TEXT NOT NULL,
+                                    scope_id      TEXT NOT NULL,
+                                    last_modified INTEGER NOT NULL,
+                                    PRIMARY KEY (scope_type, scope_id)
 );
 
 -- 键值配置
 CREATE TABLE exchange_metadata (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+                                   key   TEXT PRIMARY KEY,
+                                   value TEXT NOT NULL
 );
 ```
 
@@ -627,16 +538,15 @@ scheduleReconnect(server)
 
 ## 10.1 适配层差异
 
-| API | fabric-26.1 | fabric-1.21.11 |
-|-----|-------------|----------------|
-| Loom plugin | net.fabricmc.fabric-loom 1.15.5 | fabric-loom 1.15-SNAPSHOT |
-| Java target | 25 | 21 |
-| clicked() | ContainerInput enum | ClickType enum |
-| 消息发送 | sendSystemMessage(Component) | displayClientMessage(Component, boolean) |
-| 权限 | Permissions.COMMANDS_ADMIN | 同 (存在) |
-| ItemStack 序列化 | CODEC (DataComponentMap) | CODEC (同, MapCodec) |
-
-核心 `ItemStack.CODEC` 序列化 API 在两个版本完全一致，`FabricItemSerializer` 无需修改。
+| API           | fabric-26.1                     | fabric-1.21.11                           | neoforge-1.21.11                             |
+|---------------|---------------------------------|------------------------------------------|----------------------------------------------|
+| 构建插件          | net.fabricmc.fabric-loom 1.15.5 | fabric-loom 1.15-SNAPSHOT                | **net.neoforged.moddevgradle**               |
+| Java target   | 25                              | 21                                       | **21**                                       |
+| clicked()     | ContainerInput enum             | ClickType enum                           | **ClickType**                                |
+| 消息发送          | sendSystemMessage(Component)    | displayClientMessage(Component, boolean) | **displayClientMessage(Component, boolean)** |
+| 权限            | Permissions.COMMANDS_ADMIN      | 同 (存在)                                   | **同**                                        |
+| ItemStack 序列化 | CODEC (DataComponentMap)        | CODEC (同, MapCodec)                      | **CODEC (同)**                                |
+核心 `ItemStack.CODEC` 序列化 API 在所有平台上完全一致，`NeoForgeItemSerializer` 与 `FabricItemSerializer` 的实现可以通用，无需修改。
 
 ## 10.2 NeutralItem
 
