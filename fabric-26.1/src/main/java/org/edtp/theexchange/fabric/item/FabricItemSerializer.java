@@ -1,5 +1,6 @@
 package org.edtp.theexchange.fabric.item;
 
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
@@ -9,6 +10,7 @@ import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.RegistryOps;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.edtp.theexchange.compat.ItemSerializer;
@@ -31,9 +33,11 @@ import java.util.Arrays;
 public class FabricItemSerializer implements ItemSerializer {
 
     private final String sourceVersion;
+    private final RegistryOps<Tag> registryOps;
 
-    public FabricItemSerializer(String sourceVersion) {
+    public FabricItemSerializer(String sourceVersion, RegistryAccess registryAccess) {
         this.sourceVersion = sourceVersion;
+        this.registryOps = RegistryOps.create(NbtOps.INSTANCE, registryAccess);
     }
 
     @Override
@@ -46,11 +50,12 @@ public class FabricItemSerializer implements ItemSerializer {
         byte[] extraData = null;
 
         try {
-            CompoundTag tag = (CompoundTag) ItemStack.CODEC.encodeStart(NbtOps.INSTANCE, stack)
+            CompoundTag tag = (CompoundTag) ItemStack.CODEC.encodeStart(registryOps, stack)
                     .getOrThrow();
             tag.remove("count");
             extraData = writeCanonical(tag);
         } catch (Exception e) {
+            System.out.println("[Exchange|Debug][NBT] serialize ERROR " + itemId + ": " + e.getClass().getSimpleName() + " - " + e.getMessage());
             extraData = new byte[0];
         }
 
@@ -79,7 +84,7 @@ public class FabricItemSerializer implements ItemSerializer {
             DataInputStream dis = new DataInputStream(bis);
             CompoundTag tag = NbtIo.read(dis);
             tag.putInt("count", Math.max(1, item.getCount()));
-            ItemStack.CODEC.parse(NbtOps.INSTANCE, tag).getOrThrow();
+            ItemStack.CODEC.parse(registryOps, tag).getOrThrow();
             return true;
         } catch (Exception e) {
             debugCanDeserializeFailure(item, "NBT_OR_CODEC", e);
@@ -97,7 +102,7 @@ public class FabricItemSerializer implements ItemSerializer {
                 DataInputStream dis = new DataInputStream(bis);
                 CompoundTag tag = NbtIo.read(dis);
                 tag.putInt("count", Math.max(1, item.getCount()));
-                ItemStack stack = ItemStack.CODEC.parse(NbtOps.INSTANCE, tag)
+                ItemStack stack = ItemStack.CODEC.parse(registryOps, tag)
                         .getOrThrow();
                 stack.setCount(item.getCount());
                 return stack;
