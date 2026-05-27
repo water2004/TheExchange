@@ -355,7 +355,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         int step = buttonNum == 0 ? 1 : -1;
         for (int pass = 0; pass < 2 && currentCount < maxStackSize; pass++) {
             for (int slot = start; slot >= 0 && slot < 54 && currentCount < maxStackSize; slot += step) {
-                NeutralItem item = neutralFromStack(exchangeContainer.getItem(slot));
+                NeutralItem item = exchangeContainer.getNeutralItem(slot);
                 if (item == null || item.isEmpty() || item.isIncompatible() || !item.sameStackKind(carried)) {
                     continue;
                 }
@@ -385,7 +385,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
             return;
         }
         PickupAllTarget target = targets.get(index);
-        NeutralItem slotItem = neutralFromStack(exchangeContainer.getItem(target.slot()));
+        NeutralItem slotItem = exchangeContainer.getNeutralItem(target.slot());
         if (slotItem == null || slotItem.isEmpty() || slotItem.isIncompatible()
                 || !slotItem.sameStackKind(carriedNeutral)) {
             takePickupAllTarget(targets, index + 1, buttonNum, player);
@@ -493,6 +493,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
     private NeutralItem neutralFromSlot(int slotIndex) {
         if (slotIndex < 0 || slotIndex >= this.slots.size()) return null;
+        if (slotIndex < 54) return exchangeContainer.getNeutralItem(slotIndex);
         return neutralFromStack(this.slots.get(slotIndex).getItem());
     }
 
@@ -507,11 +508,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
     }
 
     private java.util.List<NeutralItem> snapshotNeutralItems() {
-        java.util.List<NeutralItem> items = new java.util.ArrayList<>(54);
-        for (int i = 0; i < 54; i++) {
-            items.add(neutralFromStack(exchangeContainer.getItem(i)));
-        }
-        return items;
+        return exchangeContainer.snapshotNeutralItems();
     }
 
     private void applyRemotePut(ExchangeInteractionResult decision, int slotIndex, int buttonNum,
