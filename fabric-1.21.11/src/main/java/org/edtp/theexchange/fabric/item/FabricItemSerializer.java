@@ -1,5 +1,6 @@
 package org.edtp.theexchange.fabric.item;
 
+import com.mojang.logging.LogUtils;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -15,6 +16,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.model.NeutralItem;
+import org.slf4j.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -31,6 +33,8 @@ import java.util.Arrays;
  * Uses Minecraft's built-in CODEC system for NBT round-tripping.
  */
 public class FabricItemSerializer implements ItemSerializer {
+
+    private static final Logger LOG = LogUtils.getLogger();
 
     private final String sourceVersion;
     private final RegistryOps<Tag> registryOps;
@@ -55,7 +59,7 @@ public class FabricItemSerializer implements ItemSerializer {
             tag.remove("count");
             extraData = writeCanonical(tag);
         } catch (Exception e) {
-            System.out.println("[Exchange|Debug][NBT] serialize ERROR " + itemId + ": " + e.getClass().getSimpleName() + " - " + e.getMessage());
+            LOG.error("[Exchange] serialize failed id={}", itemId, e);
             extraData = new byte[0];
         }
 
@@ -107,7 +111,8 @@ public class FabricItemSerializer implements ItemSerializer {
                 stack.setCount(item.getCount());
                 return stack;
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOG.warn("[Exchange] deserialize NBT parse failed id={}", item.getItemId(), e);
         }
 
         // Try to find the item by ID
@@ -215,14 +220,9 @@ public class FabricItemSerializer implements ItemSerializer {
     }
 
     private void debugCanDeserializeFailure(NeutralItem item, String stage, Exception error) {
-        byte[] extra = item.getExtraData();
-        String message = "[Exchange|Debug][Compat][canDeserialize] fail stage=" + stage
-                + " id=" + item.getItemId()
-                + " count=" + item.getCount()
-                + " incompatible=" + item.isIncompatible()
-                + " extraLen=" + (extra == null ? -1 : extra.length)
-                + " extraHash=" + Arrays.hashCode(extra)
-                + (error == null ? "" : " error=" + error.getClass().getSimpleName() + ": " + error.getMessage());
-        System.out.println(message);
+        LOG.debug("[Exchange] canDeserialize fail stage={} id={} count={} incompatible={} extraLen={} extraHash={}",
+                stage, item.getItemId(), item.getCount(), item.isIncompatible(),
+                item.getExtraData() != null ? item.getExtraData().length : -1,
+                Arrays.hashCode(item.getExtraData()), error);
     }
 }

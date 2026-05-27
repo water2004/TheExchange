@@ -140,7 +140,8 @@ public class ExchangeCommand {
                     core.getConfigManager().listRemoteServers().stream()
                             .map(ExchangeAPI.RemoteServerConfig::getName),
                     builder);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LOGGER.error("[Exchange] suggestRemoteServers failed", e);
             return builder.buildFuture();
         }
     }
