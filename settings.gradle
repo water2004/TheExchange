@@ -1,14 +1,11 @@
 pluginManagement {
     repositories {
-        maven {
-            name = 'Fabric'
-            url = 'https://maven.fabricmc.net/'
-        }
+        mavenLocal()
         gradlePluginPortal()
+        maven { url = 'https://maven.neoforged.net/releases' }
     }
 }
 
-rootProject.name = 'TheExchange'
-include 'core'
-include 'fabric-26.1'
-include 'fabric-1.21.11'
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
