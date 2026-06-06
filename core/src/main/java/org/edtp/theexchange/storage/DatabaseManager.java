@@ -63,6 +63,14 @@ public class DatabaseManager {
                     "scope_id      TEXT NOT NULL," +
                     "last_modified INTEGER NOT NULL," +
                     "PRIMARY KEY (scope_type, scope_id))");
+
+            stmt.execute("CREATE TABLE IF NOT EXISTS player_inventory_auth (" +
+                    "scope_id      TEXT PRIMARY KEY," +
+                    "player_name   TEXT NOT NULL," +
+                    "password_hash TEXT NOT NULL," +
+                    "created_at    INTEGER NOT NULL," +
+                    "updated_at    INTEGER NOT NULL)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_player_inventory_auth_name ON player_inventory_auth(player_name)");
         }
     }
 

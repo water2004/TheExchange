@@ -16,6 +16,8 @@ import net.minecraft.server.permissions.Permissions;
 import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.fabric.container.ExchangeMenu;
+import org.edtp.theexchange.model.ExchangeViewState;
+import org.edtp.theexchange.model.InventoryAccess;
 import org.edtp.theexchange.model.RemoteServer;
 import org.slf4j.Logger;
 
@@ -76,6 +78,16 @@ public class ExchangeCommand {
                 .then(Commands.argument("server", StringArgumentType.string())
                         .suggests(ExchangeCommand::suggestViewServers)
                         .executes(ExchangeCommand::viewServer)));
+        root.then(Commands.literal("player")
+                .then(Commands.literal("password")
+                        .then(Commands.argument("password", StringArgumentType.string())
+                                .executes(ExchangeCommand::setPlayerPassword)))
+                .then(Commands.literal("view")
+                        .then(Commands.argument("server", StringArgumentType.string())
+                                .suggests(ExchangeCommand::suggestViewServers)
+                                .then(Commands.argument("playerName", StringArgumentType.string())
+                                        .then(Commands.argument("password", StringArgumentType.string())
+                                                .executes(ExchangeCommand::viewPlayerInventory))))));
         root.then(Commands.literal("refresh")
                 .then(Commands.argument("server", StringArgumentType.string())
                         .suggests(ExchangeCommand::suggestRemoteServers)
@@ -348,9 +360,7 @@ public class ExchangeCommand {
                             return;
                         }
                         if (player.isRemoved()) return;
-                        player.openMenu(new net.minecraft.world.SimpleMenuProvider(
-                                (containerId, inventory, p) -> new ExchangeMenu(containerId, inventory, state),
-                                Component.literal(state.getTitle(core.getRuntimeConfig().getDisplayName()))));
+                        openExchangeMenu(player, core, state);
                         if (!state.isOnline() && !state.isLocal()) {
                             player.sendSystemMessage(Component.literal("[离线] 仅可查看缓存数据 - 目标服务器离线"));
                         }
@@ -358,6 +368,79 @@ public class ExchangeCommand {
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in viewServer", e);
+            ctx.getSource().sendFailure(Component.literal("内部错误: " + e.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int setPlayerPassword(CommandContext<CommandSourceStack> ctx) {
+        try {
+            ServerPlayer player = ctx.getSource().getPlayer();
+            if (player == null) {
+                ctx.getSource().sendFailure(Component.literal("只有玩家可以设置玩家仓库密码"));
+                return 0;
+            }
+            TheExchangeCore core = getCore(ctx);
+            if (core == null) return 0;
+
+            String password = StringArgumentType.getString(ctx, "password");
+            String playerName = player.getName().getString();
+            ctx.getSource().sendSuccess(() -> Component.literal("正在设置玩家仓库密码: " + playerName), false);
+            core.setPlayerInventoryPasswordAsync(playerName, password)
+                    .whenComplete((scope, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in setPlayerPassword", error);
+                            player.sendSystemMessage(Component.literal("设置失败: " + rootMessage(error)));
+                            return;
+                        }
+                        player.sendSystemMessage(Component.literal("玩家仓库密码已设置"));
+                    }));
+            return 1;
+        } catch (Exception e) {
+            LOGGER.error("[Exchange] Error in setPlayerPassword", e);
+            ctx.getSource().sendFailure(Component.literal("内部错误: " + e.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int viewPlayerInventory(CommandContext<CommandSourceStack> ctx) {
+        try {
+            String serverName = StringArgumentType.getString(ctx, "server");
+            String playerName = StringArgumentType.getString(ctx, "playerName");
+            String password = StringArgumentType.getString(ctx, "password");
+            ServerPlayer player = ctx.getSource().getPlayer();
+            if (player == null) {
+                ctx.getSource().sendFailure(Component.literal("只有玩家可以打开玩家仓库"));
+                return 0;
+            }
+
+            TheExchangeCore core = getCore(ctx);
+            if (core == null) return 0;
+
+            InventoryAccess access = InventoryAccess.player(playerName, password);
+            ctx.getSource().sendSuccess(() -> Component.literal("正在加载玩家仓库: " + serverName + " / " + playerName), false);
+            core.submit(() -> {
+                        String localName = core.getRuntimeConfig().getDisplayName();
+                        return isLocalServer(serverName, localName)
+                                ? core.openLocalViewAsync(localName, access)
+                                : core.openRemoteViewAsync(serverName, access);
+                    })
+                    .thenCompose(future -> future)
+                    .whenComplete((state, error) -> core.getApi().runOnMainThread(() -> {
+                        if (error != null) {
+                            LOGGER.error("[Exchange] Error in viewPlayerInventory", error);
+                            player.sendSystemMessage(Component.literal("打开失败: " + rootMessage(error)));
+                            return;
+                        }
+                        if (player.isRemoved()) return;
+                        openExchangeMenu(player, core, state);
+                        if (!state.isOnline() && !state.isLocal()) {
+                            player.sendSystemMessage(Component.literal("[离线] 玩家仓库需要目标服务器验证，无法使用未验证缓存"));
+                        }
+                    }));
+            return 1;
+        } catch (Exception e) {
+            LOGGER.error("[Exchange] Error in viewPlayerInventory", e);
             ctx.getSource().sendFailure(Component.literal("内部错误: " + e.getMessage()));
             return 0;
         }
@@ -439,6 +522,16 @@ public class ExchangeCommand {
             ctx.getSource().sendFailure(Component.literal("内部错误: " + e.getMessage()));
             return 0;
         }
+    }
+
+    private static boolean isLocalServer(String serverName, String localName) {
+        return "local".equalsIgnoreCase(serverName) || serverName.equalsIgnoreCase(localName);
+    }
+
+    private static void openExchangeMenu(ServerPlayer player, TheExchangeCore core, ExchangeViewState state) {
+        player.openMenu(new net.minecraft.world.SimpleMenuProvider(
+                (containerId, inventory, p) -> new ExchangeMenu(containerId, inventory, state),
+                Component.literal(state.getTitle(core.getRuntimeConfig().getDisplayName()))));
     }
 
     private static String rootMessage(Throwable error) {

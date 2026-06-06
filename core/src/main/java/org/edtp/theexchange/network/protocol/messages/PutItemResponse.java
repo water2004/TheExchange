@@ -1,6 +1,7 @@
 package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.InventoryScope;
 
 public class PutItemResponse implements CorrelatedMessage {
     private boolean success;
@@ -10,6 +11,7 @@ public class PutItemResponse implements CorrelatedMessage {
     private long newTimestamp;
     private int newVersion;
     private String requestId;
+    private InventoryScope scope = InventoryScope.server();
 
     public PutItemResponse() {}
 
@@ -20,6 +22,12 @@ public class PutItemResponse implements CorrelatedMessage {
 
     public PutItemResponse(boolean success, int slot, NeutralItem currentItem,
                            String failReason, long newTimestamp, int newVersion, String requestId) {
+        this(success, slot, currentItem, failReason, newTimestamp, newVersion, requestId, InventoryScope.server());
+    }
+
+    public PutItemResponse(boolean success, int slot, NeutralItem currentItem,
+                           String failReason, long newTimestamp, int newVersion,
+                           String requestId, InventoryScope scope) {
         this.success = success;
         this.slot = slot;
         this.currentItem = currentItem;
@@ -27,6 +35,7 @@ public class PutItemResponse implements CorrelatedMessage {
         this.newTimestamp = newTimestamp;
         this.newVersion = newVersion;
         this.requestId = requestId;
+        this.scope = scope != null ? scope : InventoryScope.server();
     }
 
     public boolean isSuccess() { return success; }
@@ -52,4 +61,7 @@ public class PutItemResponse implements CorrelatedMessage {
 
     @Override
     public void setRequestId(String requestId) { this.requestId = requestId; }
+
+    public InventoryScope getScope() { return scope != null ? scope : InventoryScope.server(); }
+    public void setScope(InventoryScope scope) { this.scope = scope != null ? scope : InventoryScope.server(); }
 }

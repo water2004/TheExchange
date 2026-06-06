@@ -9,7 +9,10 @@ import org.edtp.theexchange.api.RefreshableExchangeView;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.fabric.config.FabricConfigLoader;
 import org.edtp.theexchange.fabric.item.FabricItemSerializer;
+import org.edtp.theexchange.model.InventoryScope;
 import org.slf4j.Logger;
+
+import java.util.Optional;
 
 public class FabricExchangeAPI implements ExchangeAPI {
 
@@ -74,6 +77,15 @@ public class FabricExchangeAPI implements ExchangeAPI {
     }
 
     @Override
+    public Optional<PlayerIdentity> resolvePlayerIdentity(String playerName) {
+        if (playerName == null || playerName.isBlank()) {
+            return Optional.empty();
+        }
+        return server.services().nameToIdCache().get(playerName.trim())
+                .map(profile -> new PlayerIdentity(profile.id().toString(), profile.name()));
+    }
+
+    @Override
     public void refreshRemoteInventoryView(String serverName) {
         server.execute(() -> {
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
@@ -86,11 +98,35 @@ public class FabricExchangeAPI implements ExchangeAPI {
     }
 
     @Override
+    public void refreshInventoryView(String serverName, InventoryScope scope) {
+        server.execute(() -> {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                if (player.containerMenu instanceof RefreshableExchangeView menu
+                        && menu.isViewingInventory(serverName, scope)) {
+                    menu.refreshFromCache();
+                }
+            }
+        });
+    }
+
+    @Override
     public void redrawRemoteInventoryView(String serverName) {
         server.execute(() -> {
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 if (player.containerMenu instanceof RefreshableExchangeView menu
                         && menu.isViewingServer(serverName)) {
+                    menu.refreshFromMemory();
+                }
+            }
+        });
+    }
+
+    @Override
+    public void redrawInventoryView(String serverName, InventoryScope scope) {
+        server.execute(() -> {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                if (player.containerMenu instanceof RefreshableExchangeView menu
+                        && menu.isViewingInventory(serverName, scope)) {
                     menu.refreshFromMemory();
                 }
             }

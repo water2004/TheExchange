@@ -116,6 +116,7 @@ public class NetworkManager {
     }
 
     private void handleInboundAuth(Connection conn, AuthRequest request) {
+        conn.setPeerProtocolVersion(request != null ? request.getVersion() : null);
         if (!acceptingInbound) {
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(false, "Inbound connections disabled", null, null, 0));
@@ -185,7 +186,8 @@ public class NetworkManager {
 
         System.out.println(TAG + "TLS connected to " + server.getName() + ", sending AUTH...");
         String authServerName = localServerName != null ? localServerName : "local";
-        AuthRequest auth = new AuthRequest(authServerName, server.getPasswordHash(), "1", serverVersion);
+        AuthRequest auth = new AuthRequest(authServerName, server.getPasswordHash(),
+                AuthRequest.CURRENT_PROTOCOL_VERSION, serverVersion);
         conn.send(FrameType.AUTH_REQUEST, auth);
 
         conn.start((type, msg) -> {
@@ -202,6 +204,7 @@ public class NetworkManager {
                     conn.setAuthenticated(true);
                     conn.setInbound(false);
                     conn.setPeerServerName(server.getName());
+                    conn.setPeerProtocolVersion(resp.getVersion());
                     connections.put(server.getName(), conn);
                     serverStatus.put(server.getName(), ServerStatus.ONLINE);
                     notifyStatusChange(server.getName(), ServerStatus.ONLINE);
@@ -257,6 +260,7 @@ public class NetworkManager {
     public void broadcast(FrameType type, Object message, Connection exclude) {
         for (Connection conn : connections.values()) {
             if (conn == null || conn == exclude || !conn.isRunning()) continue;
+            if (requiresInventoryAccessSupport(message) && !conn.supportsInventoryAccess()) continue;
             conn.send(type, message);
         }
     }
@@ -277,6 +281,10 @@ public class NetworkManager {
 
     public int getLocalPort() { return tcpServer.getPort(); }
     public boolean isInboundRunning() { return tcpServer.isRunning(); }
+
+    private boolean requiresInventoryAccessSupport(Object message) {
+        return message instanceof PushUpdate update && update.getScope().isPlayer();
+    }
 
     private boolean isInboundConnection(Connection conn) {
         return conn != null && conn.isInbound();

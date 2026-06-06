@@ -1,9 +1,12 @@
 package org.edtp.theexchange.api;
 
 import org.edtp.theexchange.compat.ItemSerializer;
+import org.edtp.theexchange.model.InventoryAccess;
+import org.edtp.theexchange.model.InventoryScope;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Bridge between the core module and the mod loader adapter.
@@ -39,11 +42,34 @@ public interface ExchangeAPI {
     /** Schedule an async task */
     void runAsync(Runnable task);
 
+    /** Resolve a Minecraft player name using the loader/server profile service. */
+    Optional<PlayerIdentity> resolvePlayerIdentity(String playerName);
+
     /** Refresh open exchange views after remote inventory changes */
     void refreshRemoteInventoryView(String serverName);
 
+    /** Refresh open exchange views for one inventory scope. */
+    default void refreshInventoryView(String serverName, InventoryAccess access) {
+        refreshRemoteInventoryView(serverName);
+    }
+
+    /** Refresh open exchange views for one resolved inventory scope. */
+    default void refreshInventoryView(String serverName, InventoryScope scope) {
+        refreshRemoteInventoryView(serverName);
+    }
+
     /** Redraw open exchange views from already-updated memory cache. */
     void redrawRemoteInventoryView(String serverName);
+
+    /** Redraw open exchange views for one inventory scope from already-updated memory cache. */
+    default void redrawInventoryView(String serverName, InventoryAccess access) {
+        redrawRemoteInventoryView(serverName);
+    }
+
+    /** Redraw open exchange views for one resolved inventory scope from already-updated memory cache. */
+    default void redrawInventoryView(String serverName, InventoryScope scope) {
+        redrawRemoteInventoryView(serverName);
+    }
 
     interface ConfigLoader {
         /** Get the path to the mod's config directory */
@@ -211,5 +237,18 @@ public interface ExchangeAPI {
         public String getAddress() { return address; }
         public int getPort() { return port; }
         public String getPassword() { return password; }
+    }
+
+    class PlayerIdentity {
+        private final String uuid;
+        private final String name;
+
+        public PlayerIdentity(String uuid, String name) {
+            this.uuid = uuid;
+            this.name = name;
+        }
+
+        public String getUuid() { return uuid; }
+        public String getName() { return name; }
     }
 }

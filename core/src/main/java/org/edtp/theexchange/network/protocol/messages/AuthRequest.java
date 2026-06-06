@@ -1,6 +1,8 @@
 package org.edtp.theexchange.network.protocol.messages;
 
 public class AuthRequest {
+    public static final String CURRENT_PROTOCOL_VERSION = "2";
+
     private String serverName;
     private String password;      // plaintext over TLS, compared directly on receiver side
     private String version;       // protocol version

@@ -45,6 +45,7 @@ public class Connection {
     private volatile boolean authenticated;
     private volatile boolean inbound;
     private volatile String peerServerName;
+    private volatile int peerProtocolVersion = 1;
     private volatile long lastRecvTime;
     private Thread readThread;
     private BiConsumer<FrameType, Object> messageHandler;
@@ -106,6 +107,18 @@ public class Connection {
         this.peerServerName = peerServerName;
     }
 
+    public int getPeerProtocolVersion() {
+        return peerProtocolVersion;
+    }
+
+    public void setPeerProtocolVersion(String version) {
+        this.peerProtocolVersion = parseProtocolVersion(version);
+    }
+
+    public boolean supportsInventoryAccess() {
+        return peerProtocolVersion >= 2;
+    }
+
     public void setDisconnectHandler(BiConsumer<Connection, Boolean> handler) {
         this.disconnectHandler = handler;
     }
@@ -115,7 +128,7 @@ public class Connection {
      */
     public long send(FrameType type, Object message) {
         Frame frame = new Frame(type, sendSequence.incrementAndGet(),
-                System.currentTimeMillis(), MessageCodec.encodeMessage(message));
+                System.currentTimeMillis(), MessageCodec.encodeMessage(message, peerProtocolVersion));
         byte[] data = FrameEncoder.encode(frame);
         synchronized (out) {
             try {
@@ -149,7 +162,7 @@ public class Connection {
         byte[] data;
         try {
             Frame frame = new Frame(requestType, sendSequence.incrementAndGet(),
-                    System.currentTimeMillis(), MessageCodec.encodeMessage(request));
+                    System.currentTimeMillis(), MessageCodec.encodeMessage(request, peerProtocolVersion));
             data = FrameEncoder.encode(frame);
         } catch (RuntimeException e) {
             pendingResponses.remove(key, responseFuture);
@@ -296,6 +309,17 @@ public class Connection {
             return requestId;
         }
         return UUID.randomUUID().toString();
+    }
+
+    private int parseProtocolVersion(String version) {
+        if (version == null || version.isBlank()) {
+            return 1;
+        }
+        try {
+            return Math.max(1, Integer.parseInt(version.trim()));
+        } catch (NumberFormatException ignored) {
+            return 1;
+        }
     }
 
     private record ResponseKey(FrameType type, String requestId) {}

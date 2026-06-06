@@ -1,6 +1,7 @@
 package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.InventoryScope;
 
 public class SwapItemResponse implements CorrelatedMessage {
     private boolean success;
@@ -10,12 +11,20 @@ public class SwapItemResponse implements CorrelatedMessage {
     private int newVersion;
     private String failReason;
     private String requestId;
+    private InventoryScope scope = InventoryScope.server();
 
     public SwapItemResponse() {}
 
     public SwapItemResponse(boolean success, int slot, NeutralItem currentItem,
                             NeutralItem takenItem, int newVersion,
                             String failReason, String requestId) {
+        this(success, slot, currentItem, takenItem, newVersion,
+                failReason, requestId, InventoryScope.server());
+    }
+
+    public SwapItemResponse(boolean success, int slot, NeutralItem currentItem,
+                            NeutralItem takenItem, int newVersion,
+                            String failReason, String requestId, InventoryScope scope) {
         this.success = success;
         this.slot = slot;
         this.currentItem = currentItem;
@@ -23,6 +32,7 @@ public class SwapItemResponse implements CorrelatedMessage {
         this.newVersion = newVersion;
         this.failReason = failReason;
         this.requestId = requestId;
+        this.scope = scope != null ? scope : InventoryScope.server();
     }
 
     public boolean isSuccess() { return success; }
@@ -48,4 +58,7 @@ public class SwapItemResponse implements CorrelatedMessage {
 
     @Override
     public void setRequestId(String requestId) { this.requestId = requestId; }
+
+    public InventoryScope getScope() { return scope != null ? scope : InventoryScope.server(); }
+    public void setScope(InventoryScope scope) { this.scope = scope != null ? scope : InventoryScope.server(); }
 }

@@ -13,7 +13,7 @@ public class InventoryScope {
 
     public InventoryScope(ScopeType type, String scopeId) {
         this.type = type != null ? type : ScopeType.SERVER;
-        this.scopeId = scopeId != null ? scopeId : "";
+        this.scopeId = normalizeScopeId(this.type, scopeId);
     }
 
     public static InventoryScope server() {
@@ -22,6 +22,22 @@ public class InventoryScope {
 
     public static InventoryScope player(String playerUuid) {
         return new InventoryScope(ScopeType.PLAYER, playerUuid);
+    }
+
+    public static InventoryScope of(String typeName, String scopeId) {
+        ScopeType type = ScopeType.SERVER;
+        if (typeName != null && !typeName.isBlank()) {
+            type = ScopeType.valueOf(typeName.trim().toUpperCase(java.util.Locale.ROOT));
+        }
+        return new InventoryScope(type, scopeId);
+    }
+
+    public boolean isServer() {
+        return type == ScopeType.SERVER;
+    }
+
+    public boolean isPlayer() {
+        return type == ScopeType.PLAYER;
     }
 
     public ScopeType getType() {
@@ -34,6 +50,13 @@ public class InventoryScope {
 
     public String typeName() {
         return type.name();
+    }
+
+    private static String normalizeScopeId(ScopeType type, String scopeId) {
+        if (type == ScopeType.SERVER) {
+            return "";
+        }
+        return scopeId != null ? scopeId.trim().toLowerCase(java.util.Locale.ROOT) : "";
     }
 
     @Override

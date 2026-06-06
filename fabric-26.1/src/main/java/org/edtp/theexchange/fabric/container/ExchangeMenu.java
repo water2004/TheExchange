@@ -16,6 +16,8 @@ import org.edtp.theexchange.model.ExchangeInteraction;
 import org.edtp.theexchange.model.ExchangeInteractionResult;
 import org.edtp.theexchange.model.ExchangeMutationResult;
 import org.edtp.theexchange.model.ExchangeViewState;
+import org.edtp.theexchange.model.InventoryAccess;
+import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.MenuClickType;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.PlayerExchangeContext;
@@ -49,6 +51,8 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
     private final String serverName;
     private final boolean local;
     private volatile boolean online;
+    private volatile InventoryAccess access;
+    private volatile InventoryScope scope;
     private volatile boolean refreshing;
     private int exchangeQuickCraftType = -1;
     private int exchangeQuickCraftStatus;
@@ -60,6 +64,8 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         this.serverName = state.getServerName();
         this.local = state.isLocal();
         this.online = state.isOnline();
+        this.scope = state.getScope();
+        this.access = state.getAccess().withResolvedScope(this.scope);
         this.exchangeContainer = new ExchangeContainer(online, 6);
         exchangeContainer.loadFromItems(state.getItems());
 
@@ -105,6 +111,17 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         return serverName.equalsIgnoreCase(name);
     }
 
+    @Override
+    public boolean isViewingInventory(String name, InventoryScope scope) {
+        return isViewingServer(name) && sameScope(this.scope, scope);
+    }
+
+    @Override
+    public boolean isViewingInventory(String name, InventoryAccess access) {
+        return isViewingServer(name) && sameScope(this.scope,
+                access != null ? access.effectiveScope() : InventoryScope.server());
+    }
+
     public void refreshFromCache() {
         if (refreshing) return;
         loadViewAsync();
@@ -118,11 +135,11 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
             return;
         }
         var future = local
-                ? core.openLocalViewAsync(serverName)
-                : core.openRemoteCachedViewAsync(serverName);
+                ? core.openLocalViewAsync(serverName, access)
+                : core.openRemoteCachedViewAsync(serverName, access);
         future.whenComplete((state, error) ->
                 core.getApi().runOnMainThread(() -> {
-                    if (error == null && state != null && isViewingServer(state.getServerName())) {
+                    if (error == null && state != null && isViewingInventory(state.getServerName(), state.getScope())) {
                         applyViewState(state);
                     }
                 }));
@@ -137,13 +154,13 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
             return;
         }
         var future = local
-                ? core.openLocalViewAsync(serverName)
-                : core.openRemoteViewAsync(serverName);
+                ? core.openLocalViewAsync(serverName, access)
+                : core.openRemoteViewAsync(serverName, access);
         future.whenComplete((state, error) -> {
             try {
                 core.getApi().runOnMainThread(() -> {
                     try {
-                        if (error != null || state == null || !isViewingServer(state.getServerName())) {
+                        if (error != null || state == null || !isViewingInventory(state.getServerName(), state.getScope())) {
                             return;
                         }
                         applyViewState(state);
@@ -159,6 +176,8 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
     }
 
     private void applyViewState(ExchangeViewState state) {
+            scope = state.getScope();
+            access = state.getAccess().withResolvedScope(scope);
             online = state.isOnline();
             exchangeContainer.clearContent();
             exchangeContainer.loadFromItems(state.getItems());
@@ -400,7 +419,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized()) return;
-        core.takeRemoteAsync(serverName, target.slot(), takeCount, playerContext(player))
+        core.takeRemoteAsync(serverName, target.slot(), takeCount, playerContext(player), access)
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
                         String message = error != null
@@ -525,7 +544,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         }
 
         NeutralItem item = neutralFromStack(inFlight.stack());
-        core.putRemoteAsync(serverName, decision.getTargetSlot(), item, playerContext(player))
+        core.putRemoteAsync(serverName, decision.getTargetSlot(), item, playerContext(player), access)
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
                         restoreSourceStack(player, inFlight);
@@ -639,7 +658,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
                                  ContainerInput containerInput, Player player) {
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized()) return;
-        core.takeRemoteAsync(serverName, decision.getTargetSlot(), decision.getCount(), playerContext(player))
+        core.takeRemoteAsync(serverName, decision.getTargetSlot(), decision.getCount(), playerContext(player), access)
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
                         String message = error != null
@@ -674,7 +693,7 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
         NeutralItem item = neutralFromStack(inFlight.stack());
         core.swapRemoteAsync(serverName, decision.getTargetSlot(), item,
                         decision.getExpectedItemId(), decision.getCount(),
-                        decision.isBoundedMerge(), playerContext(player))
+                        decision.isBoundedMerge(), playerContext(player), access)
                 .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
                     if (error != null || result == null || !result.isSuccess()) {
                         restoreSourceStack(player, inFlight);
@@ -776,6 +795,12 @@ public class ExchangeMenu extends AbstractContainerMenu implements RefreshableEx
 
     private PlayerExchangeContext playerContext(Player player) {
         return new PlayerExchangeContext(player.getUUID().toString(), player.getName().getString());
+    }
+
+    private boolean sameScope(InventoryScope left, InventoryScope right) {
+        InventoryScope a = left != null ? left : InventoryScope.server();
+        InventoryScope b = right != null ? right : InventoryScope.server();
+        return a.equals(b);
     }
 
     private String rootMessage(Throwable error) {

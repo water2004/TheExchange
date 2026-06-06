@@ -1,6 +1,7 @@
 package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.InventoryAccess;
 
 public class PutItemRequest implements CorrelatedMessage {
     private int slot;
@@ -9,6 +10,7 @@ public class PutItemRequest implements CorrelatedMessage {
     private String requestId;
     private String playerUuid;
     private String playerName;
+    private InventoryAccess access = InventoryAccess.server();
 
     public PutItemRequest() {}
 
@@ -18,12 +20,19 @@ public class PutItemRequest implements CorrelatedMessage {
 
     public PutItemRequest(int slot, NeutralItem item, int expectedVersion,
                           String requestId, String playerUuid, String playerName) {
+        this(slot, item, expectedVersion, requestId, playerUuid, playerName, InventoryAccess.server());
+    }
+
+    public PutItemRequest(int slot, NeutralItem item, int expectedVersion,
+                          String requestId, String playerUuid, String playerName,
+                          InventoryAccess access) {
         this.slot = slot;
         this.item = item;
         this.expectedVersion = expectedVersion;
         this.requestId = requestId;
         this.playerUuid = playerUuid;
         this.playerName = playerName;
+        this.access = access != null ? access : InventoryAccess.server();
     }
 
     public int getSlot() { return slot; }
@@ -43,4 +52,7 @@ public class PutItemRequest implements CorrelatedMessage {
 
     public String getPlayerName() { return playerName; }
     public void setPlayerName(String playerName) { this.playerName = playerName; }
+
+    public InventoryAccess getAccess() { return access != null ? access : InventoryAccess.server(); }
+    public void setAccess(InventoryAccess access) { this.access = access != null ? access : InventoryAccess.server(); }
 }

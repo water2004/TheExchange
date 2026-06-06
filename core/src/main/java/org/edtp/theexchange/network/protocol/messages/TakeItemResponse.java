@@ -1,6 +1,7 @@
 package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.InventoryScope;
 
 public class TakeItemResponse implements CorrelatedMessage {
     private boolean success;
@@ -11,6 +12,7 @@ public class TakeItemResponse implements CorrelatedMessage {
     private int newVersion;
     private NeutralItem itemsToGive;
     private String requestId;
+    private InventoryScope scope = InventoryScope.server();
 
     public TakeItemResponse() {}
 
@@ -23,6 +25,13 @@ public class TakeItemResponse implements CorrelatedMessage {
     public TakeItemResponse(boolean success, int slot, NeutralItem currentItem,
                             String failReason, long newTimestamp, int newVersion,
                             NeutralItem itemsToGive, String requestId) {
+        this(success, slot, currentItem, failReason, newTimestamp, newVersion,
+                itemsToGive, requestId, InventoryScope.server());
+    }
+
+    public TakeItemResponse(boolean success, int slot, NeutralItem currentItem,
+                            String failReason, long newTimestamp, int newVersion,
+                            NeutralItem itemsToGive, String requestId, InventoryScope scope) {
         this.success = success;
         this.slot = slot;
         this.currentItem = currentItem;
@@ -31,6 +40,7 @@ public class TakeItemResponse implements CorrelatedMessage {
         this.newVersion = newVersion;
         this.itemsToGive = itemsToGive;
         this.requestId = requestId;
+        this.scope = scope != null ? scope : InventoryScope.server();
     }
 
     public boolean isSuccess() { return success; }
@@ -59,4 +69,7 @@ public class TakeItemResponse implements CorrelatedMessage {
 
     @Override
     public void setRequestId(String requestId) { this.requestId = requestId; }
+
+    public InventoryScope getScope() { return scope != null ? scope : InventoryScope.server(); }
+    public void setScope(InventoryScope scope) { this.scope = scope != null ? scope : InventoryScope.server(); }
 }

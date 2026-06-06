@@ -1,6 +1,7 @@
 package org.edtp.theexchange.network.protocol.messages;
 
 import org.edtp.theexchange.model.NeutralItem;
+import org.edtp.theexchange.model.InventoryAccess;
 
 public class SwapItemRequest implements CorrelatedMessage {
     private int slot;
@@ -12,12 +13,21 @@ public class SwapItemRequest implements CorrelatedMessage {
     private String requestId;
     private String playerUuid;
     private String playerName;
+    private InventoryAccess access = InventoryAccess.server();
 
     public SwapItemRequest() {}
 
     public SwapItemRequest(int slot, NeutralItem newItem, int expectedVersion,
                            String expectedItemId, int takeCount, boolean boundedMerge,
                            String requestId, String playerUuid, String playerName) {
+        this(slot, newItem, expectedVersion, expectedItemId, takeCount, boundedMerge,
+                requestId, playerUuid, playerName, InventoryAccess.server());
+    }
+
+    public SwapItemRequest(int slot, NeutralItem newItem, int expectedVersion,
+                           String expectedItemId, int takeCount, boolean boundedMerge,
+                           String requestId, String playerUuid, String playerName,
+                           InventoryAccess access) {
         this.slot = slot;
         this.newItem = newItem;
         this.expectedVersion = expectedVersion;
@@ -27,6 +37,7 @@ public class SwapItemRequest implements CorrelatedMessage {
         this.requestId = requestId;
         this.playerUuid = playerUuid;
         this.playerName = playerName;
+        this.access = access != null ? access : InventoryAccess.server();
     }
 
     public int getSlot() { return slot; }
@@ -58,4 +69,7 @@ public class SwapItemRequest implements CorrelatedMessage {
 
     public String getPlayerName() { return playerName; }
     public void setPlayerName(String playerName) { this.playerName = playerName; }
+
+    public InventoryAccess getAccess() { return access != null ? access : InventoryAccess.server(); }
+    public void setAccess(InventoryAccess access) { this.access = access != null ? access : InventoryAccess.server(); }
 }

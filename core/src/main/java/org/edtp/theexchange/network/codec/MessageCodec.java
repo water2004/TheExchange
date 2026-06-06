@@ -1,5 +1,7 @@
 package org.edtp.theexchange.network.codec;
 
+import org.edtp.theexchange.model.InventoryAccess;
+import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.network.protocol.FrameType;
 import org.edtp.theexchange.network.protocol.messages.*;
@@ -15,34 +17,40 @@ import java.util.List;
 
 public final class MessageCodec {
     private static final int MAX_SLOTS = 256;
+    private static final int PROTOCOL_V2 = 2;
 
     private MessageCodec() {}
 
     public static byte[] encodeMessage(Object msg) {
+        return encodeMessage(msg, PROTOCOL_V2);
+    }
+
+    public static byte[] encodeMessage(Object msg, int protocolVersion) {
+        boolean includeV2Fields = protocolVersion >= PROTOCOL_V2;
         try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
              DataOutputStream out = new DataOutputStream(bos)) {
             if (msg instanceof AuthRequest m) encodeAuthRequest(out, m);
-            else if (msg instanceof AuthResponse m) encodeAuthResponse(out, m);
+            else if (msg instanceof AuthResponse m) encodeAuthResponse(out, m, includeV2Fields);
             else if (msg instanceof Heartbeat m) encodeHeartbeat(out, m);
             else if (msg instanceof QueryTimestampRequest m) encodeQueryTimestampRequest(out, m);
             else if (msg instanceof QueryTimestampResponse m) encodeQueryTimestampResponse(out, m);
             else if (msg instanceof QueryItemsRequest m) encodeQueryItemsRequest(out, m);
             else if (msg instanceof QueryItemsResponse m) encodeQueryItemsResponse(out, m);
-            else if (msg instanceof QuerySlotVersionRequest m) encodeQuerySlotVersionRequest(out, m);
-            else if (msg instanceof QuerySlotVersionResponse m) encodeQuerySlotVersionResponse(out, m);
-            else if (msg instanceof QuerySlotStateRequest m) encodeQuerySlotStateRequest(out, m);
-            else if (msg instanceof SlotStateResponse m) encodeSlotStateResponse(out, m);
-            else if (msg instanceof QuerySlotVersionsRequest m) encodeQuerySlotVersionsRequest(out, m);
-            else if (msg instanceof SlotVersionsResponse m) encodeSlotVersionsResponse(out, m);
-            else if (msg instanceof QuerySlotsRequest m) encodeQuerySlotsRequest(out, m);
-            else if (msg instanceof SlotsStateResponse m) encodeSlotsStateResponse(out, m);
-            else if (msg instanceof PutItemRequest m) encodePutItemRequest(out, m);
-            else if (msg instanceof PutItemResponse m) encodePutItemResponse(out, m);
-            else if (msg instanceof TakeItemRequest m) encodeTakeItemRequest(out, m);
-            else if (msg instanceof TakeItemResponse m) encodeTakeItemResponse(out, m);
-            else if (msg instanceof SwapItemRequest m) encodeSwapItemRequest(out, m);
-            else if (msg instanceof SwapItemResponse m) encodeSwapItemResponse(out, m);
-            else if (msg instanceof PushUpdate m) encodePushUpdate(out, m);
+            else if (msg instanceof QuerySlotVersionRequest m) encodeQuerySlotVersionRequest(out, m, includeV2Fields);
+            else if (msg instanceof QuerySlotVersionResponse m) encodeQuerySlotVersionResponse(out, m, includeV2Fields);
+            else if (msg instanceof QuerySlotStateRequest m) encodeQuerySlotStateRequest(out, m, includeV2Fields);
+            else if (msg instanceof SlotStateResponse m) encodeSlotStateResponse(out, m, includeV2Fields);
+            else if (msg instanceof QuerySlotVersionsRequest m) encodeQuerySlotVersionsRequest(out, m, includeV2Fields);
+            else if (msg instanceof SlotVersionsResponse m) encodeSlotVersionsResponse(out, m, includeV2Fields);
+            else if (msg instanceof QuerySlotsRequest m) encodeQuerySlotsRequest(out, m, includeV2Fields);
+            else if (msg instanceof SlotsStateResponse m) encodeSlotsStateResponse(out, m, includeV2Fields);
+            else if (msg instanceof PutItemRequest m) encodePutItemRequest(out, m, includeV2Fields);
+            else if (msg instanceof PutItemResponse m) encodePutItemResponse(out, m, includeV2Fields);
+            else if (msg instanceof TakeItemRequest m) encodeTakeItemRequest(out, m, includeV2Fields);
+            else if (msg instanceof TakeItemResponse m) encodeTakeItemResponse(out, m, includeV2Fields);
+            else if (msg instanceof SwapItemRequest m) encodeSwapItemRequest(out, m, includeV2Fields);
+            else if (msg instanceof SwapItemResponse m) encodeSwapItemResponse(out, m, includeV2Fields);
+            else if (msg instanceof PushUpdate m) encodePushUpdate(out, m, includeV2Fields);
             else if (msg instanceof ErrorMessage m) encodeError(out, m);
             else throw new IllegalArgumentException("Unknown message type: " + msg.getClass());
             out.flush();
@@ -92,12 +100,15 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getMcVersion());
     }
 
-    private static void encodeAuthResponse(DataOutputStream out, AuthResponse m) throws IOException {
+    private static void encodeAuthResponse(DataOutputStream out, AuthResponse m, boolean includeV2Fields) throws IOException {
         out.writeBoolean(m.isSuccess());
         BinaryIO.writeString(out, m.getMessage());
         BinaryIO.writeString(out, m.getServerName());
         BinaryIO.writeString(out, m.getMcVersion());
         out.writeLong(m.getLastModifiedTimestamp());
+        if (includeV2Fields) {
+            BinaryIO.writeString(out, m.getVersion());
+        }
     }
 
     private static void encodeHeartbeat(DataOutputStream out, Heartbeat m) throws IOException {
@@ -132,34 +143,52 @@ public final class MessageCodec {
         }
     }
 
-    private static void encodeQuerySlotVersionRequest(DataOutputStream out, QuerySlotVersionRequest m) throws IOException {
+    private static void encodeQuerySlotVersionRequest(DataOutputStream out, QuerySlotVersionRequest m,
+                                                      boolean includeV2Fields) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
+        writeInventoryAccessIfSupported(out, m.getAccess(), includeV2Fields);
     }
 
-    private static void encodeQuerySlotVersionResponse(DataOutputStream out, QuerySlotVersionResponse m) throws IOException {
+    private static void encodeQuerySlotVersionResponse(DataOutputStream out, QuerySlotVersionResponse m,
+                                                       boolean includeV2Fields) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
         out.writeInt(m.getVersion());
+        writeResponseExtensionsIfSupported(out, m.getScope(), m.isSuccess(), m.getFailReason(), includeV2Fields);
     }
 
-    private static void encodeQuerySlotStateRequest(DataOutputStream out, QuerySlotStateRequest m) throws IOException {
+    private static void encodeQuerySlotStateRequest(DataOutputStream out, QuerySlotStateRequest m,
+                                                    boolean includeV2Fields) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
+        writeInventoryAccessIfSupported(out, m.getAccess(), includeV2Fields);
     }
 
-    private static void encodeSlotStateResponse(DataOutputStream out, SlotStateResponse m) throws IOException {
+    private static void encodeSlotStateResponse(DataOutputStream out, SlotStateResponse m,
+                                                boolean includeV2Fields) throws IOException {
+        encodeSlotStateResponse(out, m, includeV2Fields, true);
+    }
+
+    private static void encodeSlotStateResponse(DataOutputStream out, SlotStateResponse m,
+                                                boolean includeV2Fields, boolean includeResponseExtensions) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getItem());
         out.writeInt(m.getVersion());
+        if (includeResponseExtensions) {
+            writeResponseExtensionsIfSupported(out, m.getScope(), m.isSuccess(), m.getFailReason(), includeV2Fields);
+        }
     }
 
-    private static void encodeQuerySlotVersionsRequest(DataOutputStream out, QuerySlotVersionsRequest m) throws IOException {
+    private static void encodeQuerySlotVersionsRequest(DataOutputStream out, QuerySlotVersionsRequest m,
+                                                       boolean includeV2Fields) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
+        writeInventoryAccessIfSupported(out, m.getAccess(), includeV2Fields);
     }
 
-    private static void encodeSlotVersionsResponse(DataOutputStream out, SlotVersionsResponse m) throws IOException {
+    private static void encodeSlotVersionsResponse(DataOutputStream out, SlotVersionsResponse m,
+                                                   boolean includeV2Fields) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
         List<Integer> versions = m.getVersions();
         out.writeInt(versions != null ? versions.size() : 0);
@@ -168,9 +197,11 @@ public final class MessageCodec {
                 out.writeInt(version != null ? version : 0);
             }
         }
+        writeResponseExtensionsIfSupported(out, m.getScope(), m.isSuccess(), m.getFailReason(), includeV2Fields);
     }
 
-    private static void encodeQuerySlotsRequest(DataOutputStream out, QuerySlotsRequest m) throws IOException {
+    private static void encodeQuerySlotsRequest(DataOutputStream out, QuerySlotsRequest m,
+                                                boolean includeV2Fields) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
         List<Integer> slots = m.getSlots();
         out.writeInt(slots != null ? slots.size() : 0);
@@ -179,29 +210,35 @@ public final class MessageCodec {
                 out.writeInt(slot);
             }
         }
+        writeInventoryAccessIfSupported(out, m.getAccess(), includeV2Fields);
     }
 
-    private static void encodeSlotsStateResponse(DataOutputStream out, SlotsStateResponse m) throws IOException {
+    private static void encodeSlotsStateResponse(DataOutputStream out, SlotsStateResponse m,
+                                                 boolean includeV2Fields) throws IOException {
         BinaryIO.writeString(out, m.getRequestId());
         List<SlotStateResponse> slots = m.getSlots();
         out.writeInt(slots != null ? slots.size() : 0);
         if (slots != null) {
             for (SlotStateResponse slot : slots) {
-                encodeSlotStateResponse(out, slot);
+                encodeSlotStateResponse(out, slot, includeV2Fields, false);
             }
         }
+        writeResponseExtensionsIfSupported(out, m.getScope(), m.isSuccess(), m.getFailReason(), includeV2Fields);
     }
 
-    private static void encodePutItemRequest(DataOutputStream out, PutItemRequest m) throws IOException {
+    private static void encodePutItemRequest(DataOutputStream out, PutItemRequest m,
+                                             boolean includeV2Fields) throws IOException {
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getItem());
         out.writeInt(m.getExpectedVersion());
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
+        writeInventoryAccessIfSupported(out, m.getAccess(), includeV2Fields);
     }
 
-    private static void encodePutItemResponse(DataOutputStream out, PutItemResponse m) throws IOException {
+    private static void encodePutItemResponse(DataOutputStream out, PutItemResponse m,
+                                              boolean includeV2Fields) throws IOException {
         out.writeBoolean(m.isSuccess());
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getCurrentItem());
@@ -209,9 +246,11 @@ public final class MessageCodec {
         out.writeLong(m.getNewTimestamp());
         out.writeInt(m.getNewVersion());
         BinaryIO.writeString(out, m.getRequestId());
+        writeInventoryScopeIfSupported(out, m.getScope(), includeV2Fields);
     }
 
-    private static void encodeTakeItemRequest(DataOutputStream out, TakeItemRequest m) throws IOException {
+    private static void encodeTakeItemRequest(DataOutputStream out, TakeItemRequest m,
+                                              boolean includeV2Fields) throws IOException {
         out.writeInt(m.getSlot());
         BinaryIO.writeString(out, m.getExpectedItemId());
         out.writeInt(m.getExpectedVersion());
@@ -219,9 +258,11 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
+        writeInventoryAccessIfSupported(out, m.getAccess(), includeV2Fields);
     }
 
-    private static void encodeTakeItemResponse(DataOutputStream out, TakeItemResponse m) throws IOException {
+    private static void encodeTakeItemResponse(DataOutputStream out, TakeItemResponse m,
+                                               boolean includeV2Fields) throws IOException {
         out.writeBoolean(m.isSuccess());
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getCurrentItem());
@@ -230,9 +271,11 @@ public final class MessageCodec {
         out.writeInt(m.getNewVersion());
         BinaryIO.writeNullableNeutralItem(out, m.getItemsToGive());
         BinaryIO.writeString(out, m.getRequestId());
+        writeInventoryScopeIfSupported(out, m.getScope(), includeV2Fields);
     }
 
-    private static void encodeSwapItemRequest(DataOutputStream out, SwapItemRequest m) throws IOException {
+    private static void encodeSwapItemRequest(DataOutputStream out, SwapItemRequest m,
+                                              boolean includeV2Fields) throws IOException {
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getNewItem());
         out.writeInt(m.getExpectedVersion());
@@ -242,9 +285,11 @@ public final class MessageCodec {
         BinaryIO.writeString(out, m.getRequestId());
         BinaryIO.writeString(out, m.getPlayerUuid());
         BinaryIO.writeString(out, m.getPlayerName());
+        writeInventoryAccessIfSupported(out, m.getAccess(), includeV2Fields);
     }
 
-    private static void encodeSwapItemResponse(DataOutputStream out, SwapItemResponse m) throws IOException {
+    private static void encodeSwapItemResponse(DataOutputStream out, SwapItemResponse m,
+                                               boolean includeV2Fields) throws IOException {
         out.writeBoolean(m.isSuccess());
         out.writeInt(m.getSlot());
         BinaryIO.writeNullableNeutralItem(out, m.getCurrentItem());
@@ -252,9 +297,10 @@ public final class MessageCodec {
         out.writeInt(m.getNewVersion());
         BinaryIO.writeString(out, m.getFailReason());
         BinaryIO.writeString(out, m.getRequestId());
+        writeInventoryScopeIfSupported(out, m.getScope(), includeV2Fields);
     }
 
-    private static void encodePushUpdate(DataOutputStream out, PushUpdate m) throws IOException {
+    private static void encodePushUpdate(DataOutputStream out, PushUpdate m, boolean includeV2Fields) throws IOException {
         List<Integer> slots = m.getChangedSlots();
         out.writeLong(m.getTimestamp());
         out.writeInt(slots != null ? slots.size() : 0);
@@ -263,6 +309,7 @@ public final class MessageCodec {
                 out.writeInt(slot);
             }
         }
+        writeInventoryScopeIfSupported(out, m.getScope(), includeV2Fields);
     }
 
     private static void encodeError(DataOutputStream out, ErrorMessage m) throws IOException {
@@ -276,8 +323,14 @@ public final class MessageCodec {
     }
 
     private static AuthResponse decodeAuthResponse(DataInputStream in) throws IOException {
-        return new AuthResponse(in.readBoolean(), BinaryIO.readString(in),
+        AuthResponse response = new AuthResponse(in.readBoolean(), BinaryIO.readString(in),
                 BinaryIO.readString(in), BinaryIO.readString(in), in.readLong());
+        if (in.available() > 0) {
+            response.setVersion(BinaryIO.readString(in));
+        } else {
+            response.setVersion("1");
+        }
+        return response;
     }
 
     private static Heartbeat decodeHeartbeat(DataInputStream in) throws IOException {
@@ -309,23 +362,39 @@ public final class MessageCodec {
     }
 
     private static QuerySlotVersionRequest decodeQuerySlotVersionRequest(DataInputStream in) throws IOException {
-        return new QuerySlotVersionRequest(BinaryIO.readString(in), in.readInt());
+        QuerySlotVersionRequest request = new QuerySlotVersionRequest(BinaryIO.readString(in), in.readInt());
+        request.setAccess(readInventoryAccessIfPresent(in));
+        return request;
     }
 
     private static QuerySlotVersionResponse decodeQuerySlotVersionResponse(DataInputStream in) throws IOException {
-        return new QuerySlotVersionResponse(BinaryIO.readString(in), in.readInt(), in.readInt());
+        QuerySlotVersionResponse response = new QuerySlotVersionResponse(BinaryIO.readString(in), in.readInt(), in.readInt());
+        response.setScope(readInventoryScopeIfPresent(in));
+        readQueryResultIfPresent(in, response::setSuccess, response::setFailReason);
+        return response;
     }
 
     private static QuerySlotStateRequest decodeQuerySlotStateRequest(DataInputStream in) throws IOException {
-        return new QuerySlotStateRequest(BinaryIO.readString(in), in.readInt());
+        QuerySlotStateRequest request = new QuerySlotStateRequest(BinaryIO.readString(in), in.readInt());
+        request.setAccess(readInventoryAccessIfPresent(in));
+        return request;
     }
 
     private static SlotStateResponse decodeSlotStateResponse(DataInputStream in) throws IOException {
+        SlotStateResponse response = new SlotStateResponse(BinaryIO.readString(in), in.readInt(), BinaryIO.readNullableNeutralItem(in), in.readInt());
+        response.setScope(readInventoryScopeIfPresent(in));
+        readQueryResultIfPresent(in, response::setSuccess, response::setFailReason);
+        return response;
+    }
+
+    private static SlotStateResponse decodeSlotStateResponseWithoutScope(DataInputStream in) throws IOException {
         return new SlotStateResponse(BinaryIO.readString(in), in.readInt(), BinaryIO.readNullableNeutralItem(in), in.readInt());
     }
 
     private static QuerySlotVersionsRequest decodeQuerySlotVersionsRequest(DataInputStream in) throws IOException {
-        return new QuerySlotVersionsRequest(BinaryIO.readString(in));
+        QuerySlotVersionsRequest request = new QuerySlotVersionsRequest(BinaryIO.readString(in));
+        request.setAccess(readInventoryAccessIfPresent(in));
+        return request;
     }
 
     private static SlotVersionsResponse decodeSlotVersionsResponse(DataInputStream in) throws IOException {
@@ -335,7 +404,10 @@ public final class MessageCodec {
         for (int i = 0; i < size; i++) {
             versions.add(in.readInt());
         }
-        return new SlotVersionsResponse(requestId, versions);
+        SlotVersionsResponse response = new SlotVersionsResponse(requestId, versions);
+        response.setScope(readInventoryScopeIfPresent(in));
+        readQueryResultIfPresent(in, response::setSuccess, response::setFailReason);
+        return response;
     }
 
     private static QuerySlotsRequest decodeQuerySlotsRequest(DataInputStream in) throws IOException {
@@ -345,7 +417,9 @@ public final class MessageCodec {
         for (int i = 0; i < size; i++) {
             slots.add(in.readInt());
         }
-        return new QuerySlotsRequest(requestId, slots);
+        QuerySlotsRequest request = new QuerySlotsRequest(requestId, slots);
+        request.setAccess(readInventoryAccessIfPresent(in));
+        return request;
     }
 
     private static SlotsStateResponse decodeSlotsStateResponse(DataInputStream in) throws IOException {
@@ -353,9 +427,12 @@ public final class MessageCodec {
         int size = readListSize(in, "slot states");
         List<SlotStateResponse> slots = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
-            slots.add(decodeSlotStateResponse(in));
+            slots.add(decodeSlotStateResponseWithoutScope(in));
         }
-        return new SlotsStateResponse(requestId, slots);
+        SlotsStateResponse response = new SlotsStateResponse(requestId, slots);
+        response.setScope(readInventoryScopeIfPresent(in));
+        readQueryResultIfPresent(in, response::setSuccess, response::setFailReason);
+        return response;
     }
 
     private static PutItemRequest decodePutItemRequest(DataInputStream in) throws IOException {
@@ -366,6 +443,7 @@ public final class MessageCodec {
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));
+        request.setAccess(readInventoryAccessIfPresent(in));
         return request;
     }
 
@@ -378,6 +456,7 @@ public final class MessageCodec {
         response.setNewTimestamp(in.readLong());
         response.setNewVersion(in.readInt());
         response.setRequestId(BinaryIO.readString(in));
+        response.setScope(readInventoryScopeIfPresent(in));
         return response;
     }
 
@@ -390,6 +469,7 @@ public final class MessageCodec {
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));
+        request.setAccess(readInventoryAccessIfPresent(in));
         return request;
     }
 
@@ -403,6 +483,7 @@ public final class MessageCodec {
         response.setNewVersion(in.readInt());
         response.setItemsToGive(BinaryIO.readNullableNeutralItem(in));
         response.setRequestId(BinaryIO.readString(in));
+        response.setScope(readInventoryScopeIfPresent(in));
         return response;
     }
 
@@ -417,6 +498,7 @@ public final class MessageCodec {
         request.setRequestId(BinaryIO.readString(in));
         request.setPlayerUuid(BinaryIO.readString(in));
         request.setPlayerName(BinaryIO.readString(in));
+        request.setAccess(readInventoryAccessIfPresent(in));
         return request;
     }
 
@@ -429,6 +511,7 @@ public final class MessageCodec {
         response.setNewVersion(in.readInt());
         response.setFailReason(BinaryIO.readString(in));
         response.setRequestId(BinaryIO.readString(in));
+        response.setScope(readInventoryScopeIfPresent(in));
         return response;
     }
 
@@ -441,6 +524,7 @@ public final class MessageCodec {
             slots.add(in.readInt());
         }
         update.setChangedSlots(slots);
+        update.setScope(readInventoryScopeIfPresent(in));
         return update;
     }
 
@@ -454,5 +538,97 @@ public final class MessageCodec {
             throw new IOException(label + " list too large: " + size);
         }
         return size;
+    }
+
+    private static void writeInventoryAccess(DataOutputStream out, InventoryAccess access) throws IOException {
+        InventoryAccess value = access != null ? access : InventoryAccess.server();
+        BinaryIO.writeString(out, value.type().name());
+        BinaryIO.writeString(out, value.ownerName());
+        BinaryIO.writeString(out, value.password());
+    }
+
+    private static void writeInventoryAccessIfSupported(DataOutputStream out, InventoryAccess access,
+                                                        boolean includeV2Fields) throws IOException {
+        if (includeV2Fields) {
+            writeInventoryAccess(out, access);
+            return;
+        }
+        InventoryAccess value = access != null ? access : InventoryAccess.server();
+        if (value.isPlayer()) {
+            throw new IOException("Protocol v1 cannot encode player inventory access");
+        }
+    }
+
+    private static InventoryAccess readInventoryAccessIfPresent(DataInputStream in) throws IOException {
+        if (in.available() <= 0) {
+            return InventoryAccess.server();
+        }
+        String type = BinaryIO.readString(in);
+        String ownerName = BinaryIO.readString(in);
+        String password = BinaryIO.readString(in);
+        InventoryScope.ScopeType scopeType = InventoryScope.ScopeType.SERVER;
+        if (type != null && !type.isBlank()) {
+            scopeType = InventoryScope.ScopeType.valueOf(type.trim().toUpperCase(java.util.Locale.ROOT));
+        }
+        return scopeType == InventoryScope.ScopeType.PLAYER
+                ? InventoryAccess.player(ownerName, password)
+                : InventoryAccess.server();
+    }
+
+    private static void writeInventoryScope(DataOutputStream out, InventoryScope scope) throws IOException {
+        InventoryScope value = scope != null ? scope : InventoryScope.server();
+        BinaryIO.writeString(out, value.typeName());
+        BinaryIO.writeString(out, value.getScopeId());
+    }
+
+    private static void writeInventoryScopeIfSupported(DataOutputStream out, InventoryScope scope,
+                                                       boolean includeV2Fields) throws IOException {
+        InventoryScope value = scope != null ? scope : InventoryScope.server();
+        if (includeV2Fields) {
+            writeInventoryScope(out, value);
+            return;
+        }
+        if (value.isPlayer()) {
+            throw new IOException("Protocol v1 cannot encode player inventory scope");
+        }
+    }
+
+    private static void writeResponseExtensionsIfSupported(DataOutputStream out, InventoryScope scope,
+                                                           boolean success, String failReason,
+                                                           boolean includeV2Fields) throws IOException {
+        if (includeV2Fields) {
+            writeInventoryScope(out, scope);
+            out.writeBoolean(success);
+            BinaryIO.writeString(out, failReason);
+            return;
+        }
+        writeInventoryScopeIfSupported(out, scope, false);
+        if (!success || (failReason != null && !failReason.isBlank())) {
+            throw new IOException("Protocol v1 cannot encode query failure metadata");
+        }
+    }
+
+    private static InventoryScope readInventoryScopeIfPresent(DataInputStream in) throws IOException {
+        if (in.available() <= 0) {
+            return InventoryScope.server();
+        }
+        return InventoryScope.of(BinaryIO.readString(in), BinaryIO.readString(in));
+    }
+
+    private interface BooleanSetter {
+        void set(boolean value);
+    }
+
+    private interface StringSetter {
+        void set(String value);
+    }
+
+    private static void readQueryResultIfPresent(DataInputStream in, BooleanSetter successSetter,
+                                                 StringSetter failReasonSetter) throws IOException {
+        if (in.available() <= 0) {
+            return;
+        }
+        successSetter.set(in.readBoolean());
+        failReasonSetter.set(BinaryIO.readString(in));
     }
 }
