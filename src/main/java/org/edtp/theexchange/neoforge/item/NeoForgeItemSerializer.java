@@ -1,5 +1,7 @@
 package org.edtp.theexchange.neoforge.item;
 
+import com.mojang.logging.LogUtils;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
@@ -7,12 +9,14 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
+import net.minecraft.resources.RegistryOps;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.model.NeutralItem;
+import org.slf4j.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -30,10 +34,14 @@ import java.util.Arrays;
  */
 public class NeoForgeItemSerializer implements ItemSerializer {
 
-    private final String sourceVersion;
+    private static final Logger LOG = LogUtils.getLogger();
 
-    public NeoForgeItemSerializer(String sourceVersion) {
+    private final String sourceVersion;
+    private final RegistryOps<Tag> registryOps;
+
+    public NeoForgeItemSerializer(String sourceVersion, RegistryAccess registryAccess) {
         this.sourceVersion = sourceVersion;
+        this.registryOps = RegistryOps.create(NbtOps.INSTANCE, registryAccess);
     }
 
     @Override
@@ -46,11 +54,12 @@ public class NeoForgeItemSerializer implements ItemSerializer {
         byte[] extraData = null;
 
         try {
-            CompoundTag tag = (CompoundTag) ItemStack.CODEC.encodeStart(NbtOps.INSTANCE, stack)
+            CompoundTag tag = (CompoundTag) ItemStack.CODEC.encodeStart(registryOps, stack)
                     .getOrThrow();
             tag.remove("count");
             extraData = writeCanonical(tag);
         } catch (Exception e) {
+            LOG.error("[Exchange] serialize failed id={}", itemId, e);
             extraData = new byte[0];
         }
 
@@ -79,7 +88,7 @@ public class NeoForgeItemSerializer implements ItemSerializer {
             DataInputStream dis = new DataInputStream(bis);
             CompoundTag tag = NbtIo.read(dis);
             tag.putInt("count", Math.max(1, item.getCount()));
-            ItemStack.CODEC.parse(NbtOps.INSTANCE, tag).getOrThrow();
+            ItemStack.CODEC.parse(registryOps, tag).getOrThrow();
             return true;
         } catch (Exception e) {
             debugCanDeserializeFailure(item, "NBT_OR_CODEC", e);
@@ -97,12 +106,13 @@ public class NeoForgeItemSerializer implements ItemSerializer {
                 DataInputStream dis = new DataInputStream(bis);
                 CompoundTag tag = NbtIo.read(dis);
                 tag.putInt("count", Math.max(1, item.getCount()));
-                ItemStack stack = ItemStack.CODEC.parse(NbtOps.INSTANCE, tag)
+                ItemStack stack = ItemStack.CODEC.parse(registryOps, tag)
                         .getOrThrow();
                 stack.setCount(item.getCount());
                 return stack;
             }
-        } catch (Exception ignored) {
+        } catch (Exception e){
+            LOG.warn("[Exchange] deserialize NBT parse failed id={}", item.getItemId(), e);
         }
 
         // Try to find the item by ID
@@ -210,14 +220,9 @@ public class NeoForgeItemSerializer implements ItemSerializer {
     }
 
     private void debugCanDeserializeFailure(NeutralItem item, String stage, Exception error) {
-        byte[] extra = item.getExtraData();
-        String message = "[Exchange|Debug][Compat][canDeserialize] fail stage=" + stage
-                + " id=" + item.getItemId()
-                + " count=" + item.getCount()
-                + " incompatible=" + item.isIncompatible()
-                + " extraLen=" + (extra == null ? -1 : extra.length)
-                + " extraHash=" + Arrays.hashCode(extra)
-                + (error == null ? "" : " error=" + error.getClass().getSimpleName() + ": " + error.getMessage());
-        System.out.println(message);
+        LOG.debug("[Exchange] canDeserialize fail stage={} id={} count={} incompatible={} extraLen={} extraHash={}",
+                stage, item.getItemId(), item.getCount(), item.isIncompatible(),
+                item.getExtraData() != null ? item.getExtraData().length : -1,
+                Arrays.hashCode(item.getExtraData()), error);
     }
 }

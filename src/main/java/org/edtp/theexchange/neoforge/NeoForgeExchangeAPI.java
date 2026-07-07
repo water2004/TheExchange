@@ -9,6 +9,7 @@ import org.edtp.theexchange.api.RefreshableExchangeView;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.neoforge.config.NeoForgeConfigLoader;
 import org.edtp.theexchange.neoforge.item.NeoForgeItemSerializer;
+import org.slf4j.Logger;
 
 public class NeoForgeExchangeAPI implements ExchangeAPI {
 
@@ -27,7 +28,7 @@ public class NeoForgeExchangeAPI implements ExchangeAPI {
             @Override public void error(String msg) { slf4jLogger.error("[Exchange] " + msg); }
             @Override public void error(String msg, Throwable t) { slf4jLogger.error("[Exchange] " + msg, t); }
         };
-        this.itemSerializer = new NeoForgeItemSerializer(server.getServerVersion());
+        this.itemSerializer = new NeoForgeItemSerializer(server.getServerVersion(), server.registryAccess());
         this.configLoader = new NeoForgeConfigLoader();
     }
 
