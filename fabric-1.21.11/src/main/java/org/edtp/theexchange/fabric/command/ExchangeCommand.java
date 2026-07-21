@@ -392,7 +392,7 @@ public class ExchangeCommand {
             String password = StringArgumentType.getString(ctx, "password");
             String playerName = player.getName().getString();
             ctx.getSource().sendSuccess(() -> Component.literal("正在设置玩家仓库密码: " + playerName), false);
-            core.setPlayerInventoryPasswordAsync(playerName, password)
+            core.setPlayerInventoryPasswordAsync(playerContext(player), password)
                     .whenComplete((scope, error) -> core.getApi().runOnMainThread(() -> {
                         if (error != null) {
                             LOGGER.error("[Exchange] Error in setPlayerPassword", error);

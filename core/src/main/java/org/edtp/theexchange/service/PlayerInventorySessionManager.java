@@ -80,7 +80,7 @@ public final class PlayerInventorySessionManager {
             failures.remove(failureKey, existingFailure);
         }
 
-        PlayerInventoryAuthStore.AuthResult auth = authStore.verify(scope, ownerName, password);
+        PlayerInventoryAuthStore.AuthResult auth = authStore.verify(scope, password);
         if (!auth.success()) {
             FailureState failure = recordFailure(failureKey, now);
             if (failure.isLocked(now)) {

@@ -59,7 +59,7 @@ class PlayerInventoryAccessServiceTest {
     void playerInventoryUsesResolvedUuidScopeAndRequiresPassword() {
         TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
 
         PlayerInventoryAccessResponse wrongPassword = authenticateResponse(context, "Steve", "bad");
         assertFalse(wrongPassword.isSuccess());
@@ -83,8 +83,8 @@ class PlayerInventoryAccessServiceTest {
         TestContext context = newContext("11111111-1111-1111-1111-111111111111");
         InventoryScope firstScope = InventoryScope.player("11111111-1111-1111-1111-111111111111");
         InventoryScope secondScope = InventoryScope.player("22222222-2222-2222-2222-222222222222");
-        context.authStore.setPassword(firstScope, "Alex", "secret");
-        context.authStore.setPassword(secondScope, "Alex", "secret");
+        context.authStore.setPassword(firstScope, "secret");
+        context.authStore.setPassword(secondScope, "secret");
 
         InventoryAccess firstAccess = authenticate(context, "Alex", "secret");
         PutItemResponse first = context.service.handleRemotePut(new PutItemRequest(
@@ -119,13 +119,32 @@ class PlayerInventoryAccessServiceTest {
         assertFalse(missingPlayer.isSuccess());
         assertEquals("玩家不存在或无法解析", missingPlayer.getFailReason());
 
+        context.hooks.setResolutionFailure();
+        PlayerInventoryAccessResponse resolverFailure = authenticateResponse(context, "Steve", "secret");
+        assertFalse(resolverFailure.isSuccess());
+        assertEquals("玩家名称解析失败: authentication service unavailable",
+                resolverFailure.getFailReason());
+
         context.hooks.setResolvedUuid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         PlayerInventoryAccessResponse missingPassword = authenticateResponse(context, "Steve", "secret");
         assertFalse(missingPassword.isSuccess());
-        assertEquals("玩家仓库尚未设置密码", missingPassword.getFailReason());
+        assertEquals("玩家仓库不存在或尚未创建", missingPassword.getFailReason());
 
         assertNull(context.localItemStore.getItem(resolvedScope, 0).item());
         assertNull(context.localItemStore.getItem(InventoryScope.server(), 0).item());
+    }
+
+    @Test
+    void knownOfflineMinecraftProfileCanOpenAnExistingWarehouse() {
+        TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        context.authStore.setPassword(scope, "secret");
+
+        PlayerInventoryAccessResponse response = authenticateResponse(context, "OfflineSteve", "secret");
+
+        assertTrue(response.isSuccess(), response.getFailReason());
+        assertEquals(scope, response.getScope());
+        assertEquals("OfflineSteve", response.getOwnerName());
     }
 
     @Test
@@ -170,7 +189,7 @@ class PlayerInventoryAccessServiceTest {
     void playerInventoryUpdatesOnlyTargetPeersWithAnActiveSession() {
         TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
 
         assertTrue(context.service.canReceiveInventoryUpdate("unsubscribed", InventoryScope.server()));
         assertFalse(context.service.canReceiveInventoryUpdate("local", scope));
@@ -186,7 +205,7 @@ class PlayerInventoryAccessServiceTest {
     void takeAndSwapUseResolvedPlayerScope() {
         TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
         InventoryAccess access = authenticate(context, "Steve", "secret");
 
         PutItemResponse putForTake = context.service.handleRemotePut(new PutItemRequest(
@@ -224,7 +243,7 @@ class PlayerInventoryAccessServiceTest {
     void concurrentPutsToSamePlayerSlotAllowOnlyOneExpectedVersionWinner() throws Exception {
         TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
         InventoryAccess access = authenticate(context, "Steve", "secret");
         int threads = 8;
         CountDownLatch ready = new CountDownLatch(threads);
@@ -276,7 +295,7 @@ class PlayerInventoryAccessServiceTest {
     void sameRequestIdCanCompleteConcurrentlyInDifferentScopes() throws Exception {
         TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         InventoryScope playerScope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(playerScope, "Steve", "secret");
+        context.authStore.setPassword(playerScope, "secret");
         InventoryAccess access = authenticate(context, "Steve", "secret");
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -409,6 +428,7 @@ class PlayerInventoryAccessServiceTest {
 
     private static final class TestHooks implements ExchangeService.RuntimeHooks {
         private final AtomicReference<String> resolvedUuid;
+        private volatile boolean resolutionFailure;
 
         private TestHooks(String resolvedUuid) {
             this.resolvedUuid = new AtomicReference<>(resolvedUuid);
@@ -416,10 +436,16 @@ class PlayerInventoryAccessServiceTest {
 
         private void setResolvedUuid(String resolvedUuid) {
             this.resolvedUuid.set(resolvedUuid);
+            this.resolutionFailure = false;
         }
 
         private void setMissingPlayer() {
             this.resolvedUuid.set(null);
+            this.resolutionFailure = false;
+        }
+
+        private void setResolutionFailure() {
+            this.resolutionFailure = true;
         }
 
         @Override
@@ -469,6 +495,9 @@ class PlayerInventoryAccessServiceTest {
 
         @Override
         public Optional<ExchangeAPI.PlayerIdentity> resolvePlayerIdentity(String playerName) {
+            if (resolutionFailure) {
+                throw new IllegalStateException("authentication service unavailable");
+            }
             String uuid = resolvedUuid.get();
             return uuid != null ? Optional.of(new ExchangeAPI.PlayerIdentity(uuid, playerName)) : Optional.empty();
         }

@@ -364,11 +364,14 @@ public class TheExchangeCore {
                         : ExchangeMutationResult.fail(result.getFailReason()));
     }
 
-    public CompletableFuture<InventoryScope> setPlayerInventoryPasswordAsync(String playerName, String password) {
+    public CompletableFuture<InventoryScope> setPlayerInventoryPasswordAsync(
+            PlayerExchangeContext player, String password) {
         return submit(() -> {
-            ExchangeAPI.PlayerIdentity identity = resolveRequiredPlayerIdentity(playerName);
-            InventoryScope scope = InventoryScope.player(identity.getUuid());
-            playerInventoryAuthStore.setPassword(scope, identity.getName(), password);
+            if (player == null || player.uuid() == null || player.uuid().isBlank()) {
+                throw new IllegalArgumentException("玩家身份无效");
+            }
+            InventoryScope scope = InventoryScope.player(player.uuid());
+            playerInventoryAuthStore.setPassword(scope, password);
             playerInventorySessionManager.revokeScope(scope);
             playerInventoryClientSessionStore.invalidateScope(scope);
             return scope;
@@ -501,14 +504,6 @@ public class TheExchangeCore {
         String localName = runtimeConfig != null ? runtimeConfig.getDisplayName() : "local";
         return serverName == null || serverName.isBlank() || "local".equalsIgnoreCase(serverName)
                 || serverName.equalsIgnoreCase(localName) ? localName : serverName;
-    }
-
-    private ExchangeAPI.PlayerIdentity resolveRequiredPlayerIdentity(String playerName) {
-        Optional<ExchangeAPI.PlayerIdentity> identity = api.resolvePlayerIdentity(playerName);
-        if (identity.isEmpty()) {
-            throw new IllegalArgumentException("玩家不存在或无法解析: " + playerName);
-        }
-        return identity.get();
     }
 
     private void initialize() {

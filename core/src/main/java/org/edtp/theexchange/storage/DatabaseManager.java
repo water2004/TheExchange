@@ -1,6 +1,8 @@
 package org.edtp.theexchange.storage;
 
 import java.sql.*;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class DatabaseManager {
@@ -65,12 +67,45 @@ public class DatabaseManager {
                     "PRIMARY KEY (scope_type, scope_id))");
 
             stmt.execute("CREATE TABLE IF NOT EXISTS player_inventory_auth (" +
-                    "scope_id      TEXT PRIMARY KEY," +
-                    "player_name   TEXT NOT NULL," +
+                    "player_uuid   TEXT PRIMARY KEY," +
                     "password_hash TEXT NOT NULL," +
                     "created_at    INTEGER NOT NULL," +
                     "updated_at    INTEGER NOT NULL)");
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_player_inventory_auth_name ON player_inventory_auth(player_name)");
+        }
+        migratePlayerInventoryAuthToUuidOnly();
+    }
+
+    private void migratePlayerInventoryAuthToUuidOnly() throws SQLException {
+        Set<String> columns = new HashSet<>();
+        try (Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery("PRAGMA table_info(player_inventory_auth)")) {
+            while (result.next()) {
+                columns.add(result.getString("name"));
+            }
+        }
+        if (columns.equals(Set.of("player_uuid", "password_hash", "created_at", "updated_at"))) {
+            return;
+        }
+        String sourceUuidColumn = columns.contains("player_uuid") ? "player_uuid" : "scope_id";
+        boolean previousAutoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("DROP TABLE IF EXISTS player_inventory_auth_uuid_only");
+            statement.execute("CREATE TABLE player_inventory_auth_uuid_only (" +
+                    "player_uuid TEXT PRIMARY KEY, password_hash TEXT NOT NULL, " +
+                    "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
+            statement.execute("INSERT INTO player_inventory_auth_uuid_only " +
+                    "(player_uuid, password_hash, created_at, updated_at) " +
+                    "SELECT " + sourceUuidColumn + ", password_hash, created_at, updated_at " +
+                    "FROM player_inventory_auth");
+            statement.execute("DROP TABLE player_inventory_auth");
+            statement.execute("ALTER TABLE player_inventory_auth_uuid_only RENAME TO player_inventory_auth");
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(previousAutoCommit);
         }
     }
 

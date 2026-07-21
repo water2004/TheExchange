@@ -33,7 +33,7 @@ class PlayerInventorySessionManagerTest {
     void issuedTokenIsBoundToPeerAndRequesterAndUsesSlidingExpiry() {
         TestContext context = context();
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
         PlayerInventorySessionManager.AccessPrincipal principal =
                 new PlayerInventorySessionManager.AccessPrincipal("survival", "viewer-uuid");
 
@@ -69,7 +69,7 @@ class PlayerInventorySessionManagerTest {
     void fifthBadPasswordLocksRequesterForTenMinutes() {
         TestContext context = context();
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
         PlayerInventorySessionManager.AccessPrincipal principal =
                 new PlayerInventorySessionManager.AccessPrincipal("survival", "viewer-uuid");
 
@@ -105,7 +105,7 @@ class PlayerInventorySessionManagerTest {
     void lockIsScopedToTheAccessingUserAndPasswordResetRevokesOwnerSessions() {
         TestContext context = context();
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
         PlayerInventorySessionManager.AccessPrincipal attacker =
                 new PlayerInventorySessionManager.AccessPrincipal("survival", "attacker");
         PlayerInventorySessionManager.AccessPrincipal owner =
@@ -130,7 +130,7 @@ class PlayerInventorySessionManagerTest {
     void clearingInMemoryStateInvalidatesAllTokensAndLockouts() {
         TestContext context = context();
         InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        context.authStore.setPassword(scope, "Steve", "secret");
+        context.authStore.setPassword(scope, "secret");
         PlayerInventorySessionManager.AccessPrincipal principal =
                 new PlayerInventorySessionManager.AccessPrincipal("survival", "viewer-uuid");
         PlayerInventorySessionManager.SessionResult session = context.manager.authenticate(

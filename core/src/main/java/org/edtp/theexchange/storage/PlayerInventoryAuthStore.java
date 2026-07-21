@@ -25,29 +25,26 @@ public class PlayerInventoryAuthStore {
         this.db = db;
     }
 
-    public void setPassword(InventoryScope scope, String playerName, String password) {
+    public void setPassword(InventoryScope scope, String password) {
         requirePlayerScope(scope);
         if (password == null || password.isBlank()) {
             throw new IllegalArgumentException("玩家仓库密码不能为空");
         }
-        String normalizedName = normalizeName(playerName);
         String hash = hashPassword(password);
         long now = System.currentTimeMillis();
         db.lock();
         try {
             String sql = "INSERT INTO player_inventory_auth " +
-                    "(scope_id, player_name, password_hash, created_at, updated_at) " +
-                    "VALUES (?, ?, ?, ?, ?) " +
-                    "ON CONFLICT(scope_id) DO UPDATE SET " +
-                    "player_name = excluded.player_name, " +
+                    "(player_uuid, password_hash, created_at, updated_at) " +
+                    "VALUES (?, ?, ?, ?) " +
+                    "ON CONFLICT(player_uuid) DO UPDATE SET " +
                     "password_hash = excluded.password_hash, " +
                     "updated_at = excluded.updated_at";
             try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
                 ps.setString(1, scope.getScopeId());
-                ps.setString(2, normalizedName);
-                ps.setString(3, hash);
+                ps.setString(2, hash);
+                ps.setLong(3, now);
                 ps.setLong(4, now);
-                ps.setLong(5, now);
                 ps.executeUpdate();
             }
         } catch (SQLException e) {
@@ -57,14 +54,14 @@ public class PlayerInventoryAuthStore {
         }
     }
 
-    public AuthResult verify(InventoryScope scope, String playerName, String password) {
+    public AuthResult verify(InventoryScope scope, String password) {
         requirePlayerScope(scope);
         if (password == null || password.isBlank()) {
             return AuthResult.fail("玩家仓库密码不能为空");
         }
         AuthRecord record = read(scope);
         if (record == null) {
-            return AuthResult.fail("玩家仓库尚未设置密码");
+            return AuthResult.fail("玩家仓库不存在或尚未创建");
         }
         return verifyPassword(password, record.passwordHash())
                 ? AuthResult.ok()
@@ -79,12 +76,12 @@ public class PlayerInventoryAuthStore {
     private AuthRecord read(InventoryScope scope) {
         db.lock();
         try {
-            String sql = "SELECT player_name, password_hash FROM player_inventory_auth WHERE scope_id = ?";
+            String sql = "SELECT password_hash FROM player_inventory_auth WHERE player_uuid = ?";
             try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
                 ps.setString(1, scope.getScopeId());
                 try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
-                        return new AuthRecord(rs.getString("player_name"), rs.getString("password_hash"));
+                    return new AuthRecord(rs.getString("password_hash"));
                     }
                 }
             }
@@ -141,16 +138,14 @@ public class PlayerInventoryAuthStore {
         if (scope == null || !scope.isPlayer() || scope.getScopeId().isBlank()) {
             throw new IllegalArgumentException("玩家仓库 scope 无效");
         }
-    }
-
-    private String normalizeName(String playerName) {
-        if (playerName == null || playerName.isBlank()) {
-            throw new IllegalArgumentException("玩家名称不能为空");
+        try {
+            java.util.UUID.fromString(scope.getScopeId());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("玩家仓库 UUID 无效", e);
         }
-        return playerName.trim().toLowerCase(java.util.Locale.ROOT);
     }
 
-    private record AuthRecord(String playerName, String passwordHash) {}
+    private record AuthRecord(String passwordHash) {}
 
     public record AuthResult(boolean success, String failReason) {
         public static AuthResult ok() {
