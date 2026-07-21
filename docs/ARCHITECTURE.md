@@ -1,714 +1,225 @@
-# TheExchange — 架构设计文档
+# TheExchange — 当前架构实现
 
-> 基于代码实际实现。REQUIREMENTS.md 为需求文档，本文档为实现文档。
+> 本文描述仓库中的实际实现。需求背景见 `REQUIREMENTS.md`，使用方法见根目录 `README.md`。
 
----
+## 1. 设计边界
 
-# 1. 项目结构
+TheExchange 是对等的服务端 Mod。每台服务器只对自己持有的库存负责，其他服务器只能通过 TLS 协议查询或提交带版本条件的变更。
 
-```
-TheExchange/
-├── build.gradle                     ← 根容器，仅 subprojects 通用配置
-├── settings.gradle                  ← include 'core', 'fabric-26.1', 'fabric-1.21.11'
-├── gradle.properties                ← 公共版本号 (mod_version, archives_base_name...)
-│
-├── core/                            ← 纯 Java 核心库，零 Minecraft 依赖
-│   ├── build.gradle                 ← java-library, JUnit 5, SQLite, Gson
-│   └── src/
-│       ├── main/java/org/edtp/theexchange/
-│       │   ├── TheExchangeCore.java         ← 核心入口，生命周期管理
-│       │   ├── api/
-│       │   │   ├── ExchangeAPI.java         ← 适配层注入接口 (Logger, ItemSerializer, ConfigLoader...)
-│       │   │   └── RefreshableExchangeView.java  ← GUI 刷新接口
-│       │   ├── model/
-│       │   │   ├── AbstractSlotInventoryCache.java ← 槽位缓存基类 (StampedLock 并发)
-│       │   │   ├── CachedInventory.java           ← 远端缓存
-│       │   │   ├── ExchangeInteraction.java       ← 玩家交互抽象
-│       │   │   ├── ExchangeInteractionResult.java ← 交互决策结果
-│       │   │   ├── ExchangeMutationResult.java    ← PUT/TAKE 操作结果
-│       │   │   ├── ExchangeViewState.java         ← GUI 视图状态
-│       │   │   ├── InventoryScope.java            ← SERVER/PLAYER 作用域
-│       │   │   ├── MenuClickType.java             ← 点击类型枚举
-│       │   │   ├── NeutralItem.java               ← 中立物品模型
-│       │   │   ├── OperationType.java             ← PUT/TAKE 枚举
-│       │   │   ├── PlayerExchangeContext.java     ← 玩家上下文
-│       │   │   ├── RemoteServer.java              ← 远端服务器配置
-│       │   │   └── ServerStatus.java              ← ONLINE/OFFLINE 枚举
-│       │   ├── network/
-│       │   │   ├── NetworkManager.java            ← 网络总控
-│       │   │   ├── TcpServer.java                 ← 入站连接 accept
-│       │   │   ├── TcpClient.java                 ← 出站连接 + TOFU 公钥校验
-│       │   │   ├── Connection.java                ← 单连接 (1 read + 1 sendAsync 并发)
-│       │   │   ├── codec/
-│       │   │   │   ├── FrameDecoder.java          ← 帧解码 (粘包/半包处理, 10MB 上限)
-│       │   │   │   ├── FrameEncoder.java          ← 帧编码
-│       │   │   │   └── MessageCodec.java          ← Payload ↔ 二进制序列化
-│       │   │   ├── protocol/
-│       │   │   │   ├── FrameType.java             ← 帧类型枚举 (20 种)
-│       │   │   │   ├── Frame.java                 ← 帧结构 (28B 头)
-│       │   │   │   ├── CorrelatedMessage.java     ← 请求/响应关联接口
-│       │   │   │   └── messages/                  ← 22 种消息体 POJO
-│       │   │   ├── sequence/
-│       │   │   │   └── SequenceWindow.java        ← 防重放滑动窗口 (1024 位 + 60s)
-│       │   │   └── tls/
-│       │   │       ├── TlsContext.java            ← TLS 上下文 (服务端自签 + 客户端宽松握手)
-│       │   │       ├── SelfSignedCert.java        ← keytool 生成 PKCS12 证书
-│       │   │       └── PinnedPeerKeyStore.java    ← TOFU 公钥固定 (known-peers.properties)
-│       │   ├── storage/
-│       │   │   ├── DatabaseManager.java           ← SQLite 连接管理 + WAL + ReentrantLock
-│       │   │   ├── LocalItemStore.java            ← 本服库存 facade
-│       │   │   ├── LocalInventoryCache.java       ← 本服库存 in-memory LRU
-│       │   │   ├── LocalInventoryCacheManager.java ← 本服缓存管理器 (异步 writer 刷盘)
-│       │   │   ├── RemoteCacheStore.java          ← 远端缓存 DB 操作
-│       │   │   ├── OperationLogger.java           ← 操作日志 (requestId UNIQUE 幂等)
-│       │   │   └── NeutralItemBlobCodec.java      ← NeutralItem ↔ BLOB
-│       │   ├── service/
-│       │   │   ├── ExchangeService.java           ← PUT/TAKE 业务逻辑 + 消息路由
-│       │   │   ├── ServerRegistry.java            ← 远端服务器注册表
-│       │   │   ├── CacheManager.java              ← 远端缓存管理 (LRU + 异步刷盘)
-│       │   │   ├── SyncEngine.java                ← 增量同步 (槽位版本比对)
-│       │   │   ├── HeartbeatManager.java          ← 心跳/超时/指数退避重连
-│       │   │   └── MenuInteractionService.java    ← GUI 交互决策 (decide)
-│       │   ├── config/
-│       │   │   └── ExchangeConfigManager.java     ← JSON 配置解析/校验/热重载
-│       │   ├── compat/
-│       │   │   ├── ItemSerializer.java            ← 物品序列化接口 (适配层实现)
-│       │   │   └── CompatibilityChecker.java      ← 兼容性检查 + 标记
-│       │   └── util/
-│       │       └── BinaryIO.java                  ← 定长字段二进制读写
-│       └── test/java/org/edtp/theexchange/
-│           ├── concurrency/
-│           │   ├── ConcurrencyStressTest.java     ← 正确性测试 (乐观锁/守恒/快照)
-│           │   └── ConcurrencyBenchmark.java      ← 吞吐基准 (Tag("bench"), 默认跳过)
-│           ├── compat/
-│           │   └── CompatibilityCheckerTest.java
-│           └── service/
-│               └── MenuInteractionServiceTest.java
-│
-├── fabric-26.1/                      ← Fabric 26.1.x 适配层
-│   ├── build.gradle                  ← net.fabricmc.fabric-loom 1.15.5, Java 25
-│   └── src/
-│       ├── main/java/org/edtp/theexchange/
-│       │   ├── Theexchange.java              ← ModInitializer 入口
-│       │   └── fabric/
-│       │       ├── FabricExchangeAPI.java    ← ExchangeAPI 实现
-│       │       ├── command/ExchangeCommand.java  ← /exchange 指令注册 + 自动补全
-│       │       ├── config/FabricConfigLoader.java ← 配置文件加载
-│       │       ├── container/
-│       │       │   ├── ExchangeMenu.java     ← AbstractContainerMenu (gui 交互)
-│       │       │   ├── ExchangeContainer.java ← SimpleContainer
-│       │       │   └── ExchangeSlot.java     ← Slot 子类 (只读控制)
-│       │       └── item/
-│       │           └── FabricItemSerializer.java ← ItemStack.CODEC 序列化
-│       ├── client/java/.../TheexchangeClient.java
-│       └── client/java/.../TheexchangeDataGenerator.java
-│       └── resources/fabric.mod.json
-│
-├── fabric-1.21.11/                   ← Fabric 1.21.11 适配层
-│   ├── build.gradle                  ← fabric-loom 1.15-SNAPSHOT, Java 21
-│   ├── gradle.properties            ← 覆盖 minecraft/fabric/loader 版本
-│   └── src/                         ← 同 26.1 结构
-│       └── (代码几乎相同, 仅 API 差异点不同)
-│           · ContainerInput → ClickType
-│           · sendSystemMessage → displayClientMessage(c, false)
-│
-├── docs/
-│   ├── ARCHITECTURE.md               ← 本文件
-│   └── REQUIREMENTS.md               ← 需求文档
-│
-├── bench.sh / bench.ps1              ← 一键基准测试 + 图表生成
-├── bench_plot.py                     ← matplotlib 绘图脚本
-└── README.md
+实现分成一个与 Minecraft 无关的核心和两个很薄的 Fabric 适配层：
+
+```text
+core/                    Java 核心：协议、鉴权、库存、缓存、并发与持久化
+fabric-1.21.11/          Minecraft 1.21.11 / Java 21 适配
+fabric-26.1/             Minecraft 26.1.2 / Java 25 适配
+ref/                     两个目标版本的 Minecraft/Fabric 参考源码
 ```
 
-依赖关系：`fabric-*` 依赖 `core`，`core` 不依赖任何 MC API。fabric 模块间互相独立，各自构建产出独立 JAR。
+`core` 不引用 Minecraft、Fabric 或具体 `ItemStack` 类型。两个 Fabric 模块保持同样的目录和职责，版本差异只留在适配层。
 
-# 2. 核心初始化
+## 2. 分层与依赖方向
 
-## 2.1 启动流程
-
-```
-Theexchange.onInitialize()                   // Fabric ModInitializer
-  → CommandRegistrationCallback               // 注册 /exchange 指令树
-  → ServerLifecycleEvents.SERVER_STARTED
-    → new FabricExchangeAPI(server)           // 适配层实例化
-    → new TheExchangeCore(api)                // 核心创建
-    → core.startAsync()                       // lifecycleExecutor 执行
-      → initialize():
-        1. configManager = new ExchangeConfigManager(api.getConfigLoader())
-        2. runtimeConfig = configManager.current()
-        3. startCoreExecutor(runtimeConfig)   // FixedThreadPool(core_threads)
-        4. databaseManager.initialize()       // SQLite WAL, 建 5 张表
-        5. localItemStore, remoteCacheStore, operationLogger
-        6. buildRuntime(runtimeConfig)        // 构建所有服务
-        7. initialized = true
+```mermaid
+flowchart TB
+    MC["Minecraft / Fabric"] --> Adapter["Fabric 适配层\n命令、容器、物品转换、Mixin"]
+    Adapter --> API["ExchangeAPI / ItemSerializer"]
+    API --> Core["核心服务\n鉴权、同步、并发、自动化规划"]
+    Core --> Net["TCP + TLS + TOFU + 协议消息"]
+    Core --> Store["SQLite 权威库存、远端缓存、UUID 档案"]
 ```
 
-## 2.2 buildRuntime 服务构建顺序
+核心中的主要职责如下：
 
-```
-1. pinnedPeerKeyStore (惰性初始化)
-2. pruneRemoteState(config)           // 清理删除的服务器的 DB 缓存 + 公钥
-3. localInventoryCacheManager         // 本服库存 in-memory LRU
-4. cacheManager                       // 远端缓存 LRU
-5. networkManager (新建或复用)        // TLS + TCP
-6. serverRegistry                     // 远端服务器注册表
-7. syncEngine                         // 同步引擎
-8. exchangeService                    // 业务逻辑
-9. menuInteractionService             // GUI 交互决策
-10. networkManager.setMessageRouter() // 入站消息 → submit() → exchangeService.routeMessage()
-11. heartbeatManager.start()          // 心跳 + 重连
-12. disconnectOutboundNotIn()         // 断开不在新配置中的连接
-13. connectAllEnabled()               // 向所有配置的远端发起连接
-```
+- `model/`：`NeutralItem`、`InventoryScope`、连接串、视图和交互模型。
+- `service/`：库存读写、同步、短期会话、更新订阅、GUI 决策和漏斗槽位规划。
+- `network/`：连接管理、请求/响应关联、帧编解码、防重放、TLS 和 TOFU 首次公钥固定。
+- `storage/`：SQLite 权威库存、远端快照、操作日志、玩家仓库密码档案。
+- `compat/`：由加载器实现的中立物品序列化边界。
 
-# 3. 线程模型
+Fabric 适配层中的主要职责如下：
 
-## 3.1 线程池
+- `command/`：管理员命令、普通共享空间命令、玩家仓库命令。
+- `container/`：54 槽服务端虚拟容器；所有点击最终进入核心服务。
+- `player/`：解析玩家仓库连接、复用令牌、只提示补输密码并打开界面。
+- `block/`：读取实际附着在末影箱上的告示牌。
+- `automation/`：末影箱端点委托和非阻塞漏斗桥。
+- `mixin/`：只在末影箱使用和漏斗输入/输出入口接管行为。
 
-| 线程池 | 大小 | 职责 |
-|--------|------|------|
-| lifecycleExecutor | 1 (SingleThread) | 初始化/reload/shutdown，串行化生命周期 |
-| coreExecutor | core_threads (默认 4) | 所有业务任务 (submit) |
-| Connection read thread | 1 per connection | 帧解码 + messageRouter 分发 |
-| Connection sendAsync thread | 1 per request | sendAndWait 阻塞发送 |
-| Cache writer | 1 per cache | 异步刷盘到 SQLite |
-| Cache flusher | 1 per cache | 30s 定期兜底刷盘 |
-| Heartbeat scheduler | 2 (ScheduledPool) | 心跳发送 + 超时检测 |
+## 3. 库存模型与持久化
 
-## 3.2 submit 机制
+### 3.1 Scope
 
-所有业务操作统一通过 `TheExchangeCore.submit(Callable)` 提交到 coreExecutor：
+所有库存都以 `InventoryScope` 区分：
+
+- `SERVER`：服务器公共共享空间，`scope_id` 固定为空串。
+- `PLAYER`：玩家私有共享空间，`scope_id` 是规范化的小写 UUID 字符串。
+
+每个 scope 有 54 个槽位。槽位号必须在 `0..53`；查询、批量查询和所有写操作都在进入缓存或数据库前校验边界。
+
+### 3.2 中立物品
+
+跨版本传输使用 `NeutralItem`，保存物品标识、数量和版本相关的额外字节。目标服务器是兼容性的最终裁决者：不能还原的物品不能由玩家放入或取出；漏斗抽取规划会跳过本地不兼容的候选槽位。
+
+### 3.3 SQLite
+
+数据库启用 WAL、外键和 5 秒 busy timeout，并由公平 `ReentrantLock` 串行化连接访问。关键表为：
+
+- `exchange_items(scope_type, scope_id, slot, item_data, ..., version)`：本服权威库存。
+- `inventory_metadata(scope_type, scope_id, last_modified)`：scope 修改时间。
+- `remote_cache(server_name, scope_type, scope_id, slot, ..., version)`：只读远端快照。
+- `player_inventory_auth(player_uuid, password_hash, created_at, updated_at)`：玩家仓库档案。
+
+玩家仓库档案只保存 UUID、密码哈希和时间戳，不保存角色名。旧的含 `scope_id`/`player_name` 表会在一个事务内迁移到 UUID-only 表。
+
+## 4. 玩家身份解析和档案生命周期
+
+玩家仓库连接使用 `<player>@<server>:<password>`，密码可省略。连接串中的玩家名称不是持久主键，仅用于在仓库所在服务器解析 UUID。
+
+两个 Fabric 实现都调用：
 
 ```java
-public <T> CompletableFuture<T> submit(Callable<T> task) {
-    if (shuttingDown) → 拒绝
-    ExecutorService executor = coreExecutor;
-    if (executor == null) → 拒绝
-    synchronized (taskMonitor) {
-        if (!acceptingTasks || reloading) → 拒绝
-        inFlightTasks++;          // 在途计数
-    }
-    executor.execute(() -> {
-        if (taskGeneration != generation.get()) → 拒绝 (reload 后过期)
-        task.call()
-        completeTask()            // inFlightTasks--, notifyAll if 0
-    })
-}
+server.services().nameToIdCache().get(playerName)
 ```
 
-## 3.3 reload 机制
+这与对应 Minecraft 版本自己的命令/档案解析路径一致：
 
-```
-reloadConfigInternal()                           // lifecycleExecutor 线程
-  → beginReload():
-      synchronized(taskMonitor): acceptingTasks=false, reloading=true
-      waitForTasksToDrain(): inFlightTasks→0 前阻塞
-  → localInventoryCacheManager.flushAll()        // 同步刷盘
-  → cacheManager.shutdown()                      // 同步刷盘
-  → stopReloadableServices()                     // 停心跳, 旧网络 (端口变则关)
-  → stopCoreExecutor()                           // shutdown + awaitTermination(30s)
-  → swapCoreExecutor()                           // 新建线程池
-  → generation.incrementAndGet()                 // 旧任务全部失效
-  → buildRuntime()                               // 重建所有服务
-  → endReload(): acceptingTasks=true
-```
+- 玩家不必在线；缓存内的已知玩家和认证服务器可解析的正版玩家都会得到档案。
+- 在线认证模式下，缓存未命中会交给 `GameProfileRepository`，认证服务器返回不存在时得到 `Optional.empty()`。
+- 离线模式下，Minecraft 自己按其离线用户规则生成档案和 UUID。
+- TheExchange 不猜测、不合成 UUID，也不因一次远程查询创建玩家仓库档案。
+- 解析为空返回“玩家不存在或无法解析”；解析器异常作为独立失败返回，不会继续认证或创建 scope。
 
-drain 期间新任务被拒绝，已在 coreExecutor 中的任务执行完毕后 reload 才继续。sendAsync 独立线程不受 drain 控制，但其回调进入 submitIfGeneration 时因 generation 已递增被拒绝，物品正常发还。
+档案只在玩家本人执行 `/exchange player password <password>` 时创建或修改，UUID 直接取当前在线玩家的游戏档案。名称能解析但未主动创建档案时，认证明确返回“玩家仓库不存在或尚未创建”。
 
-# 4. 网络协议
+## 5. 玩家仓库鉴权与纯内存令牌
 
-## 4.1 帧结构 (28 字节头 + payload)
+### 5.1 密码和锁定
 
-```
-Offset  Size  Field
-0       4     Magic       = 0x45584348 ("EXCH")
-4       2     Version     = 1
-6       4     Length      = payload 字节数 (≤ 10 MiB)
-10      2     Type        = FrameType 枚举码
-12      8     Sequence    = 单调递增 (per-connection)
-20      8     Timestamp   = Unix 毫秒
-28      var   Payload     = 结构化二进制 (MessageCodec)
-```
+玩家仓库密码使用 PBKDF2-HMAC-SHA256、120,000 次迭代和每条档案独立随机盐。密码只出现在获取短期会话的请求中，后续库存请求不再携带密码。
 
-## 4.2 FrameType 完整枚举
+同一来源服务器和访问玩家连续 5 次认证失败后锁定 10 分钟。成功认证会清除该访问主体的失败计数。修改仓库密码会撤销该 scope 的已有会话。
 
-| 码 | 名称 | 方向 | 说明 |
-|----|------|------|------|
-| 0x0001 | AUTH_REQUEST | C→S | 服务名 + 密码 + MC 版本 |
-| 0x0002 | AUTH_RESPONSE | S→C | 成功/失败 + 对方服务名 + MC 版本 + 时间戳 |
-| 0x0003 | HEARTBEAT | 双向 | PING(isReply=false) / PONG(isReply=true) |
-| 0x0010 | QUERY_TIMESTAMP | C→S | 查询时间戳 (当前未使用) |
-| 0x0011 | TIMESTAMP_RESPONSE | S→C | 时间戳响应 (当前未使用) |
-| 0x0012 | QUERY_ITEMS | C→S | 全量查询 (当前未使用) |
-| 0x0013 | ITEMS_RESPONSE | S→C | 全量响应 (当前未使用) |
-| 0x0014 | QUERY_SLOT_VERSION | C→S | 查询单槽版本 |
-| 0x0015 | SLOT_VERSION_RESPONSE | S→C | 单槽版本号 |
-| 0x0016 | QUERY_SLOT_STATE | C→S | 查询单槽状态 |
-| 0x0017 | SLOT_STATE_RESPONSE | S→C | 单槽 item + version |
-| 0x0018 | QUERY_SLOT_VERSIONS | C→S | 查询所有槽位版本号 |
-| 0x0019 | SLOT_VERSIONS_RESPONSE | S→C | 列表 [version, ...] |
-| 0x001A | QUERY_SLOTS | C→S | 批量查询指定槽位 |
-| 0x001B | SLOTS_STATE_RESPONSE | S→C | 批量槽位状态 |
-| 0x0020 | PUT_ITEM | C→S | 放入物品 (slot, item, expectedVersion, requestId, playerUuid, playerName, remoteVersion) |
-| 0x0021 | PUT_ITEM_RESPONSE | S→C | 放入结果 (success, currentItem, newVersion, requestId...) |
-| 0x0022 | TAKE_ITEM | C→S | 取出物品 (slot, expectedItemId, expectedVersion, requestCount, ...) |
-| 0x0023 | TAKE_ITEM_RESPONSE | S→C | 取出结果 (success, currentItem, itemsToGive, newVersion...) |
-| 0x0030 | PUSH_UPDATE | S→C | 变更通知 (changedSlots[], timestamp) |
-| 0xFFFF | ERROR | 双向 | 错误码 + 消息 |
+服务器间连接密码是另一层认证：它保存在服务器私有配置中，通过 TLS 通道发送；当前设计不对这个配置值额外做哈希。TLS 保留首次连接信任并固定对端公钥的 TOFU 行为。
 
-## 4.3 连接生命周期
+### 5.2 会话
 
-```
-Client                                     Server
-  │─ TCP connect ───────────────────────────│
-  │─ TLS 1.3 握手 ──────────────────────────│
-  │  · 客户端宽松握手 (不校验证书)           │
-  │  · 加密套件: AES-256-GCM / AES-128-GCM  │
-  │─ AUTH_REQUEST ─────────────────────────│
-  │  {serverName, password, version,       │
-  │   mcVersion}                            │── 密码比对
-  │                                         │── 入站开关检查 (acceptingInbound)
-  │─ AUTH_RESPONSE ────────────────────────│
-  │  {success, serverName, mcVersion,      │
-  │   lastModifiedTimestamp}                │
-  │                                         │
-  │  [认证成功, 标记 authenticated,          │
-  │   注册到 connections map]                │
-  │                                         │
-  │─ HEARTBEAT (PING) ─────────────────────│  每 10s
-  │─ HEARTBEAT (PONG) ─────────────────────│
-  │                                         │
-  │  [30s 无数据 → 离线 → 指数退避重连]      │
-  │                                         │
-  │─ QUERY_SLOT_VERSIONS ──────────────────│  打开共享空间
-  │─ SLOT_VERSIONS_RESPONSE ───────────────│
-  │─ QUERY_SLOTS (changed) ───────────────│  仅拉变更槽位
-  │─ SLOTS_STATE_RESPONSE ────────────────│
-  │                                         │
-  │─ PUT_ITEM / TAKE_ITEM ────────────────│  玩家操作
-  │─ PUT_ITEM_RESPONSE / TAKE_ITEM_RESP ──│
+认证成功后，仓库服务器生成 32 字节安全随机 token：
+
+- 原始 token 只返回给发起服务器，并只保存在发起方进程内存。
+- 仓库服务器只在内存保存 token 的 SHA-256 摘要。
+- 会话绑定 `来源 peer + 访问者 UUID + 目标 PLAYER scope`，不能换 peer、换玩家或换仓库使用。
+- 默认有效期 5 分钟；每次成功查询或变更都在两端刷新滑动过期时间。
+- 到期后必须重新输入密码。
+- 重启、正常关闭或成功热重载会清空 token、失败计数、订阅和自动化委托。
+
+令牌没有数据库或配置存储入口，也不会写入远端缓存或日志。因此令牌不会跨进程生命周期持久化。
+
+### 5.3 认证流程
+
+```mermaid
+sequenceDiagram
+    participant P as 访问玩家
+    participant L as 发起服务器
+    participant R as 仓库服务器
+    participant M as Minecraft 档案解析
+    P->>L: player@server[:password]
+    L->>R: PLAYER_INVENTORY_ACCESS(名称, 访问者 UUID, 密码)
+    R->>M: nameToIdCache.get(名称)
+    alt 玩家不存在或解析失败
+        R-->>L: 明确失败，不创建档案
+    else UUID 存在但无仓库档案
+        R-->>L: 仓库尚未创建
+    else 密码正确
+        R-->>L: token + UUID scope + 过期时间
+        L->>R: 查询/PUT/TAKE(token)
+        R-->>L: 结果，并刷新滑动有效期
+    end
 ```
 
-## 4.4 TOFU 公钥固定
+如果连接串省略密码且没有有效 token，协调器只保存一个 2 分钟的待认证目标，提示 `/exchange player login <password>`；它不会保存旧密码，也不会要求重输完整连接串。
 
-```
-TcpClient.connect()
-  1. TLS 握手 (trustAll — 接受任何证书)
-  2. pinnedPeerKeyStore.verifyOrPin(serverName, socket)
-     └→ 提取对端证书公钥 (PublicKey.getEncoded() → Base64)
-        首次连接: 写入 tls/known-peers.properties
-        后续连接: 比对已保存公钥, 不匹配 → SSLHandshakeException
-  3. AUTH_REQUEST (应用层密码鉴权)
-```
+## 6. 网络协议
 
-首次连接时中间人攻击仍有可能 (TOFU 固有局限)，之后每次连接都会检测到公钥变化并拒绝。
+连接使用 TLS 1.3。二进制帧固定 28 字节头，magic 为 `EXCH`，帧封装版本为 1，应用层认证协议版本为 2，最大 payload 为 10 MiB；请求通过 request ID 关联，序列窗口和时间戳用于拒绝重放。
 
-## 4.5 防重放
+帧类型按职责分组：
 
-`SequenceWindow`: 1024 位滑动窗口 + 60 秒时间戳容差。
+| 范围 | 帧 |
+|---|---|
+| `0x0001..0x0003` | 服务器认证、认证响应、心跳 |
+| `0x0004..0x0005` | 玩家仓库短期会话申请与响应 |
+| `0x0010..0x001B` | 时间戳、物品、槽位状态及批量查询 |
+| `0x0020..0x0025` | PUT、TAKE、SWAP 及响应 |
+| `0x0030` | scope 更新推送 |
+| `0xFFFF` | 错误 |
 
-```
-validate(sequence, timestamp):
-  |now - timestamp| > 60s → 拒绝
-  sequence < base       → 拒绝 (太旧)
-  sequence >= base+1024 → 推进窗口
-  bit[sequence-base]=1  → 拒绝 (重放)
-  否则                   → 标记 bit=1, 接受
-```
+公共 `SERVER` scope 的更新可发给已认证连接。`PLAYER` scope 的推送只发给当前仍持有该 scope 有效会话/订阅的 peer；仅建立服务器连接并不足以收到私有仓库变更。
 
-# 5. 数据存储
+## 7. 写入一致性与并发
 
-## 5.1 SQLite 表结构
+权威服务器的变更路径为：
 
-```sql
--- 本服权威库存 (交换空间)
-CREATE TABLE exchange_items (
-    scope_type  TEXT    NOT NULL,         -- 'SERVER' | 'PLAYER'
-    scope_id    TEXT    NOT NULL,         -- '' 或 playerUUID
-    slot        INTEGER NOT NULL,         -- 槽位号 0~53+
-    item_data   BLOB,                     -- NeutralItemBlobCodec 编码
-    added_by    TEXT,
-    added_at    INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    version     INTEGER NOT NULL,         -- 乐观锁版本号
-    PRIMARY KEY (scope_type, scope_id, slot)
-);
+1. 解析并验证 scope；私有仓库先校验 token 并刷新有效期。
+2. 校验槽位 `0..53`，再访问锁、缓存或数据库。
+3. 以 scope + slot 为粒度串行化冲突写入。
+4. 比较请求携带的 `expectedVersion`；不一致返回冲突和最新状态。
+5. 以 request ID 和 scope 记录近期结果，重复请求返回同一结果。
+6. 提交权威库存和新版本，再更新缓存并向合格订阅者推送。
 
--- 远端库存缓存
-CREATE TABLE remote_cache (
-    server_name  TEXT    NOT NULL,
-    scope_type   TEXT    NOT NULL,
-    scope_id     TEXT    NOT NULL,
-    slot         INTEGER NOT NULL,
-    items_blob   BLOB,                   -- NeutralItemBlobCodec 编码
-    version      INTEGER NOT NULL,
-    synced_at    INTEGER NOT NULL,
-    PRIMARY KEY (server_name, scope_type, scope_id, slot)
-);
+远端缓存始终只是展示快照。目标离线时可以打开普通服务器共享空间的缓存视图，但不能把缓存当作可写库存；玩家私有仓库也不能绕过有效会话读取实时数据。
 
--- 操作审计日志 (幂等)
-CREATE TABLE operation_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp    INTEGER NOT NULL,
-    op_type      TEXT    NOT NULL,        -- 'PUT' | 'TAKE'
-    scope_type   TEXT    NOT NULL,
-    scope_id     TEXT    NOT NULL,
-    player_uuid  TEXT    NOT NULL,
-    player_name  TEXT    NOT NULL,
-    server_name  TEXT    NOT NULL,
-    item_id      TEXT    NOT NULL,
-    quantity     INTEGER NOT NULL,
-    result       TEXT    NOT NULL,        -- 'SUCCESS' | 'FAIL'
-    fail_reason  TEXT,
-    request_id   TEXT    NOT NULL UNIQUE  -- 幂等键
-);
+GUI 操作会先在 Minecraft 主线程真实预留玩家物品，再异步发远程请求；响应回到主线程后确认、归还或掉落。核心的网络和数据库工作不阻塞服务器 tick 线程。
 
--- 库存元数据
-CREATE TABLE inventory_metadata (
-    scope_type    TEXT NOT NULL,
-    scope_id      TEXT NOT NULL,
-    last_modified INTEGER NOT NULL,
-    PRIMARY KEY (scope_type, scope_id)
-);
+## 8. 签名末影箱与漏斗
 
--- 键值配置
-CREATE TABLE exchange_metadata (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
+`AttachedEnderChestSign` 只接受实际支撑/附着到末影箱的墙牌、立式牌、墙挂牌或悬挂牌，并检查正反两面的四行文本。某行能严格解析为玩家仓库连接时才接管；无效告示牌保持原版末影箱行为。
+
+玩家打开映射末影箱时复用同一个 `PlayerWarehouseAccessCoordinator` 和 54 槽 `ExchangeMenu`，因此命令和方块入口共享鉴权、缓存、乐观锁和不兼容物品规则。
+
+漏斗桥遵循以下约束：
+
+- 每个漏斗/漏斗矿车端点同一时间最多一个异步操作，避免 tick 重复调度。
+- 推入时在主线程预留一件源物品，远端失败时回到主线程归还；无法归还则掉落。
+- 抽取时远端读取和 TAKE 异步执行，候选槽由核心 `WarehouseAutomationPlanner` 选择，并跳过本地不能接收或不能反序列化的物品。
+- Minecraft 容器状态只在主线程读取/修改；网络 future 不直接触碰游戏对象。
+- 带密码的告示牌可自行认证。无密码告示牌必须先由玩家打开这一只末影箱并完成认证，产生的内存委托绑定“维度 + 方块坐标”，不能被其他末影箱复用。
+- 自动化认证错误有退避，避免每个 tick 重试密码。
+
+当前明确接受一个一致性取舍：进程崩溃若发生在“本地预留成功、远端提交结果尚未完成本地收尾”的窗口，单件物品可能丢失。系统没有把 token 或预留事务持久化来消除这个窗口。
+
+## 9. 生命周期和线程模型
+
+- `TheExchangeCore` 管理固定后台执行器、网络、数据库、缓存和服务对象。
+- 每个连接有读取循环和异步发送；业务处理交给核心执行器。
+- Fabric 适配层通过服务器执行队列把容器和玩家状态变更切回主线程。
+- 热重载先构建新配置；只有重载成功才清空现有玩家会话并重建连接状态。
+- 关闭时停止网络/心跳、清空纯内存秘密和委托、刷写持久缓存并关闭数据库。
+
+## 10. 关键失败语义
+
+| 情况 | 结果 |
+|---|---|
+| 目标玩家离线但 Minecraft 可解析 | 正常继续，不要求玩家在线 |
+| 认证服务器返回玩家不存在 | 返回“玩家不存在或无法解析”，不创建 UUID 或档案 |
+| 档案解析器抛异常 | 返回解析失败，不进入密码验证 |
+| UUID 可解析但玩家从未创建仓库 | 返回“玩家仓库不存在或尚未创建” |
+| token 到期、主体不匹配或已撤销 | 拒绝操作并要求重新输入密码 |
+| 第 5 次错误密码 | 锁定该来源/访问者 10 分钟 |
+| 槽位小于 0 或大于 53 | 在访问缓存和存储前返回 `INVALID_SLOT` |
+| 远程物品不兼容 | 玩家操作拒绝；漏斗规划跳过 |
+| 私有仓库发生更新 | 只通知持有该 scope 有效会话的 peer |
+
+## 11. 测试边界
+
+核心测试覆盖身份解析结果、UUID-only 迁移、短期 token、滑动过期、锁定、主体绑定、订阅过滤、槽位校验、协议编解码、并发/幂等和自动化槽位规划。两个 Fabric 适配层通过独立编译、构建以及实际专用服务端启动验证版本 API 和 Mixin 注入点。
+
+常用验证命令：
+
+```powershell
+.\gradlew.bat test
+.\gradlew.bat :fabric-1.21.11:build :fabric-26.1:build
+.\gradlew.bat :fabric-1.21.11:runServer
+.\gradlew.bat :fabric-26.1:runServer
 ```
 
-WAL 模式。写操作通过 `DatabaseManager.lock()` (ReentrantLock) 串行化 — 所有 SQLite 写操作都先 `db.lock()` 再执行。
-
-## 5.2 缓存架构
-
-```
-LocalInventoryCacheManager
-  ├── LinkedHashMap<InventoryScope, LocalInventoryCache>  (LRU)
-  ├── 容量: local_inventory_cache_capacity (默认 32)
-  ├── writer: 单线程异步刷盘 (每次 mutation 后 scheduleFlush)
-  └── flusher: 30s 定期兜底 flushDirtyCachesSafely()
-
-CacheManager
-  ├── LinkedHashMap<RemoteScopeKey, CachedInventory>  (LRU)
-  ├── 容量: remote_inventory_cache_capacity (默认 64)
-  ├── 过期: 24h 未访问清理 (cleanupExpired)
-  ├── writer: 单线程异步刷盘 (每次 updateCacheSlot 后 scheduleFlush)
-  └── flusher: 30s 定期兜底
-
-LocalInventoryCache / CachedInventory
-  └── extends AbstractSlotInventoryCache
-      ├── ArrayList<SlotState>  (只增不删)
-      ├── StampedLock  (stateForRead = optimisticRead, stateForWrite = writeLock)
-      ├── per-slot ReentrantLock  (put/take 操作持有)
-      ├── AtomicLong revision  (dirty 追踪, markDirty 递增)
-      └── AtomicBoolean flushQueued  (防止重复调度 flush)
-```
-
-### 异步刷盘流程
-
-```
-put/take → markDirty → scheduleFlush()
-  → markFlushQueued() CAS 检查 (防重复)
-  → writer.execute(() → flushDirty())
-  → clearFlushQueued()
-  → 如果 closed=false 且仍 dirty → 重新 scheduleFlush
-
-flushDirty():
-  → cache.snapshotForFlush() → 列出 dirty slots
-  → persistSlot / persistScopeSnapshot
-  → beginImmediate → 批量 INSERT/UPDATE/DELETE → COMMIT
-  → cache.markClean(revision)
-
-关闭时:
-  flushAll() → closed=true → scheduleFlush 改为同步执行
-```
-
-### 操作日志幂等
-
-`handleRemotePut/handleRemoteTake` 在槽位锁内:
-1. `operationLogger.findByRequestId(requestId)` — 查是否已处理
-2. 已处理 → 直接返回历史结果 (不发重复响应给远端, 但返回相同 payload)
-3. 未处理 → 执行库存变更 → `operationLogger.log()` → `request_id` UNIQUE 约束保证不重复
-
-# 6. 并发控制
-
-## 6.1 锁层次
-
-```
-reload 排空
-  └── beginReload() → taskMonitor → acceptingTasks=false, drain inFlightTasks
-
-coreExecutor (core_threads 线程)
-  └── 所有业务操作提交到此
-
-消息路由 (入站)
-  └── messageRouter.handle() → submit() → coreExecutor
-
-ExchangeService 槽位锁
-  └── ConcurrentHashMap<Integer, ReentrantLock> (per slot)
-      └── 同槽位 PUT/TAKE 串行化
-
-AbstractSlotInventoryCache 锁
-  ├── StampedLock (structureLock)
-  │   ├── stateForRead: tryOptimisticRead → 乐观读, 仅在扩容时退化到 readLock
-  │   └── stateForWrite: tryOptimisticRead → writeLock (仅扩容时)
-  └── per-slot ReentrantLock (SlotState.lock)
-      └── putIntoSlot / takeFromSlot 持锁
-
-CacheManager
-  ├── ReentrantLock (lock) → LRU map 操作
-  └── AtomicBoolean (flushQueued) → 防重复调度
-```
-
-## 6.2 PUT 路径 (权威服务端)
-
-```
-Connection read thread → messageRouter.handle(PUT_ITEM)
-  → TheExchangeCore.submit()
-    → coreExecutor worker
-      → ExchangeService.routeMessage()
-        → handleRemotePut(request)
-          → localSlotLock(slot).lock()
-            → operationLogger.findByRequestId()    // DB 同步读
-            → compatibilityChecker.checkAndMark()   // 纯 CPU
-            → localItemStore.putItem()
-              → LocalInventoryCacheManager.put()
-                → cache.putIntoSlot()              // 槽位锁内
-                  · 空槽: 版本校验 → 放入 → markDirty
-                  · 同种: 堆叠校验 → 合并 → markDirty
-                  · 不同种: SLOT_OCCUPIED
-                → scheduleFlush()                  // 异步刷盘
-            → operationLogger.log()                // DB 同步 INSERT
-          → slotLock.unlock()
-        → conn.send(PUT_ITEM_RESPONSE)             // 立即响应
-        → broadcastInventoryUpdate(PUSH_UPDATE)     // 通知其他连接
-```
-
-## 6.3 TAKE 路径 (权威服务端)
-
-```
-同上路径
-  → handleRemoteTake(request)
-    → localSlotLock(slot).lock()
-      → 幂等检查
-      → localItemStore.takeItem()
-        → cache.takeFromSlot()
-          · 版本校验 (expectedVersion)
-          · itemId 校验
-          · 数量校验 (INSUFFICIENT)
-          · 完全取出: state.item = null
-          · 部分取出: setCount(remaining)
-          · markDirty
-        → scheduleFlush()
-      → operationLogger.log()
-    → slotLock.unlock()
-    → conn.send(TAKE_ITEM_RESPONSE)               // 含 itemsToGive
-```
-
-## 6.4 同步引擎
-
-```
-SyncEngine.refreshChangedSlotsAsync(serverName)
-  → conn.sendAsync(QUERY_SLOT_VERSIONS)
-  → 响应: List<Integer> remoteVersions
-  → CacheManager.changedSlots(local, remote)
-    → 比对每个槽位版本号, 不同 → changed
-  → 无变更 → 完成
-  → 有变更 → querySlotsAsync(serverName, changed)
-    → conn.sendAsync(QUERY_SLOTS(changed))
-    → 响应: List<SlotStateResponse>
-    → applySlotStates()
-      → compatibilityChecker.checkAndMark()  (每个 item)
-      → CacheManager.updateCacheSlots()      (批量更新 in-memory)
-        → scheduleFlush()                    (异步刷盘)
-```
-
-PUSH_UPDATE 处理:
-```
-收到 PUSH_UPDATE(changedSlots, timestamp)
-  → querySlotsAsync(sourceServer, changedSlots)  // 拉取实际数据
-  → redrawRemoteInventoryView()                  // 刷新 GUI
-```
-PUSH_UPDATE 不含物品数据，只作失效通知。
-
-# 7. 心跳与在线检测
-
-```
-HeartbeatManager.start()
-  → scheduler.scheduleAtFixedRate(sendHeartbeats, 10s, 10s)
-    → 遍历所有已配置远端
-    → conn.isRunning() → 发送 HEARTBEAT PING
-    → conn == null && enabled → scheduleReconnect()
-  → scheduler.scheduleAtFixedRate(checkTimeouts, 5s, 5s)
-    → now - conn.lastRecvTime > heartbeatTimeoutSeconds (默认 30)
-    → disconnect() → scheduleReconnect()
-
-scheduleReconnect(server)
-  → putIfAbsent(reconnectScheduled) 防重复
-  → scheduler.schedule(delay, → tryReconnect)
-    → networkManager.connectToRemote(server)
-    → 成功 → 清除重连延迟
-    → 失败 → 指数退避 (5→10→20→30s 上限)
-  → finally: reconnectScheduled.remove()
-```
-
-# 8. GUI 交互决策
-
-`MenuInteractionService.decide(ExchangeInteraction)` 根据点击类型、目标槽位、在线状态、物品兼容性决定操作:
-
-```
-1. touchesIncompatibleItem() → REJECT
-2. !touchesExchangeSpace() → PASS_TO_LOADER (原版处理)
-3. !isOnline() → REFRESH ("目标服务器离线")
-4. QUICK_MOVE → decideQuickMove
-   └→ 从交换空间拖: TAKE_REMOTE
-     从背包拖: PUT_REMOTE (含 findTargetSlot 找空槽/合并)
-5. PICKUP → decidePickup
-   └→ 空手点: TAKE_REMOTE (button=1 取一半)
-     手上有点: PUT_REMOTE (都放或放 1 个)
-6. SWAP → decideSwap
-   └→ 快捷栏有物: PUT_REMOTE, 空手取: TAKE_REMOTE
-7. 其他 (QUICK_CRAFT/PICKUP_ALL/THROW/CLONE) → REFRESH ("暂不支持")
-```
-
-本地模式不再走容器快照同步。菜单层对本地和远端都产出同一类 `PUT_REMOTE` / `TAKE_REMOTE` / `SWAP_REMOTE` 操作；core 对本地目标使用进程内 loopback，构造同样的 request 并进入 `handleRemotePut/Take/Swap`，因此本地也经过版本检查、slot lock、幂等记录、兼容性检查和统一刷新/广播。
-
-# 9. 配置管理
-
-`config/theexchange/theexchange.json`:
-
-```jsonc
-{
-  "server": {
-    "display_name": "Default Server",     // 本服显示名
-    "port": 25566,                        // 监听端口
-    "password": "changeme"                // 连接密码
-  },
-  "network": {
-    "heartbeat_interval_seconds": 10,
-    "heartbeat_timeout_seconds": 30,
-    "reconnect_initial_delay_seconds": 5,
-    "reconnect_max_delay_seconds": 30,
-    "request_timeout_seconds": 5,
-    "inbound_enabled": false
-  },
-  "cache": {
-    "offline_retention_hours": 24,
-    "local_inventory_cache_capacity": 32,
-    "remote_inventory_cache_capacity": 64
-  },
-  "performance": {
-    "core_threads": 4                     // coreExecutor 线程数
-  },
-  "logging": {
-    "retention_days": 30,
-    "cleanup_interval_hours": 1
-  },
-  "container": {
-    "rows": 6,                            // 固定 6 (9×6=54 槽)
-    "title_template": "{server_name} 的共享空间"
-  },
-  "remoteServers": [
-    { "name": "生存服", "address": "10.0.0.2", "port": 25566, "password": "..." }
-  ]
-}
-```
-
-`ExchangeConfigManager.readablePaths()` / `writablePaths()` 提供有效路径列表用于命令自动补全。校验规则:
-- display_name / password: 非空
-- port: 1–65535
-- 数值项: >0
-- rows: 固定 6
-- remote name: 非空, 不含空白, 不能为 "local", 不允许重复
-
-# 10. 跨版本兼容
-
-## 10.1 适配层差异
-
-| API | fabric-26.1 | fabric-1.21.11 |
-|-----|-------------|----------------|
-| Loom plugin | net.fabricmc.fabric-loom 1.15.5 | fabric-loom 1.15-SNAPSHOT |
-| Java target | 25 | 21 |
-| clicked() | ContainerInput enum | ClickType enum |
-| 消息发送 | sendSystemMessage(Component) | displayClientMessage(Component, boolean) |
-| 权限 | Permissions.COMMANDS_ADMIN | 同 (存在) |
-| ItemStack 序列化 | CODEC (DataComponentMap) | CODEC (同, MapCodec) |
-
-核心 `ItemStack.CODEC` 序列化 API 在两个版本完全一致，`FabricItemSerializer` 无需修改。
-
-## 10.2 NeutralItem
-
-```java
-class NeutralItem {
-    String itemId;           // "minecraft:diamond"
-    int count;
-    String displayName;      // JSON 文本组件
-    byte[] extraData;        // 黑盒透传 (NBT/Data Components)
-    boolean incompatible;    // 接收方标记
-    String sourceVersion;    // 来源 MC 版本
-    int version;             // 乐观锁版本 (仅 DB 层使用)
-}
-```
-
-`CompatibilityChecker.checkAndMark()` 在接收方调用: `itemSerializer.canDeserialize(item)` 失败 → `incompatible=true`。不兼容物品禁止操作，extraData 原样保存原样返回 (F-40)。
-
-# 11. 跨服物品操作流程
-
-## 11.1 远端 PUT (本服玩家 → 远端)
-
-```
-ExchangeMenu.clicked() → decide() → PUT_REMOTE
-  → removeSourceStack()              // 从背包真实扣除, 存 ItemStack 局部变量
-  → core.putRemoteAsync(server, slot, item, player)
-    → submit() → exchangeService.putNeutralItemAsync()
-      → 检查: networkManager, conn, syncEngine 非 null
-      → cacheManager.getSlot() → 检查不兼容
-      → cacheManager.getSlotVersion() → expectedVersion
-      → conn.sendAsync(PUT_ITEM, request, 5s timeout)
-        → 发送到远端...
-
-  远端权威服务器:
-    handleRemotePut() → slotLock → 幂等检查 → 兼容性检查 → putItem → log → 响应
-
-      ← PUT_ITEM_RESPONSE 返回
-    → .handle() 回调:
-      → submitIfGeneration(opGeneration, finishRemotePut)
-        → 成功: cacheManager.updateCacheSlot(), redrawOpenViews()
-        → 失败: operationLogger.log(FAIL)
-    → ExchangeMenu 回调:
-      → 成功: refreshFromMemory()
-      → 失败: giveOrDrop(player, inFlight)  // 退回物品
-```
-
-## 11.2 远端 TAKE (本服玩家 ← 远端)
-
-```
-ExchangeMenu.clicked() → decide() → TAKE_REMOTE
-  → core.takeRemoteAsync(server, slot, count, player)
-    → submit() → exchangeService.takeItemAsync()
-      → cacheManager.getSlot() → expectedItem + expectedVersion
-      → conn.sendAsync(TAKE_ITEM, request, 5s timeout)
-
-  远端权威服务器:
-    handleRemoteTake() → slotLock → 幂等检查 → 存在/版本/id/数量校验 → takeItem → log → 响应
-
-      ← TAKE_ITEM_RESPONSE (含 itemsToGive)
-    → finishRemoteTake()
-      → 成功: 检查 itemsToGive 非空非不兼容 → 更新缓存
-      → 失败: 更新缓存 (保持当前状态)
-    → ExchangeMenu 回调:
-      → 成功: applyTakenItem() → deserialize → 放入背包 / setCarried / 掉落
-      → 失败: 提示原因, refreshFromMemory()
-```
-
-# 12. 已知与需求差异
-
-| 需求 | 实现 | 原因 |
-|------|------|------|
-| F-23 密码哈希存储 | 明文存储 | TLS + TOFU 公钥固定保护传输；bcrypt 待后续 |
-| F-38 离线补偿表 | 未实现 player_compensation | InFlight 物品存局部变量，崩溃丢失；待后续 |
-| 客户端增强 GUI (G-08~G-11) | 未实现 | 首期仅服务端 |
-| Forge/NeoForge 适配 | 未实现 | 首期仅 Fabric |
-| 细粒度权限控制 (§6) | 所有玩家均可操作 | 首期不分权限 |
+涉及 Minecraft 行为时，以 `ref/minecraft-1.21.11-official-sources` 和 `ref/minecraft-26.1.2-sources` 中对应版本源码为准，不在核心中复制或猜测认证服务器逻辑。

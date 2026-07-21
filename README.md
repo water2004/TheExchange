@@ -86,6 +86,31 @@
 - 离线时：只读查看缓存数据，标题显示 `[离线]`
 - 不兼容物品（跨版本无法解析）：显示为屏障方块，禁止操作
 
+### 玩家私有仓库
+
+```
+/exchange player password <password>       创建或修改自己的玩家仓库密码
+/exchange player view <player>@<server>    使用内存中的有效会话打开仓库
+/exchange player view <player>@<server>:<password>
+/exchange player login <password>          为上一次待验证连接补输密码
+```
+
+- 目标玩家可以离线。名字到 UUID 的解析完全使用 Minecraft 的 `nameToIdCache`：在线认证模式会查询 Mojang 档案服务，离线模式遵循 Minecraft 自己的离线 UUID 规则。
+- 只有玩家主动执行 `player password` 才会创建仓库档案；远程查询不会自动建档。数据库档案只保存 UUID、密码哈希和时间戳，不保存角色名。
+- 密码只用于换取 5 分钟滑动过期令牌。令牌、订阅和自动化委托均只在内存中，重启或成功热重载后立即失效。
+- 同一访问者连续 5 次密码错误会锁定 10 分钟；锁定按来源服务器和访问玩家隔离。
+
+### 告示牌末影箱与漏斗
+
+将含有 `<player>@<server>:<password>`（密码可省略）的一行告示牌实际附着在末影箱上，该末影箱会映射到目标玩家仓库。支持墙上告示牌、立式告示牌和悬挂告示牌：
+
+- 推荐使用不含密码的告示牌并先由玩家手动验证；告示牌文本本身不是秘密存储，写入密码会让能读取该告示牌或世界数据的人看到密码。
+- 玩家打开末影箱时使用同一套 54 槽远程仓库 GUI 和并发控制。
+- 告示牌省略密码且没有有效会话时，只需执行提示的 `/exchange player login <password>`，不必重输连接串。
+- 漏斗推入/抽取走非阻塞异步远程操作；源物品先预留，失败时归还。崩溃发生在远程确认窗口内时可能丢失该件物品，这是当前明确接受的取舍。
+- 漏斗抽取会跳过本服无法反序列化的远程物品；所有玩家操作也会拒绝不兼容物品。
+- 无密码告示牌的自动化必须先由玩家打开该末影箱并完成一次验证；委托只绑定这一只末影箱，不会被其他漏斗借用。
+
 ### 服务器列表
 
 ```
@@ -118,24 +143,31 @@
 - **TLS 1.3** 加密信道，AES-256-GCM / AES-128-GCM
 - **TOFU 公钥固定**：首次连接自动保存对端公钥到 `config/theexchange/tls/known-peers.properties`，后续连接校验公钥一致，防止中间人攻击
 - **密码认证**：TLS 握手后在应用层二次鉴权
+- **玩家仓库令牌**：256 位随机 bearer token；服务端仅保存 SHA-256 摘要，令牌绑定来源服务器与访问者，滑动 TTL 5 分钟，绝不持久化
+- **玩家仓库密码**：PBKDF2-HMAC-SHA256（120,000 次迭代）+ 独立随机盐；仓库档案以 UUID 为唯一键
+- **服务器连接密码**：保存在服务器私有配置中并仅在 TLS 通道内使用；当前不做额外哈希封装
 - **防重放**：滑动窗口（1024 位）+ 时间戳（±60s）+ 单调序列号
 - **乐观锁**：每个槽位独立版本号，并发冲突时拒绝操作并刷新 GUI
 
 ## 架构
 
 ```
-core/                         纯 Java 核心库，零 Minecraft 依赖
-  model/                      数据模型、缓存、乐观锁
-  network/                    TCP/TLS 网络协议栈、防重放
-  storage/                    SQLite 持久化、LRU 缓存
-  service/                    业务逻辑、同步引擎、心跳
-  compat/                     跨版本兼容、物品序列化接口
+core/                         纯 Java 核心库，零 Minecraft/loader 依赖
+  model/                      中立物品、scope、连接串与交互模型
+  network/                    TLS/TOFU、应用协议 v2、消息关联与防重放
+  storage/                    SQLite 权威库存、UUID 仓库档案、LRU 缓存
+  service/                    鉴权会话、同步、乐观锁、更新受众、自动化槽位规划
+  compat/                     跨版本物品序列化接口
 
-src/                          Fabric 适配层
+fabric-1.21.11/               Minecraft 1.21.11 适配层（Java 21）
+fabric-26.1/                  Minecraft 26.1.2 适配层（Java 25）
   fabric/command/             指令注册
-  fabric/container/           虚拟容器（原版 9×6 GUI）
-  fabric/item/                ItemStack ↔ NeutralItem 序列化
-  fabric/config/              配置文件加载
+  fabric/container/           9×6 服务端虚拟容器
+  fabric/item/                ItemStack ↔ NeutralItem
+  fabric/player/              密码提示与仓库打开协调器
+  fabric/block/               附着告示牌解析
+  fabric/automation/          末影箱自动化会话与异步漏斗桥
+  fabric/mixin/               末影箱、漏斗的最小注入点
 ```
 
 ## 并发基准测试
