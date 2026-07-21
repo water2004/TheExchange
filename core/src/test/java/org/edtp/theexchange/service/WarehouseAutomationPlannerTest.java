@@ -53,6 +53,25 @@ class WarehouseAutomationPlannerTest {
         assertTrue(WarehouseAutomationPlanner.findTakeSlot(null).isEmpty());
     }
 
+    @Test
+    void circularStartDistributesConcurrentHoppersWithoutChangingSelectionRules() {
+        List<NeutralItem> empty = slots(null, null, null, null);
+        NeutralItem stone = item("minecraft:stone", 1, false);
+
+        assertEquals(0, WarehouseAutomationPlanner.findPutSlot(
+                empty, stone, ignored -> 64, 0).orElseThrow());
+        assertEquals(2, WarehouseAutomationPlanner.findPutSlot(
+                empty, stone, ignored -> 64, 2).orElseThrow());
+        assertEquals(1, WarehouseAutomationPlanner.findPutSlot(
+                empty, stone, ignored -> 64, 5).orElseThrow());
+
+        List<NeutralItem> items = slots(stone, null, item("minecraft:dirt", 1, false), null);
+        assertEquals(2, WarehouseAutomationPlanner.findTakeSlot(
+                items, ignored -> true, 2).orElseThrow());
+        assertEquals(0, WarehouseAutomationPlanner.findTakeSlot(
+                items, ignored -> true, 3).orElseThrow());
+    }
+
     private static List<NeutralItem> slots(NeutralItem... items) {
         List<NeutralItem> result = new ArrayList<>();
         java.util.Collections.addAll(result, items);
