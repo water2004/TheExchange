@@ -7,11 +7,21 @@ import org.edtp.theexchange.network.protocol.FrameType;
 import org.edtp.theexchange.network.protocol.messages.AuthRequest;
 import org.edtp.theexchange.network.protocol.messages.AuthResponse;
 import org.edtp.theexchange.network.protocol.messages.PushUpdate;
+import org.edtp.theexchange.network.protocol.messages.PlayerInventoryAccessRequest;
+import org.edtp.theexchange.network.protocol.messages.PlayerInventoryAccessResponse;
 import org.edtp.theexchange.network.protocol.messages.PutItemRequest;
+import org.edtp.theexchange.network.protocol.messages.PutItemResponse;
+import org.edtp.theexchange.network.protocol.messages.QuerySlotStateRequest;
+import org.edtp.theexchange.network.protocol.messages.QuerySlotVersionRequest;
+import org.edtp.theexchange.network.protocol.messages.QuerySlotVersionResponse;
 import org.edtp.theexchange.network.protocol.messages.QuerySlotsRequest;
 import org.edtp.theexchange.network.protocol.messages.SlotStateResponse;
 import org.edtp.theexchange.network.protocol.messages.SlotVersionsResponse;
 import org.edtp.theexchange.network.protocol.messages.SlotsStateResponse;
+import org.edtp.theexchange.network.protocol.messages.SwapItemRequest;
+import org.edtp.theexchange.network.protocol.messages.SwapItemResponse;
+import org.edtp.theexchange.network.protocol.messages.TakeItemRequest;
+import org.edtp.theexchange.network.protocol.messages.TakeItemResponse;
 import org.edtp.theexchange.util.BinaryIO;
 import org.junit.jupiter.api.Test;
 
@@ -66,8 +76,10 @@ class MessageCodecPlayerInventoryTest {
 
     @Test
     void queryRequestRoundTripsPlayerAccess() {
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         QuerySlotsRequest request = new QuerySlotsRequest("req-1", List.of(0, 1),
-                InventoryAccess.player("Steve", "secret"));
+                InventoryAccess.playerSession("Steve", "token-123", "viewer-uuid", "Viewer",
+                        scope, 12345L));
 
         QuerySlotsRequest decoded = (QuerySlotsRequest) MessageCodec.decodeMessage(
                 FrameType.QUERY_SLOTS, MessageCodec.encodeMessage(request));
@@ -76,8 +88,37 @@ class MessageCodecPlayerInventoryTest {
         assertEquals(List.of(0, 1), decoded.getSlots());
         assertTrue(decoded.getAccess().isPlayer());
         assertEquals("Steve", decoded.getAccess().ownerName());
-        assertEquals("secret", decoded.getAccess().password());
+        assertEquals("token-123", decoded.getAccess().token());
+        assertEquals("viewer-uuid", decoded.getAccess().requesterUuid());
+        assertEquals("Viewer", decoded.getAccess().requesterName());
         assertNull(decoded.getAccess().effectiveScope());
+    }
+
+    @Test
+    void playerAccessHandshakeRoundTripsPasswordAndIssuedToken() {
+        PlayerInventoryAccessRequest request = new PlayerInventoryAccessRequest(
+                "access-req", "Steve", "secret", "viewer-uuid", "Viewer");
+
+        PlayerInventoryAccessRequest decodedRequest = (PlayerInventoryAccessRequest) MessageCodec.decodeMessage(
+                FrameType.PLAYER_INVENTORY_ACCESS, MessageCodec.encodeMessage(request));
+
+        assertEquals("access-req", decodedRequest.getRequestId());
+        assertEquals("Steve", decodedRequest.getOwnerName());
+        assertEquals("secret", decodedRequest.getPassword());
+        assertEquals("viewer-uuid", decodedRequest.getRequesterUuid());
+        assertEquals("Viewer", decodedRequest.getRequesterName());
+
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        PlayerInventoryAccessResponse response = PlayerInventoryAccessResponse.success(
+                "access-req", "Steve", "token-123", scope, 12345L, 300_000L);
+        PlayerInventoryAccessResponse decodedResponse = (PlayerInventoryAccessResponse) MessageCodec.decodeMessage(
+                FrameType.PLAYER_INVENTORY_ACCESS_RESPONSE, MessageCodec.encodeMessage(response));
+
+        assertTrue(decodedResponse.isSuccess());
+        assertEquals("token-123", decodedResponse.getToken());
+        assertEquals(scope, decodedResponse.getScope());
+        assertEquals(12345L, decodedResponse.getExpiresAt());
+        assertEquals(300_000L, decodedResponse.getSessionTtlMillis());
     }
 
     @Test
@@ -98,9 +139,51 @@ class MessageCodecPlayerInventoryTest {
     }
 
     @Test
+    void legacySingleSlotQueriesDecodeAsServerScope() throws Exception {
+        byte[] versionRequest = MessageCodec.encodeMessage(
+                new QuerySlotVersionRequest("version-req", 4, InventoryAccess.server()), 1);
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(versionRequest))) {
+            assertEquals("version-req", BinaryIO.readString(in));
+            assertEquals(4, in.readInt());
+            assertEquals(0, in.available(), "v1 slot version request must not include access");
+        }
+        QuerySlotVersionRequest decodedVersionRequest = (QuerySlotVersionRequest) MessageCodec.decodeMessage(
+                FrameType.QUERY_SLOT_VERSION, versionRequest);
+        assertEquals(InventoryAccess.server(), decodedVersionRequest.getAccess());
+
+        byte[] stateRequest = MessageCodec.encodeMessage(
+                new QuerySlotStateRequest("state-req", 5, InventoryAccess.server()), 1);
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(stateRequest))) {
+            assertEquals("state-req", BinaryIO.readString(in));
+            assertEquals(5, in.readInt());
+            assertEquals(0, in.available(), "v1 slot state request must not include access");
+        }
+        QuerySlotStateRequest decodedStateRequest = (QuerySlotStateRequest) MessageCodec.decodeMessage(
+                FrameType.QUERY_SLOT_STATE, stateRequest);
+        assertEquals(InventoryAccess.server(), decodedStateRequest.getAccess());
+
+        byte[] versionResponse = MessageCodec.encodeMessage(
+                new QuerySlotVersionResponse("version-resp", 4, 9, InventoryScope.server()), 1);
+        QuerySlotVersionResponse decodedVersionResponse = (QuerySlotVersionResponse) MessageCodec.decodeMessage(
+                FrameType.SLOT_VERSION_RESPONSE, versionResponse);
+        assertEquals(InventoryScope.server(), decodedVersionResponse.getScope());
+        assertTrue(decodedVersionResponse.isSuccess());
+        assertNull(decodedVersionResponse.getFailReason());
+
+        byte[] stateResponse = MessageCodec.encodeMessage(
+                new SlotStateResponse("state-resp", 5, sampleItem(), 7, InventoryScope.server()), 1);
+        SlotStateResponse decodedStateResponse = (SlotStateResponse) MessageCodec.decodeMessage(
+                FrameType.SLOT_STATE_RESPONSE, stateResponse);
+        assertEquals(InventoryScope.server(), decodedStateResponse.getScope());
+        assertTrue(decodedStateResponse.isSuccess());
+        assertNull(decodedStateResponse.getFailReason());
+    }
+
+    @Test
     void playerQueryRequestCannotEncodeProtocolV1Shape() {
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         QuerySlotsRequest request = new QuerySlotsRequest("req-player", List.of(0),
-                InventoryAccess.player("Steve", "secret"));
+                InventoryAccess.playerSession("Steve", "token", "viewer", "Viewer", scope, 123L));
 
         assertThrows(RuntimeException.class, () -> MessageCodec.encodeMessage(request, 1));
     }
@@ -170,10 +253,101 @@ class MessageCodecPlayerInventoryTest {
 
     @Test
     void playerMutationRequestCannotEncodeProtocolV1Shape() {
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         PutItemRequest request = new PutItemRequest(0, sampleItem(), 1,
-                "req-put", "uuid", "Steve", InventoryAccess.player("Steve", "secret"));
+                "req-put", "uuid", "Steve",
+                InventoryAccess.playerSession("Steve", "token", "uuid", "Steve", scope, 123L));
 
         assertThrows(RuntimeException.class, () -> MessageCodec.encodeMessage(request, 1));
+    }
+
+    @Test
+    void legacyMutationMessagesDecodeAsServerScope() throws Exception {
+        byte[] putRequestPayload = MessageCodec.encodeMessage(new PutItemRequest(
+                0, sampleItem(), 3, "put-req", "actor", "Steve", InventoryAccess.server()), 1);
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(putRequestPayload))) {
+            assertEquals(0, in.readInt());
+            assertNotNull(BinaryIO.readNullableNeutralItem(in));
+            assertEquals(3, in.readInt());
+            assertEquals("put-req", BinaryIO.readString(in));
+            assertEquals("actor", BinaryIO.readString(in));
+            assertEquals("Steve", BinaryIO.readString(in));
+            assertEquals(0, in.available(), "v1 put request must not include access");
+        }
+        PutItemRequest decodedPutRequest = (PutItemRequest) MessageCodec.decodeMessage(
+                FrameType.PUT_ITEM, putRequestPayload);
+        assertEquals(InventoryAccess.server(), decodedPutRequest.getAccess());
+
+        PutItemResponse putResponse = new PutItemResponse(true, 0, sampleItem(),
+                null, 123L, 4, "put-req", InventoryScope.server());
+        PutItemResponse decodedPutResponse = (PutItemResponse) MessageCodec.decodeMessage(
+                FrameType.PUT_ITEM_RESPONSE, MessageCodec.encodeMessage(putResponse, 1));
+        assertEquals(InventoryScope.server(), decodedPutResponse.getScope());
+
+        TakeItemRequest takeRequest = new TakeItemRequest(0, "minecraft:stone", 4,
+                1, "take-req", "actor", "Steve", InventoryAccess.server());
+        TakeItemRequest decodedTakeRequest = (TakeItemRequest) MessageCodec.decodeMessage(
+                FrameType.TAKE_ITEM, MessageCodec.encodeMessage(takeRequest, 1));
+        assertEquals(InventoryAccess.server(), decodedTakeRequest.getAccess());
+
+        TakeItemResponse takeResponse = new TakeItemResponse(true, 0, null,
+                null, 124L, 5, sampleItem(), "take-req", InventoryScope.server());
+        TakeItemResponse decodedTakeResponse = (TakeItemResponse) MessageCodec.decodeMessage(
+                FrameType.TAKE_ITEM_RESPONSE, MessageCodec.encodeMessage(takeResponse, 1));
+        assertEquals(InventoryScope.server(), decodedTakeResponse.getScope());
+
+        SwapItemRequest swapRequest = new SwapItemRequest(0, sampleItem(), 5,
+                "minecraft:dirt", 1, false, "swap-req", "actor", "Steve", InventoryAccess.server());
+        SwapItemRequest decodedSwapRequest = (SwapItemRequest) MessageCodec.decodeMessage(
+                FrameType.SWAP_ITEM, MessageCodec.encodeMessage(swapRequest, 1));
+        assertEquals(InventoryAccess.server(), decodedSwapRequest.getAccess());
+
+        SwapItemResponse swapResponse = new SwapItemResponse(true, 0, sampleItem(),
+                sampleItem(), 6, null, "swap-req", InventoryScope.server());
+        SwapItemResponse decodedSwapResponse = (SwapItemResponse) MessageCodec.decodeMessage(
+                FrameType.SWAP_ITEM_RESPONSE, MessageCodec.encodeMessage(swapResponse, 1));
+        assertEquals(InventoryScope.server(), decodedSwapResponse.getScope());
+    }
+
+    @Test
+    void playerMutationMessagesRoundTripInProtocolV2() {
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        InventoryAccess access = InventoryAccess.playerSession(
+                "Steve", "token-123", "actor", "Viewer", scope, 12345L);
+
+        PutItemRequest decodedPutRequest = (PutItemRequest) MessageCodec.decodeMessage(
+                FrameType.PUT_ITEM, MessageCodec.encodeMessage(new PutItemRequest(
+                        0, sampleItem(), 1, "put-v2", "actor", "Steve", access)));
+        assertTrue(decodedPutRequest.getAccess().isPlayer());
+        assertEquals("Steve", decodedPutRequest.getAccess().ownerName());
+        assertEquals("token-123", decodedPutRequest.getAccess().token());
+        assertEquals("actor", decodedPutRequest.getAccess().requesterUuid());
+
+        PutItemResponse decodedPutResponse = (PutItemResponse) MessageCodec.decodeMessage(
+                FrameType.PUT_ITEM_RESPONSE, MessageCodec.encodeMessage(new PutItemResponse(
+                        true, 0, sampleItem(), null, 1L, 2, "put-v2", scope)));
+        assertEquals(scope, decodedPutResponse.getScope());
+
+        TakeItemRequest decodedTakeRequest = (TakeItemRequest) MessageCodec.decodeMessage(
+                FrameType.TAKE_ITEM, MessageCodec.encodeMessage(new TakeItemRequest(
+                        0, "minecraft:stone", 2, 1, "take-v2", "actor", "Steve", access)));
+        assertTrue(decodedTakeRequest.getAccess().isPlayer());
+
+        TakeItemResponse decodedTakeResponse = (TakeItemResponse) MessageCodec.decodeMessage(
+                FrameType.TAKE_ITEM_RESPONSE, MessageCodec.encodeMessage(new TakeItemResponse(
+                        true, 0, null, null, 2L, 3, sampleItem(), "take-v2", scope)));
+        assertEquals(scope, decodedTakeResponse.getScope());
+
+        SwapItemRequest decodedSwapRequest = (SwapItemRequest) MessageCodec.decodeMessage(
+                FrameType.SWAP_ITEM, MessageCodec.encodeMessage(new SwapItemRequest(
+                        0, sampleItem(), 3, "minecraft:dirt", 1, false,
+                        "swap-v2", "actor", "Steve", access)));
+        assertTrue(decodedSwapRequest.getAccess().isPlayer());
+
+        SwapItemResponse decodedSwapResponse = (SwapItemResponse) MessageCodec.decodeMessage(
+                FrameType.SWAP_ITEM_RESPONSE, MessageCodec.encodeMessage(new SwapItemResponse(
+                        true, 0, sampleItem(), sampleItem(), 4, null, "swap-v2", scope)));
+        assertEquals(scope, decodedSwapResponse.getScope());
     }
 
     @Test
@@ -212,6 +386,19 @@ class MessageCodecPlayerInventoryTest {
                 InventoryScope.player("11111111-2222-3333-4444-555555555555"));
 
         assertThrows(RuntimeException.class, () -> MessageCodec.encodeMessage(update, 1));
+    }
+
+    @Test
+    void invalidListSizeIsRejected() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(bytes)) {
+            BinaryIO.writeString(out, "bad-list");
+            out.writeInt(257);
+        }
+
+        RuntimeException error = assertThrows(RuntimeException.class,
+                () -> MessageCodec.decodeMessage(FrameType.QUERY_SLOTS, bytes.toByteArray()));
+        assertTrue(error.getMessage().contains("Failed to decode QUERY_SLOTS"));
     }
 
     private NeutralItem sampleItem() {

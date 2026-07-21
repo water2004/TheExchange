@@ -126,6 +126,30 @@ class PlayerInventorySessionManagerTest {
         assertFalse(context.manager.hasActiveSession("survival", scope));
     }
 
+    @Test
+    void clearingInMemoryStateInvalidatesAllTokensAndLockouts() {
+        TestContext context = context();
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        context.authStore.setPassword(scope, "Steve", "secret");
+        PlayerInventorySessionManager.AccessPrincipal principal =
+                new PlayerInventorySessionManager.AccessPrincipal("survival", "viewer-uuid");
+        PlayerInventorySessionManager.SessionResult session = context.manager.authenticate(
+                scope, "Steve", "secret", principal);
+        assertTrue(session.success());
+
+        for (int attempt = 0; attempt < 5; attempt++) {
+            context.manager.authenticate(scope, "Steve", "wrong", principal);
+        }
+        assertTrue(context.manager.authenticate(scope, "Steve", "secret", principal).locked());
+
+        context.manager.clear();
+
+        assertFalse(context.manager.validateAndRefresh(session.token(), principal).success());
+        assertFalse(context.manager.hasActiveSession("survival", scope));
+        assertTrue(context.manager.authenticate(scope, "Steve", "secret", principal).success(),
+                "a core restart/reload starts with no persisted lockout or token state");
+    }
+
     private TestContext context() {
         DatabaseManager db = new DatabaseManager(tempDir.resolve("session-test.db").toString());
         db.initialize();

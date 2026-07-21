@@ -8,6 +8,8 @@ public enum FrameType {
     AUTH_REQUEST((short) 0x0001),
     AUTH_RESPONSE((short) 0x0002),
     HEARTBEAT((short) 0x0003),
+    PLAYER_INVENTORY_ACCESS((short) 0x0004),
+    PLAYER_INVENTORY_ACCESS_RESPONSE((short) 0x0005),
     QUERY_TIMESTAMP((short) 0x0010),
     TIMESTAMP_RESPONSE((short) 0x0011),
     QUERY_ITEMS((short) 0x0012),

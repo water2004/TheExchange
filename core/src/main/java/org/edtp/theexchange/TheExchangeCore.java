@@ -15,6 +15,8 @@ import org.edtp.theexchange.service.CacheManager;
 import org.edtp.theexchange.service.ExchangeService;
 import org.edtp.theexchange.service.HeartbeatManager;
 import org.edtp.theexchange.service.MenuInteractionService;
+import org.edtp.theexchange.service.PlayerInventoryClientSessionStore;
+import org.edtp.theexchange.service.PlayerInventorySessionManager;
 import org.edtp.theexchange.service.ServerRegistry;
 import org.edtp.theexchange.service.SyncEngine;
 import org.edtp.theexchange.storage.DatabaseManager;
@@ -65,6 +67,9 @@ public class TheExchangeCore {
     private RemoteCacheStore remoteCacheStore;
     private OperationLogger operationLogger;
     private PlayerInventoryAuthStore playerInventoryAuthStore;
+    private PlayerInventorySessionManager playerInventorySessionManager;
+    private final PlayerInventoryClientSessionStore playerInventoryClientSessionStore =
+            new PlayerInventoryClientSessionStore();
     private LocalInventoryCacheManager localInventoryCacheManager;
 
     private NetworkManager networkManager;
@@ -102,6 +107,10 @@ public class TheExchangeCore {
     public RemoteCacheStore getRemoteCacheStore() { return remoteCacheStore; }
     public OperationLogger getOperationLogger() { return operationLogger; }
     public PlayerInventoryAuthStore getPlayerInventoryAuthStore() { return playerInventoryAuthStore; }
+    public PlayerInventorySessionManager getPlayerInventorySessionManager() { return playerInventorySessionManager; }
+    public PlayerInventoryClientSessionStore getPlayerInventoryClientSessionStore() {
+        return playerInventoryClientSessionStore;
+    }
     public LocalInventoryCacheManager getLocalInventoryCacheManager() { return localInventoryCacheManager; }
     public NetworkManager getNetworkManager() { return networkManager; }
     public ServerRegistry getServerRegistry() { return serverRegistry; }
@@ -179,7 +188,7 @@ public class TheExchangeCore {
 
     public CompletableFuture<ExchangeViewState> openLocalViewAsync(String serverName, InventoryAccess access) {
         return submit(() -> {
-            InventoryAccess resolvedAccess = resolvedLocalAccess(access);
+            InventoryAccess resolvedAccess = resolvedLocalAccess(serverName, access);
             InventoryScope scope = scopeOrServer(resolvedAccess);
             return ExchangeViewState.local(serverName,
                     localItemStore.getAllItems(scope),
@@ -194,9 +203,9 @@ public class TheExchangeCore {
     }
 
     public CompletableFuture<ExchangeViewState> openRemoteViewAsync(String serverName, InventoryAccess access) {
-        InventoryAccess requestAccess = access != null ? access : InventoryAccess.server();
         long opGeneration = generation.get();
         return submit(() -> {
+            InventoryAccess requestAccess = resolveClientAccess(serverName, access);
             boolean online = networkManager != null
                     && networkManager.getConnection(serverName) != null
                     && networkManager.getConnection(serverName).isRunning();
@@ -206,12 +215,17 @@ public class TheExchangeCore {
             return syncEngine.refreshChangedSlotsAsync(serverName, requestAccess)
                     .handle((scope, error) -> {
                         if (error != null && requestAccess.isPlayer()) {
+                            invalidateRejectedAccess(serverName, requestAccess, error.getMessage());
                             throw new RuntimeException(error);
+                        }
+                        if (requestAccess.isPlayer()) {
+                            playerInventoryClientSessionStore.touch(serverName, requestAccess);
                         }
                         return scope != null ? scope : scopeOrServer(requestAccess);
                     })
                     .thenCompose(scope -> submitIfCurrent(opGeneration,
-                            () -> remoteFromCache(serverName, true, requestAccess.withResolvedScope(scope))));
+                            () -> remoteFromCache(serverName, true,
+                                    resolveClientAccess(serverName, requestAccess).withResolvedScope(scope))));
         }).thenCompose(future -> future);
     }
 
@@ -221,10 +235,11 @@ public class TheExchangeCore {
 
     public CompletableFuture<ExchangeViewState> openRemoteCachedViewAsync(String serverName, InventoryAccess access) {
         return submit(() -> {
+            InventoryAccess requestAccess = resolveClientAccess(serverName, access);
             boolean online = networkManager != null
                     && networkManager.getConnection(serverName) != null
                     && networkManager.getConnection(serverName).isRunning();
-            return remoteFromCache(serverName, online, access);
+            return remoteFromCache(serverName, online, requestAccess);
         });
     }
 
@@ -235,12 +250,22 @@ public class TheExchangeCore {
     public CompletableFuture<Void> refreshRemoteViewAsync(String serverName, InventoryAccess access) {
         long opGeneration = generation.get();
         CompletableFuture<CompletableFuture<Void>> future = submit(() -> {
+            InventoryAccess requestAccess = resolveClientAccess(serverName, access);
             if (syncEngine != null) {
-                return syncEngine.refreshChangedSlotsAsync(serverName, access)
+                return syncEngine.refreshChangedSlotsAsync(serverName, requestAccess)
+                        .thenAccept(ignored -> {
+                            if (requestAccess.isPlayer()) {
+                                playerInventoryClientSessionStore.touch(serverName, requestAccess);
+                            }
+                        })
+                        .exceptionallyCompose(error -> {
+                            invalidateRejectedAccess(serverName, requestAccess, error.getMessage());
+                            return CompletableFuture.failedFuture(error);
+                        })
                         .thenCompose(ignored -> ensureCurrent(opGeneration));
             }
             if (cacheManager != null) {
-                cacheManager.getCache(serverName, scopeOrServer(access));
+                cacheManager.getCache(serverName, scopeOrServer(requestAccess));
             }
             return CompletableFuture.completedFuture(null);
         });
@@ -258,8 +283,16 @@ public class TheExchangeCore {
                                                                     PlayerExchangeContext player,
                                                                     InventoryAccess access) {
         long opGeneration = generation.get();
-        return submit(() -> exchangeService.putNeutralItemAsync(
-                        serverName, slot, player.uuid(), player.name(), item, access))
+        return submit(() -> {
+                    InventoryAccess requestAccess = resolveClientAccess(serverName, access);
+                    return exchangeService.putNeutralItemAsync(
+                                    serverName, slot, player.uuid(), player.name(), item, requestAccess)
+                            .thenApply(result -> {
+                                recordAccessResult(serverName, requestAccess,
+                                        result.isSuccess(), result.getFailReason());
+                                return result;
+                            });
+                })
                 .thenCompose(future -> future)
                 .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
@@ -278,8 +311,16 @@ public class TheExchangeCore {
                                                                      PlayerExchangeContext player,
                                                                      InventoryAccess access) {
         long opGeneration = generation.get();
-        return submit(() -> exchangeService.takeItemAsync(
-                        serverName, slot, count, player.uuid(), player.name(), access))
+        return submit(() -> {
+                    InventoryAccess requestAccess = resolveClientAccess(serverName, access);
+                    return exchangeService.takeItemAsync(
+                                    serverName, slot, count, player.uuid(), player.name(), requestAccess)
+                            .thenApply(result -> {
+                                recordAccessResult(serverName, requestAccess,
+                                        result.isSuccess(), result.getFailReason());
+                                return result;
+                            });
+                })
                 .thenCompose(future -> future)
                 .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
@@ -305,9 +346,17 @@ public class TheExchangeCore {
                                                                      PlayerExchangeContext player,
                                                                      InventoryAccess access) {
         long opGeneration = generation.get();
-        return submit(() -> exchangeService.swapItemAsync(
-                        serverName, slot, item, expectedItemId, takeCount,
-                        boundedMerge, player.uuid(), player.name(), access))
+        return submit(() -> {
+                    InventoryAccess requestAccess = resolveClientAccess(serverName, access);
+                    return exchangeService.swapItemAsync(
+                                    serverName, slot, item, expectedItemId, takeCount,
+                                    boundedMerge, player.uuid(), player.name(), requestAccess)
+                            .thenApply(result -> {
+                                recordAccessResult(serverName, requestAccess,
+                                        result.isSuccess(), result.getFailReason());
+                                return result;
+                            });
+                })
                 .thenCompose(future -> future)
                 .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
@@ -320,8 +369,27 @@ public class TheExchangeCore {
             ExchangeAPI.PlayerIdentity identity = resolveRequiredPlayerIdentity(playerName);
             InventoryScope scope = InventoryScope.player(identity.getUuid());
             playerInventoryAuthStore.setPassword(scope, identity.getName(), password);
+            playerInventorySessionManager.revokeScope(scope);
+            playerInventoryClientSessionStore.invalidateScope(scope);
             return scope;
         });
+    }
+
+    public CompletableFuture<InventoryAccess> authenticatePlayerInventoryAsync(
+            String serverName, String ownerName, String password, PlayerExchangeContext requester) {
+        return submit(() -> exchangeService.authenticatePlayerInventoryAsync(
+                        serverName, ownerName, password, requester.uuid(), requester.name()))
+                .thenCompose(future -> future)
+                .thenApply(access -> playerInventoryClientSessionStore.remember(serverName, access));
+    }
+
+    public Optional<InventoryAccess> findPlayerInventorySession(
+            String serverName, String ownerName, PlayerExchangeContext requester) {
+        if (requester == null) {
+            return Optional.empty();
+        }
+        return playerInventoryClientSessionStore.findValid(
+                serverName, ownerName, requester.uuid());
     }
 
     public CompletableFuture<ExchangeAPI.RuntimeConfig> reloadConfigAsync() {
@@ -379,18 +447,48 @@ public class TheExchangeCore {
                 access != null ? access.withResolvedScope(scope) : InventoryAccess.server());
     }
 
-    private InventoryAccess resolvedLocalAccess(InventoryAccess access) {
-        InventoryAccess value = access != null ? access : InventoryAccess.server();
+    private InventoryAccess resolvedLocalAccess(String serverName, InventoryAccess access) {
+        InventoryAccess value = resolveClientAccess(serverName, access);
         if (value.isServer()) {
             return InventoryAccess.server();
         }
-        ExchangeAPI.PlayerIdentity identity = resolveRequiredPlayerIdentity(value.ownerName());
-        InventoryScope scope = InventoryScope.player(identity.getUuid());
-        var auth = playerInventoryAuthStore.verify(scope, identity.getName(), value.password());
-        if (!auth.success()) {
-            throw new IllegalArgumentException(auth.failReason());
+        var session = playerInventorySessionManager.validateAndRefresh(value.token(),
+                new PlayerInventorySessionManager.AccessPrincipal(
+                        runtimeConfig.getDisplayName(), value.requesterUuid()));
+        if (!session.success()) {
+            throw new IllegalArgumentException(session.failReason());
         }
-        return InventoryAccess.player(identity.getName(), value.password()).withResolvedScope(scope);
+        InventoryAccess refreshed = InventoryAccess.playerSession(session.ownerName(), value.token(),
+                value.requesterUuid(), value.requesterName(), session.scope(),
+                session.expiresAt(), value.sessionTtlMillis());
+        playerInventoryClientSessionStore.remember(serverName, refreshed);
+        return refreshed;
+    }
+
+    private InventoryAccess resolveClientAccess(String serverName, InventoryAccess access) {
+        InventoryAccess value = access != null ? access : InventoryAccess.server();
+        return value.isPlayer()
+                ? playerInventoryClientSessionStore.resolve(serverName, value)
+                : InventoryAccess.server();
+    }
+
+    private void recordAccessResult(String serverName, InventoryAccess access,
+                                    boolean success, String failReason) {
+        if (access == null || !access.isPlayer()) {
+            return;
+        }
+        if (success) {
+            playerInventoryClientSessionStore.touch(serverName, access);
+        } else {
+            invalidateRejectedAccess(serverName, access, failReason);
+        }
+    }
+
+    private void invalidateRejectedAccess(String serverName, InventoryAccess access, String message) {
+        if (access != null && access.isPlayer() && message != null
+                && (message.contains("访问令牌无效") || message.contains("访问令牌已过期"))) {
+            playerInventoryClientSessionStore.invalidate(serverName, access);
+        }
     }
 
     private InventoryScope scopeOrServer(InventoryAccess access) {
@@ -424,6 +522,8 @@ public class TheExchangeCore {
         remoteCacheStore = new RemoteCacheStore(databaseManager);
         operationLogger = new OperationLogger(Path.of(api.getConfigLoader().getConfigDir(), "logs"));
         playerInventoryAuthStore = new PlayerInventoryAuthStore(databaseManager);
+        playerInventorySessionManager = new PlayerInventorySessionManager(playerInventoryAuthStore);
+        playerInventoryClientSessionStore.clear();
 
         RuntimeBundle initialRuntime = buildRuntime(runtimeConfig, null);
         publishRuntime(initialRuntime);
@@ -463,6 +563,8 @@ public class TheExchangeCore {
             }
             publishRuntime(newRuntime);
             activateRuntime(newRuntime, reloaded);
+            playerInventorySessionManager.clear();
+            playerInventoryClientSessionStore.clear();
             if (!reuseNetwork) {
                 shutdownNetwork(oldRuntime.networkManager);
             }
@@ -527,7 +629,7 @@ public class TheExchangeCore {
                 ? new SyncEngine(nextNetworkManager, nextCacheManager, compatibilityChecker)
                 : null;
         ExchangeService nextExchangeService = new ExchangeService(nextNetworkManager, localItemStore,
-                operationLogger, playerInventoryAuthStore, nextCacheManager, compatibilityChecker, api.getItemSerializer(), nextSyncEngine,
+                operationLogger, playerInventorySessionManager, nextCacheManager, compatibilityChecker, api.getItemSerializer(), nextSyncEngine,
                 exchangeServiceHooks(), requestTimeoutMs(config));
         MenuInteractionService nextMenuInteractionService = new MenuInteractionService(nextExchangeService);
 
@@ -772,6 +874,8 @@ public class TheExchangeCore {
             try {
                 api.getLogger().info("Shutting down TheExchange core...");
                 stopRuntimeServices(true);
+                if (playerInventorySessionManager != null) playerInventorySessionManager.clear();
+                playerInventoryClientSessionStore.clear();
                 if (operationLogger != null) operationLogger.shutdown();
                 if (databaseManager != null) databaseManager.close();
                 instance = null;

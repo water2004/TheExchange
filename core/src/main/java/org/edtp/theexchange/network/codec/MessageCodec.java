@@ -32,6 +32,14 @@ public final class MessageCodec {
             if (msg instanceof AuthRequest m) encodeAuthRequest(out, m);
             else if (msg instanceof AuthResponse m) encodeAuthResponse(out, m, includeV2Fields);
             else if (msg instanceof Heartbeat m) encodeHeartbeat(out, m);
+            else if (msg instanceof PlayerInventoryAccessRequest m) {
+                requireProtocolV2(includeV2Fields, "player inventory access request");
+                encodePlayerInventoryAccessRequest(out, m);
+            }
+            else if (msg instanceof PlayerInventoryAccessResponse m) {
+                requireProtocolV2(includeV2Fields, "player inventory access response");
+                encodePlayerInventoryAccessResponse(out, m);
+            }
             else if (msg instanceof QueryTimestampRequest m) encodeQueryTimestampRequest(out, m);
             else if (msg instanceof QueryTimestampResponse m) encodeQueryTimestampResponse(out, m);
             else if (msg instanceof QueryItemsRequest m) encodeQueryItemsRequest(out, m);
@@ -67,6 +75,8 @@ public final class MessageCodec {
                 case AUTH_REQUEST -> decodeAuthRequest(in);
                 case AUTH_RESPONSE -> decodeAuthResponse(in);
                 case HEARTBEAT -> decodeHeartbeat(in);
+                case PLAYER_INVENTORY_ACCESS -> decodePlayerInventoryAccessRequest(in);
+                case PLAYER_INVENTORY_ACCESS_RESPONSE -> decodePlayerInventoryAccessResponse(in);
                 case QUERY_TIMESTAMP -> decodeQueryTimestampRequest(in);
                 case TIMESTAMP_RESPONSE -> decodeQueryTimestampResponse(in);
                 case QUERY_ITEMS -> decodeQueryItemsRequest(in);
@@ -114,6 +124,28 @@ public final class MessageCodec {
     private static void encodeHeartbeat(DataOutputStream out, Heartbeat m) throws IOException {
         out.writeBoolean(m.isReply());
         out.writeLong(m.getTimestamp());
+    }
+
+    private static void encodePlayerInventoryAccessRequest(DataOutputStream out,
+                                                           PlayerInventoryAccessRequest m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
+        BinaryIO.writeString(out, m.getOwnerName());
+        BinaryIO.writeString(out, m.getPassword());
+        BinaryIO.writeString(out, m.getRequesterUuid());
+        BinaryIO.writeString(out, m.getRequesterName());
+    }
+
+    private static void encodePlayerInventoryAccessResponse(DataOutputStream out,
+                                                            PlayerInventoryAccessResponse m) throws IOException {
+        BinaryIO.writeString(out, m.getRequestId());
+        out.writeBoolean(m.isSuccess());
+        BinaryIO.writeString(out, m.getFailReason());
+        BinaryIO.writeString(out, m.getOwnerName());
+        BinaryIO.writeString(out, m.getToken());
+        writeInventoryScope(out, m.getScope());
+        out.writeLong(m.getExpiresAt());
+        out.writeLong(m.getSessionTtlMillis());
+        out.writeLong(m.getLockedUntil());
     }
 
     private static void encodeQueryTimestampRequest(DataOutputStream out, QueryTimestampRequest m) throws IOException {
@@ -337,6 +369,27 @@ public final class MessageCodec {
         return new Heartbeat(in.readBoolean(), in.readLong());
     }
 
+    private static PlayerInventoryAccessRequest decodePlayerInventoryAccessRequest(DataInputStream in)
+            throws IOException {
+        return new PlayerInventoryAccessRequest(BinaryIO.readString(in), BinaryIO.readString(in),
+                BinaryIO.readString(in), BinaryIO.readString(in), BinaryIO.readString(in));
+    }
+
+    private static PlayerInventoryAccessResponse decodePlayerInventoryAccessResponse(DataInputStream in)
+            throws IOException {
+        PlayerInventoryAccessResponse response = new PlayerInventoryAccessResponse();
+        response.setRequestId(BinaryIO.readString(in));
+        response.setSuccess(in.readBoolean());
+        response.setFailReason(BinaryIO.readString(in));
+        response.setOwnerName(BinaryIO.readString(in));
+        response.setToken(BinaryIO.readString(in));
+        response.setScope(readInventoryScope(in));
+        response.setExpiresAt(in.readLong());
+        response.setSessionTtlMillis(in.readLong());
+        response.setLockedUntil(in.readLong());
+        return response;
+    }
+
     private static QueryTimestampRequest decodeQueryTimestampRequest(DataInputStream in) throws IOException {
         return new QueryTimestampRequest(in.readLong());
     }
@@ -544,7 +597,9 @@ public final class MessageCodec {
         InventoryAccess value = access != null ? access : InventoryAccess.server();
         BinaryIO.writeString(out, value.type().name());
         BinaryIO.writeString(out, value.ownerName());
-        BinaryIO.writeString(out, value.password());
+        BinaryIO.writeString(out, value.token());
+        BinaryIO.writeString(out, value.requesterUuid());
+        BinaryIO.writeString(out, value.requesterName());
     }
 
     private static void writeInventoryAccessIfSupported(DataOutputStream out, InventoryAccess access,
@@ -565,13 +620,16 @@ public final class MessageCodec {
         }
         String type = BinaryIO.readString(in);
         String ownerName = BinaryIO.readString(in);
-        String password = BinaryIO.readString(in);
+        String token = BinaryIO.readString(in);
+        String requesterUuid = BinaryIO.readString(in);
+        String requesterName = BinaryIO.readString(in);
         InventoryScope.ScopeType scopeType = InventoryScope.ScopeType.SERVER;
         if (type != null && !type.isBlank()) {
             scopeType = InventoryScope.ScopeType.valueOf(type.trim().toUpperCase(java.util.Locale.ROOT));
         }
         return scopeType == InventoryScope.ScopeType.PLAYER
-                ? InventoryAccess.player(ownerName, password)
+                ? InventoryAccess.playerSession(ownerName, token, requesterUuid, requesterName,
+                        null, 0)
                 : InventoryAccess.server();
     }
 
@@ -612,7 +670,17 @@ public final class MessageCodec {
         if (in.available() <= 0) {
             return InventoryScope.server();
         }
+        return readInventoryScope(in);
+    }
+
+    private static InventoryScope readInventoryScope(DataInputStream in) throws IOException {
         return InventoryScope.of(BinaryIO.readString(in), BinaryIO.readString(in));
+    }
+
+    private static void requireProtocolV2(boolean includeV2Fields, String label) throws IOException {
+        if (!includeV2Fields) {
+            throw new IOException("Protocol v1 cannot encode " + label);
+        }
     }
 
     private interface BooleanSetter {

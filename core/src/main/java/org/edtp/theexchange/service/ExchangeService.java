@@ -13,7 +13,6 @@ import org.edtp.theexchange.network.protocol.FrameType;
 import org.edtp.theexchange.network.protocol.messages.*;
 import org.edtp.theexchange.storage.LocalItemStore;
 import org.edtp.theexchange.storage.OperationLogger;
-import org.edtp.theexchange.storage.PlayerInventoryAuthStore;
 
 import java.util.UUID;
 import java.util.List;
@@ -34,7 +33,9 @@ public class ExchangeService {
     private final NetworkManager networkManager;
     private final LocalItemStore localItemStore;
     private final OperationLogger operationLogger;
-    private final PlayerInventoryAuthStore playerInventoryAuthStore;
+    public static final int INVENTORY_SLOT_COUNT = 54;
+
+    private final PlayerInventorySessionManager playerInventorySessionManager;
     private final CacheManager cacheManager;
     private final CompatibilityChecker compatibilityChecker;
     private final ItemSerializer itemSerializer;
@@ -46,14 +47,14 @@ public class ExchangeService {
     private volatile long lastRecentOpCleanup;
 
     public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
-                           OperationLogger operationLogger, PlayerInventoryAuthStore playerInventoryAuthStore,
+                           OperationLogger operationLogger, PlayerInventorySessionManager playerInventorySessionManager,
                            CacheManager cacheManager,
                            CompatibilityChecker compatibilityChecker, ItemSerializer itemSerializer,
                            SyncEngine syncEngine, RuntimeHooks runtimeHooks, long requestTimeoutMs) {
         this.networkManager = networkManager;
         this.localItemStore = localItemStore;
         this.operationLogger = operationLogger;
-        this.playerInventoryAuthStore = playerInventoryAuthStore;
+        this.playerInventorySessionManager = playerInventorySessionManager;
         this.cacheManager = cacheManager;
         this.compatibilityChecker = compatibilityChecker;
         this.itemSerializer = itemSerializer;
@@ -104,6 +105,38 @@ public class ExchangeService {
         return itemSerializer.getMaxStackSize(item);
     }
 
+    public CompletableFuture<InventoryAccess> authenticatePlayerInventoryAsync(
+            String serverName, String ownerName, String password,
+            String requesterUuid, String requesterName) {
+        if (ownerName == null || ownerName.isBlank()) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("玩家名称不能为空"));
+        }
+        if (requesterUuid == null || requesterUuid.isBlank()) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("访问者 UUID 不能为空"));
+        }
+        PlayerInventoryAccessRequest request = new PlayerInventoryAccessRequest(
+                UUID.randomUUID().toString(), ownerName, password, requesterUuid, requesterName);
+        if (isLocalTarget(serverName)) {
+            return CompletableFuture.completedFuture(accessFromResponse(
+                    handlePlayerInventoryAccess(request, runtimeHooks.localServerName()),
+                    requesterUuid, requesterName));
+        }
+        if (networkManager == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("网络功能未启用，请检查端口配置"));
+        }
+        Connection conn = networkManager.getConnection(serverName);
+        if (conn == null || !conn.isRunning()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("目标服务器离线"));
+        }
+        if (!conn.supportsInventoryAccess()) {
+            return CompletableFuture.failedFuture(new IllegalStateException(unsupportedPlayerInventoryMessage()));
+        }
+        return conn.<PlayerInventoryAccessResponse>sendAsync(
+                        FrameType.PLAYER_INVENTORY_ACCESS, request,
+                        FrameType.PLAYER_INVENTORY_ACCESS_RESPONSE, requestTimeoutMs)
+                .thenApply(response -> accessFromResponse(response, requesterUuid, requesterName));
+    }
+
     public CompletableFuture<PutResult> putNeutralItemAsync(String serverName, int slot,
                                                             String playerUuid, String playerName,
                                                             NeutralItem item) {
@@ -116,11 +149,14 @@ public class ExchangeService {
         if (item == null || item.isEmpty()) {
             return CompletableFuture.completedFuture(PutResult.fail("物品为空"));
         }
+        if (!isValidSlot(slot)) {
+            return CompletableFuture.completedFuture(PutResult.fail("INVALID_SLOT"));
+        }
         InventoryAccess access = normalizeAccess(requestedAccess);
         boolean localTarget = isLocalTarget(serverName);
         InventoryScope operationScope = access.effectiveScope();
         if (localTarget) {
-            AccessResolution resolution = resolveAccess(access);
+            AccessResolution resolution = resolveAccess(access, runtimeHooks.localServerName());
             if (!resolution.success()) {
                 return CompletableFuture.completedFuture(PutResult.fail(resolution.failReason()));
             }
@@ -178,10 +214,13 @@ public class ExchangeService {
                                                        String playerUuid, String playerName,
                                                        InventoryAccess requestedAccess) {
         InventoryAccess access = normalizeAccess(requestedAccess);
+        if (!isValidSlot(slot)) {
+            return CompletableFuture.completedFuture(TakeResult.fail("INVALID_SLOT"));
+        }
         boolean localTarget = isLocalTarget(serverName);
         InventoryScope operationScope = access.effectiveScope();
         if (localTarget) {
-            AccessResolution resolution = resolveAccess(access);
+            AccessResolution resolution = resolveAccess(access, runtimeHooks.localServerName());
             if (!resolution.success()) {
                 return CompletableFuture.completedFuture(TakeResult.fail(resolution.failReason()));
             }
@@ -223,9 +262,12 @@ public class ExchangeService {
                                                        String playerUuid, String playerName,
                                                        InventoryAccess requestedAccess) {
         InventoryAccess access = normalizeAccess(requestedAccess);
+        if (!isValidSlot(slot)) {
+            return CompletableFuture.completedFuture(TakeResult.fail("INVALID_SLOT"));
+        }
         boolean localTarget = isLocalTarget(serverName);
         if (localTarget) {
-            AccessResolution resolution = resolveAccess(access);
+            AccessResolution resolution = resolveAccess(access, runtimeHooks.localServerName());
             if (!resolution.success()) {
                 return CompletableFuture.completedFuture(TakeResult.fail(resolution.failReason()));
             }
@@ -286,6 +328,9 @@ public class ExchangeService {
         if (newItem == null || newItem.isEmpty()) {
             return CompletableFuture.completedFuture(SwapResult.fail("物品为空"));
         }
+        if (!isValidSlot(slot)) {
+            return CompletableFuture.completedFuture(SwapResult.fail("INVALID_SLOT"));
+        }
         if (newItem.isIncompatible()) {
             return CompletableFuture.completedFuture(SwapResult.fail("不兼容物品禁止操作"));
         }
@@ -293,7 +338,7 @@ public class ExchangeService {
         boolean localTarget = isLocalTarget(serverName);
         InventoryScope operationScope = access.effectiveScope();
         if (localTarget) {
-            AccessResolution resolution = resolveAccess(access);
+            AccessResolution resolution = resolveAccess(access, runtimeHooks.localServerName());
             if (!resolution.success()) {
                 return CompletableFuture.completedFuture(SwapResult.fail(resolution.failReason()));
             }
@@ -443,13 +488,21 @@ public class ExchangeService {
     }
 
     public PutItemResponse handleRemotePut(PutItemRequest request) {
-        AccessResolution resolution = resolveAccess(request.getAccess());
+        return handleRemotePut(request, runtimeHooks.localServerName());
+    }
+
+    public PutItemResponse handleRemotePut(PutItemRequest request, String peerId) {
+        AccessResolution resolution = resolveAccess(request.getAccess(), peerId);
         if (!resolution.success()) {
             return rememberPut(request, new PutItemResponse(false, request.getSlot(), null,
                     resolution.failReason(), 0, 0, request.getRequestId(), resolution.scope()));
         }
         InventoryScope scope = resolution.scope();
         request.setAccess(resolution.access());
+        if (!isValidSlot(request.getSlot())) {
+            return rememberPut(request, new PutItemResponse(false, request.getSlot(), null,
+                    "INVALID_SLOT", 0, 0, request.getRequestId(), scope));
+        }
         ReentrantLock slotLock = localSlotLock(scope, request.getSlot());
         slotLock.lock();
         try {
@@ -513,13 +566,21 @@ public class ExchangeService {
     }
 
     public TakeItemResponse handleRemoteTake(TakeItemRequest request) {
-        AccessResolution resolution = resolveAccess(request.getAccess());
+        return handleRemoteTake(request, runtimeHooks.localServerName());
+    }
+
+    public TakeItemResponse handleRemoteTake(TakeItemRequest request, String peerId) {
+        AccessResolution resolution = resolveAccess(request.getAccess(), peerId);
         if (!resolution.success()) {
             return rememberTake(request, new TakeItemResponse(false, request.getSlot(), null,
                     resolution.failReason(), 0, 0, null, request.getRequestId(), resolution.scope()));
         }
         InventoryScope scope = resolution.scope();
         request.setAccess(resolution.access());
+        if (!isValidSlot(request.getSlot())) {
+            return rememberTake(request, new TakeItemResponse(false, request.getSlot(), null,
+                    "INVALID_SLOT", 0, 0, null, request.getRequestId(), scope));
+        }
         ReentrantLock slotLock = localSlotLock(scope, request.getSlot());
         slotLock.lock();
         try {
@@ -605,13 +666,21 @@ public class ExchangeService {
     }
 
     public SwapItemResponse handleRemoteSwap(SwapItemRequest request) {
-        AccessResolution resolution = resolveAccess(request.getAccess());
+        return handleRemoteSwap(request, runtimeHooks.localServerName());
+    }
+
+    public SwapItemResponse handleRemoteSwap(SwapItemRequest request, String peerId) {
+        AccessResolution resolution = resolveAccess(request.getAccess(), peerId);
         if (!resolution.success()) {
             return rememberSwap(request, new SwapItemResponse(false, request.getSlot(), null, null, 0,
                     resolution.failReason(), request.getRequestId(), resolution.scope()));
         }
         InventoryScope scope = resolution.scope();
         request.setAccess(resolution.access());
+        if (!isValidSlot(request.getSlot())) {
+            return rememberSwap(request, new SwapItemResponse(false, request.getSlot(), null, null, 0,
+                    "INVALID_SLOT", request.getRequestId(), scope));
+        }
         ReentrantLock slotLock = localSlotLock(scope, request.getSlot());
         slotLock.lock();
         try {
@@ -768,33 +837,90 @@ public class ExchangeService {
         return "目标服务器版本不支持玩家仓库，请升级 TheExchange";
     }
 
-    private AccessResolution resolveAccess(InventoryAccess requestedAccess) {
+    public PlayerInventoryAccessResponse handlePlayerInventoryAccess(
+            PlayerInventoryAccessRequest request, String peerId) {
+        if (request == null) {
+            return PlayerInventoryAccessResponse.fail(null, "玩家仓库访问请求为空", 0);
+        }
+        if (playerInventorySessionManager == null) {
+            return PlayerInventoryAccessResponse.fail(request.getRequestId(), "玩家仓库认证未初始化", 0);
+        }
+        if (request.getOwnerName() == null || request.getOwnerName().isBlank()) {
+            return PlayerInventoryAccessResponse.fail(request.getRequestId(), "玩家名称不能为空", 0);
+        }
+        if (request.getOwnerName().length() > 64 || request.getRequesterUuid() == null
+                || request.getRequesterUuid().isBlank() || request.getRequesterUuid().length() > 128
+                || request.getPassword() == null || request.getPassword().length() > 256) {
+            return PlayerInventoryAccessResponse.fail(request.getRequestId(), "玩家仓库访问参数无效", 0);
+        }
+        Optional<ExchangeAPI.PlayerIdentity> identity;
+        try {
+            identity = runtimeHooks.resolvePlayerIdentity(request.getOwnerName());
+        } catch (Exception e) {
+            return PlayerInventoryAccessResponse.fail(request.getRequestId(),
+                    "玩家名称解析失败: " + e.getMessage(), 0);
+        }
+        if (identity == null || identity.isEmpty() || identity.get().getUuid() == null
+                || identity.get().getUuid().isBlank()) {
+            return PlayerInventoryAccessResponse.fail(request.getRequestId(), "玩家不存在或无法解析", 0);
+        }
+        ExchangeAPI.PlayerIdentity owner = identity.get();
+        InventoryScope scope = InventoryScope.player(owner.getUuid());
+        PlayerInventorySessionManager.SessionResult result = playerInventorySessionManager.authenticate(
+                scope, owner.getName(), request.getPassword(),
+                new PlayerInventorySessionManager.AccessPrincipal(peerId, request.getRequesterUuid()));
+        if (!result.success()) {
+            return PlayerInventoryAccessResponse.fail(request.getRequestId(),
+                    result.failReason(), result.lockedUntil());
+        }
+        return PlayerInventoryAccessResponse.success(request.getRequestId(), result.ownerName(),
+                result.token(), result.scope(), result.expiresAt(),
+                playerInventorySessionManager.sessionTtlMillis());
+    }
+
+    private AccessResolution resolveAccess(InventoryAccess requestedAccess, String peerId) {
         InventoryAccess access = normalizeAccess(requestedAccess);
         if (access.isServer()) {
             return AccessResolution.success(InventoryScope.server(), InventoryAccess.server());
         }
-        if (access.ownerName() == null || access.ownerName().isBlank()) {
-            return AccessResolution.fail(null, access, "玩家名称不能为空");
+        if (playerInventorySessionManager == null) {
+            return AccessResolution.fail(null, access, "玩家仓库认证未初始化");
         }
-        Optional<ExchangeAPI.PlayerIdentity> identity;
-        try {
-            identity = runtimeHooks.resolvePlayerIdentity(access.ownerName());
-        } catch (Exception e) {
-            return AccessResolution.fail(null, access, "玩家名称解析失败: " + e.getMessage());
+        if (!access.hasToken() || access.requesterUuid().isBlank()) {
+            return AccessResolution.fail(null, access, "需要玩家仓库密码");
         }
-        if (identity == null || identity.isEmpty() || identity.get().getUuid() == null || identity.get().getUuid().isBlank()) {
-            return AccessResolution.fail(null, access, "玩家不存在或无法解析");
+        PlayerInventorySessionManager.SessionResult session =
+                playerInventorySessionManager.validateAndRefresh(access.token(),
+                        new PlayerInventorySessionManager.AccessPrincipal(peerId, access.requesterUuid()));
+        if (!session.success()) {
+            return AccessResolution.fail(null, access, session.failReason());
         }
-        ExchangeAPI.PlayerIdentity player = identity.get();
-        InventoryScope scope = InventoryScope.player(player.getUuid());
-        InventoryAccess resolvedAccess = InventoryAccess.player(player.getName(), access.password()).withResolvedScope(scope);
-        if (playerInventoryAuthStore == null) {
-            return AccessResolution.fail(scope, resolvedAccess, "玩家仓库认证未初始化");
+        InventoryAccess resolvedAccess = InventoryAccess.playerSession(
+                session.ownerName(), access.token(), access.requesterUuid(), access.requesterName(),
+                session.scope(), session.expiresAt(), access.sessionTtlMillis());
+        return AccessResolution.success(session.scope(), resolvedAccess);
+    }
+
+    private InventoryAccess accessFromResponse(PlayerInventoryAccessResponse response,
+                                               String requesterUuid, String requesterName) {
+        if (response == null) {
+            throw new IllegalStateException("玩家仓库认证请求超时");
         }
-        PlayerInventoryAuthStore.AuthResult auth = playerInventoryAuthStore.verify(scope, player.getName(), access.password());
-        return auth.success()
-                ? AccessResolution.success(scope, resolvedAccess)
-                : AccessResolution.fail(scope, resolvedAccess, auth.failReason());
+        if (!response.isSuccess()) {
+            throw new IllegalArgumentException(response.getFailReason() != null
+                    ? response.getFailReason() : "玩家仓库认证失败");
+        }
+        if (response.getScope() == null || !response.getScope().isPlayer()
+                || response.getToken() == null || response.getToken().isBlank()) {
+            throw new IllegalStateException("玩家仓库认证响应无效");
+        }
+        return InventoryAccess.playerSession(response.getOwnerName(), response.getToken(),
+                requesterUuid, requesterName, response.getScope(), response.getExpiresAt(),
+                response.getSessionTtlMillis());
+    }
+
+    private boolean isValidSlot(int slot) {
+        return slot >= 0 && slot < INVENTORY_SLOT_COUNT;
     }
 
     private InventoryScope scopeFromAccess(InventoryAccess access) {
@@ -1000,11 +1126,23 @@ public class ExchangeService {
 
     public void routeMessage(org.edtp.theexchange.network.Connection conn,
                               FrameType type, Object message) {
+        String peerId = sourceServerName(conn);
         switch (type) {
             case QUERY_TIMESTAMP, QUERY_ITEMS -> {}
+            case PLAYER_INVENTORY_ACCESS -> conn.send(
+                    FrameType.PLAYER_INVENTORY_ACCESS_RESPONSE,
+                    handlePlayerInventoryAccess((PlayerInventoryAccessRequest) message, peerId));
             case QUERY_SLOT_VERSION -> {
                 QuerySlotVersionRequest req = (QuerySlotVersionRequest) message;
-                AccessResolution access = resolveAccess(req.getAccess());
+                if (!isValidSlot(req.getSlot())) {
+                    QuerySlotVersionResponse response = new QuerySlotVersionResponse(
+                            req.getRequestId(), req.getSlot(), 0, InventoryScope.server());
+                    response.setSuccess(false);
+                    response.setFailReason("INVALID_SLOT");
+                    conn.send(FrameType.SLOT_VERSION_RESPONSE, response);
+                    return;
+                }
+                AccessResolution access = resolveAccess(req.getAccess(), peerId);
                 if (!access.success()) {
                     QuerySlotVersionResponse response = new QuerySlotVersionResponse(
                             req.getRequestId(), req.getSlot(), 0, access.scope());
@@ -1020,7 +1158,15 @@ public class ExchangeService {
             }
             case QUERY_SLOT_STATE -> {
                 QuerySlotStateRequest req = (QuerySlotStateRequest) message;
-                AccessResolution access = resolveAccess(req.getAccess());
+                if (!isValidSlot(req.getSlot())) {
+                    SlotStateResponse response = new SlotStateResponse(
+                            req.getRequestId(), req.getSlot(), null, 0, InventoryScope.server());
+                    response.setSuccess(false);
+                    response.setFailReason("INVALID_SLOT");
+                    conn.send(FrameType.SLOT_STATE_RESPONSE, response);
+                    return;
+                }
+                AccessResolution access = resolveAccess(req.getAccess(), peerId);
                 if (!access.success()) {
                     SlotStateResponse response = new SlotStateResponse(
                             req.getRequestId(), req.getSlot(), null, 0, access.scope());
@@ -1038,7 +1184,7 @@ public class ExchangeService {
             }
             case QUERY_SLOT_VERSIONS -> {
                 QuerySlotVersionsRequest req = (QuerySlotVersionsRequest) message;
-                AccessResolution access = resolveAccess(req.getAccess());
+                AccessResolution access = resolveAccess(req.getAccess(), peerId);
                 if (!access.success()) {
                     SlotVersionsResponse response = new SlotVersionsResponse(req.getRequestId(), List.of(), access.scope());
                     response.setSuccess(false);
@@ -1051,7 +1197,16 @@ public class ExchangeService {
             }
             case QUERY_SLOTS -> {
                 QuerySlotsRequest req = (QuerySlotsRequest) message;
-                AccessResolution access = resolveAccess(req.getAccess());
+                if (req.getSlots() != null
+                        && req.getSlots().stream().anyMatch(slot -> slot == null || !isValidSlot(slot))) {
+                    SlotsStateResponse response = new SlotsStateResponse(
+                            req.getRequestId(), List.of(), InventoryScope.server());
+                    response.setSuccess(false);
+                    response.setFailReason("INVALID_SLOT");
+                    conn.send(FrameType.SLOTS_STATE_RESPONSE, response);
+                    return;
+                }
+                AccessResolution access = resolveAccess(req.getAccess(), peerId);
                 if (!access.success()) {
                     SlotsStateResponse response = new SlotsStateResponse(req.getRequestId(), List.of(), access.scope());
                     response.setSuccess(false);
@@ -1072,7 +1227,7 @@ public class ExchangeService {
                 conn.send(FrameType.SLOTS_STATE_RESPONSE, new SlotsStateResponse(req.getRequestId(), slots, access.scope()));
             }
             case PUT_ITEM -> {
-                PutItemResponse resp = handleRemotePut((PutItemRequest) message);
+                PutItemResponse resp = handleRemotePut((PutItemRequest) message, peerId);
                 conn.send(FrameType.PUT_ITEM_RESPONSE, resp);
                 if (resp.isSuccess()) {
                     broadcastInventoryUpdate(conn, resp.getScope(), List.of(((PutItemRequest) message).getSlot()),
@@ -1081,7 +1236,7 @@ public class ExchangeService {
                 }
             }
             case TAKE_ITEM -> {
-                TakeItemResponse resp = handleRemoteTake((TakeItemRequest) message);
+                TakeItemResponse resp = handleRemoteTake((TakeItemRequest) message, peerId);
                 conn.send(FrameType.TAKE_ITEM_RESPONSE, resp);
                 if (resp.isSuccess()) {
                     broadcastInventoryUpdate(conn, resp.getScope(), List.of(((TakeItemRequest) message).getSlot()),
@@ -1090,7 +1245,7 @@ public class ExchangeService {
                 }
             }
             case SWAP_ITEM -> {
-                SwapItemResponse resp = handleRemoteSwap((SwapItemRequest) message);
+                SwapItemResponse resp = handleRemoteSwap((SwapItemRequest) message, peerId);
                 conn.send(FrameType.SWAP_ITEM_RESPONSE, resp);
                 if (resp.isSuccess()) {
                     broadcastInventoryUpdate(conn, resp.getScope(), List.of(((SwapItemRequest) message).getSlot()),
@@ -1149,7 +1304,16 @@ public class ExchangeService {
     private void broadcastInventoryUpdate(Connection sourceConn, InventoryScope scope, List<Integer> changedSlots, long timestamp) {
         if (networkManager == null || changedSlots == null || changedSlots.isEmpty()) return;
         PushUpdate update = new PushUpdate(changedSlots, timestamp, scope);
-        networkManager.broadcast(FrameType.PUSH_UPDATE, update, sourceConn);
+        networkManager.broadcast(FrameType.PUSH_UPDATE, update, sourceConn,
+                connection -> canReceiveInventoryUpdate(sourceServerName(connection), scope));
+    }
+
+    boolean canReceiveInventoryUpdate(String peerId, InventoryScope scope) {
+        if (scope == null || scope.isServer()) {
+            return true;
+        }
+        return playerInventorySessionManager != null
+                && playerInventorySessionManager.hasActiveSession(peerId, scope);
     }
 
     public void publishLocalInventoryUpdate(List<Integer> changedSlots) {

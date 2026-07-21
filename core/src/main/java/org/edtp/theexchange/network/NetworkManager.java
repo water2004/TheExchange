@@ -15,6 +15,7 @@ import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 public class NetworkManager {
 
@@ -258,9 +259,15 @@ public class NetworkManager {
     }
 
     public void broadcast(FrameType type, Object message, Connection exclude) {
+        broadcast(type, message, exclude, ignored -> true);
+    }
+
+    public void broadcast(FrameType type, Object message, Connection exclude,
+                          Predicate<Connection> recipientFilter) {
         for (Connection conn : connections.values()) {
             if (conn == null || conn == exclude || !conn.isRunning()) continue;
             if (requiresInventoryAccessSupport(message) && !conn.supportsInventoryAccess()) continue;
+            if (recipientFilter != null && !recipientFilter.test(conn)) continue;
             conn.send(type, message);
         }
     }

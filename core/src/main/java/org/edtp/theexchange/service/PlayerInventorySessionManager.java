@@ -192,6 +192,17 @@ public final class PlayerInventorySessionManager {
         }
     }
 
+    /** Clears all process-local tokens, subscriptions, and password-failure state. */
+    public void clear() {
+        sessions.clear();
+        subscriptions.clear();
+        failures.clear();
+    }
+
+    public long sessionTtlMillis() {
+        return sessionTtlMillis;
+    }
+
     private FailureState recordFailure(FailureKey key, long now) {
         return failures.compute(key, (ignored, previous) -> {
             if (previous == null || (previous.lockedUntil() > 0 && previous.lockedUntil() <= now)) {
