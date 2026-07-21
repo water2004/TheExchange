@@ -377,10 +377,11 @@ public class TheExchangeCore {
 
     public CompletableFuture<InventoryAccess> authenticatePlayerInventoryAsync(
             String serverName, String ownerName, String password, PlayerExchangeContext requester) {
+        String targetServer = canonicalTargetServerName(serverName);
         return submit(() -> exchangeService.authenticatePlayerInventoryAsync(
-                        serverName, ownerName, password, requester.uuid(), requester.name()))
+                        targetServer, ownerName, password, requester.uuid(), requester.name()))
                 .thenCompose(future -> future)
-                .thenApply(access -> playerInventoryClientSessionStore.remember(serverName, access));
+                .thenApply(access -> playerInventoryClientSessionStore.remember(targetServer, access));
     }
 
     public Optional<InventoryAccess> findPlayerInventorySession(
@@ -389,7 +390,7 @@ public class TheExchangeCore {
             return Optional.empty();
         }
         return playerInventoryClientSessionStore.findValid(
-                serverName, ownerName, requester.uuid());
+                canonicalTargetServerName(serverName), ownerName, requester.uuid());
     }
 
     public CompletableFuture<ExchangeAPI.RuntimeConfig> reloadConfigAsync() {
@@ -494,6 +495,12 @@ public class TheExchangeCore {
     private InventoryScope scopeOrServer(InventoryAccess access) {
         InventoryScope scope = access != null ? access.effectiveScope() : null;
         return scope != null ? scope : InventoryScope.server();
+    }
+
+    private String canonicalTargetServerName(String serverName) {
+        String localName = runtimeConfig != null ? runtimeConfig.getDisplayName() : "local";
+        return serverName == null || serverName.isBlank() || "local".equalsIgnoreCase(serverName)
+                || serverName.equalsIgnoreCase(localName) ? localName : serverName;
     }
 
     private ExchangeAPI.PlayerIdentity resolveRequiredPlayerIdentity(String playerName) {
