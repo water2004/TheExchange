@@ -472,7 +472,7 @@ public class TheExchangeCore {
     private InventoryAccess resolveClientAccess(String serverName, InventoryAccess access) {
         InventoryAccess value = access != null ? access : InventoryAccess.server();
         return value.isPlayer()
-                ? playerInventoryClientSessionStore.resolve(serverName, value)
+                ? playerInventoryClientSessionStore.resolve(canonicalTargetServerName(serverName), value)
                 : InventoryAccess.server();
     }
 
@@ -481,10 +481,11 @@ public class TheExchangeCore {
         if (access == null || !access.isPlayer()) {
             return;
         }
+        String targetServer = canonicalTargetServerName(serverName);
         if (success) {
-            playerInventoryClientSessionStore.touch(serverName, access);
+            playerInventoryClientSessionStore.touch(targetServer, access);
         } else {
-            invalidateRejectedAccess(serverName, access, failReason);
+            invalidateRejectedAccess(targetServer, access, failReason);
         }
     }
 

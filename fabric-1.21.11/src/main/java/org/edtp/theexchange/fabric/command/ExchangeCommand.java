@@ -16,9 +16,8 @@ import net.minecraft.server.permissions.Permissions;
 import org.edtp.theexchange.TheExchangeCore;
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.fabric.container.ExchangeMenu;
+import org.edtp.theexchange.fabric.player.PlayerWarehouseAccessCoordinator;
 import org.edtp.theexchange.model.ExchangeViewState;
-import org.edtp.theexchange.model.InventoryAccess;
-import org.edtp.theexchange.model.PlayerExchangeContext;
 import org.edtp.theexchange.model.PlayerInventoryConnectionSpec;
 import org.edtp.theexchange.model.RemoteServer;
 import org.slf4j.Logger;
@@ -28,14 +27,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class ExchangeCommand {
 
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static final long PENDING_PASSWORD_TTL_MS = 120_000L;
-    private static final ConcurrentHashMap<String, PendingPlayerConnection> PENDING_PLAYER_CONNECTIONS =
-            new ConcurrentHashMap<>();
 
     private static TheExchangeCore getCore(CommandContext<CommandSourceStack> ctx) {
         TheExchangeCore core = TheExchangeCore.getInstance();
@@ -392,7 +387,7 @@ public class ExchangeCommand {
             String password = StringArgumentType.getString(ctx, "password");
             String playerName = player.getName().getString();
             ctx.getSource().sendSuccess(() -> Component.literal("正在设置玩家仓库密码: " + playerName), false);
-            core.setPlayerInventoryPasswordAsync(playerContext(player), password)
+            core.setPlayerInventoryPasswordAsync(PlayerWarehouseAccessCoordinator.context(player), password)
                     .whenComplete((scope, error) -> core.getApi().runOnMainThread(() -> {
                         if (error != null) {
                             LOGGER.error("[Exchange] Error in setPlayerPassword", error);
@@ -419,24 +414,8 @@ public class ExchangeCommand {
 
             TheExchangeCore core = getCore(ctx);
             if (core == null) return 0;
-            PlayerInventoryConnectionSpec connection = PlayerInventoryConnectionSpec.parse(
-                    StringArgumentType.getString(ctx, "connection"));
-            PlayerExchangeContext requester = playerContext(player);
-            InventoryAccess cached = core.findPlayerInventorySession(
-                    connection.serverName(), connection.playerName(), requester).orElse(null);
-            if (connection.password().isEmpty() && cached == null) {
-                rememberPending(player, connection);
-                player.sendSystemMessage(Component.literal(
-                        "玩家仓库需要密码，请输入 /exchange player login <password>"));
-                return 1;
-            }
-            if (cached != null && connection.password().isEmpty()) {
-                openPlayerInventory(player, core, connection, cached);
-            } else {
-                rememberPending(player, connection);
-                authenticateAndOpenPlayerInventory(player, core, connection,
-                        connection.password().orElseThrow());
-            }
+            PlayerWarehouseAccessCoordinator.requestOpen(player, PlayerInventoryConnectionSpec.parse(
+                    StringArgumentType.getString(ctx, "connection")));
             return 1;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in viewPlayerInventory", e);
@@ -452,92 +431,14 @@ public class ExchangeCommand {
                 ctx.getSource().sendFailure(Component.literal("只有玩家可以验证玩家仓库"));
                 return 0;
             }
-            TheExchangeCore core = getCore(ctx);
-            if (core == null) return 0;
-            PendingPlayerConnection pending = pendingConnection(player);
-            if (pending == null) {
-                player.sendSystemMessage(Component.literal(
-                        "没有待验证的玩家仓库，请先使用 /exchange player view <player>@<server>"));
-                return 0;
-            }
-            authenticateAndOpenPlayerInventory(player, core, pending.connection(),
-                    StringArgumentType.getString(ctx, "password"));
-            return 1;
+            if (getCore(ctx) == null) return 0;
+            return PlayerWarehouseAccessCoordinator.completeLogin(
+                    player, StringArgumentType.getString(ctx, "password")) ? 1 : 0;
         } catch (Exception e) {
             LOGGER.error("[Exchange] Error in completePlayerInventoryLogin", e);
             ctx.getSource().sendFailure(Component.literal("内部错误: " + e.getMessage()));
             return 0;
         }
-    }
-
-    private static void authenticateAndOpenPlayerInventory(
-            ServerPlayer player, TheExchangeCore core,
-            PlayerInventoryConnectionSpec connection, String password) {
-        player.sendSystemMessage(Component.literal("正在验证玩家仓库: " + connection.redacted()));
-        core.authenticatePlayerInventoryAsync(connection.serverName(), connection.playerName(),
-                        password, playerContext(player))
-                .thenCompose(access -> {
-                    PENDING_PLAYER_CONNECTIONS.remove(player.getUUID().toString());
-                    return openPlayerInventoryFuture(core, connection, access);
-                })
-                .whenComplete((state, error) -> finishOpenPlayerInventory(player, core, state, error));
-    }
-
-    private static void openPlayerInventory(ServerPlayer player, TheExchangeCore core,
-                                            PlayerInventoryConnectionSpec connection,
-                                            InventoryAccess access) {
-        player.sendSystemMessage(Component.literal("正在加载玩家仓库: " + connection.redacted()));
-        openPlayerInventoryFuture(core, connection, access)
-                .whenComplete((state, error) -> finishOpenPlayerInventory(player, core, state, error));
-    }
-
-    private static CompletableFuture<ExchangeViewState> openPlayerInventoryFuture(
-            TheExchangeCore core, PlayerInventoryConnectionSpec connection, InventoryAccess access) {
-        String localName = core.getRuntimeConfig().getDisplayName();
-        return isLocalServer(connection.serverName(), localName)
-                ? core.openLocalViewAsync(localName, access)
-                : core.openRemoteViewAsync(connection.serverName(), access);
-    }
-
-    private static void finishOpenPlayerInventory(ServerPlayer player, TheExchangeCore core,
-                                                  ExchangeViewState state, Throwable error) {
-        core.getApi().runOnMainThread(() -> {
-            if (error != null) {
-                String message = rootMessage(error);
-                LOGGER.error("[Exchange] Error opening player inventory", error);
-                player.sendSystemMessage(Component.literal("打开失败: " + message));
-                if (message.contains("玩家不存在") || message.contains("无法解析")) {
-                    PENDING_PLAYER_CONNECTIONS.remove(player.getUUID().toString());
-                }
-                return;
-            }
-            if (player.isRemoved()) return;
-            openExchangeMenu(player, core, state);
-        });
-    }
-
-    private static PlayerExchangeContext playerContext(ServerPlayer player) {
-        return new PlayerExchangeContext(player.getUUID().toString(), player.getName().getString());
-    }
-
-    private static void rememberPending(ServerPlayer player, PlayerInventoryConnectionSpec connection) {
-        PlayerInventoryConnectionSpec redacted = new PlayerInventoryConnectionSpec(
-                connection.playerName(), connection.serverName(), java.util.Optional.empty());
-        PENDING_PLAYER_CONNECTIONS.put(player.getUUID().toString(),
-                new PendingPlayerConnection(redacted, System.currentTimeMillis() + PENDING_PASSWORD_TTL_MS));
-    }
-
-    private static PendingPlayerConnection pendingConnection(ServerPlayer player) {
-        String key = player.getUUID().toString();
-        PendingPlayerConnection pending = PENDING_PLAYER_CONNECTIONS.get(key);
-        if (pending != null && pending.expiresAt() <= System.currentTimeMillis()) {
-            PENDING_PLAYER_CONNECTIONS.remove(key, pending);
-            return null;
-        }
-        return pending;
-    }
-
-    private record PendingPlayerConnection(PlayerInventoryConnectionSpec connection, long expiresAt) {
     }
 
     private static int refreshServer(CommandContext<CommandSourceStack> ctx) {

@@ -20,6 +20,9 @@
       "org.edtp.theexchange.Theexchange"
     ]
   },
+  "mixins": [
+    "theexchange.mixins.json"
+  ],
   "depends": {
     "fabricloader": ">=${loader_version}",
     "fabric-api": "*",
