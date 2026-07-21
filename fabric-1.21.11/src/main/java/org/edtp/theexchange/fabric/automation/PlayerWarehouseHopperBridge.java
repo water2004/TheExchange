@@ -19,6 +19,7 @@ import org.edtp.theexchange.model.InventoryAccess;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.PlayerExchangeContext;
 import org.edtp.theexchange.model.PlayerInventoryConnectionSpec;
+import org.edtp.theexchange.service.WarehouseAutomationGate;
 import org.edtp.theexchange.service.WarehouseAutomationPlanner;
 
 import java.nio.charset.StandardCharsets;
@@ -31,7 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Async, non-blocking bridge between vanilla hopper ticks and a signed player warehouse. */
 public final class PlayerWarehouseHopperBridge {
     private static final long AUTH_FAILURE_BACKOFF_MS = 30_000L;
-    private static final java.util.Set<TransferKey> IN_FLIGHT = ConcurrentHashMap.newKeySet();
+    private static final WarehouseAutomationGate<String> OPERATIONS = new WarehouseAutomationGate<>();
     private static final ConcurrentHashMap<EndpointKey, Long> AUTH_RETRY_AFTER = new ConcurrentHashMap<>();
 
     private PlayerWarehouseHopperBridge() {
@@ -59,44 +60,58 @@ public final class PlayerWarehouseHopperBridge {
             return Optional.of(false);
         }
 
-        TransferKey transferKey = new TransferKey(actor.uuid(), TransferDirection.PUSH);
-        if (!IN_FLIGHT.add(transferKey)) return Optional.of(true);
+        Optional<WarehouseAutomationGate.Lease<String>> acquired = OPERATIONS.tryAcquire(actor.uuid());
+        if (acquired.isEmpty()) return Optional.of(false);
+        WarehouseAutomationGate.Lease<String> lease = acquired.orElseThrow();
         int sourceSlot = firstNonEmptySlot(hopper);
         if (sourceSlot < 0) {
-            IN_FLIGHT.remove(transferKey);
+            lease.close();
             return Optional.of(false);
         }
         ItemStack reserved = hopper.removeItem(sourceSlot, 1);
         hopper.setChanged();
-        NeutralItem item = core.getApi().getItemSerializer().serialize(reserved.copy());
+        NeutralItem item;
+        try {
+            item = core.getApi().getItemSerializer().serialize(reserved.copy());
+        } catch (RuntimeException error) {
+            restore(level, hopperPos, reserved);
+            lease.close();
+            return Optional.of(false);
+        }
         if (item == null || item.isEmpty() || item.isIncompatible()) {
             restore(level, hopperPos, reserved);
-            IN_FLIGHT.remove(transferKey);
+            lease.close();
             return Optional.of(false);
         }
 
-        access(core, connection, actor, endpointKey, session)
-                .thenCompose(access -> open(core, connection, access)
-                        .thenCompose(state -> {
-                            var target = WarehouseAutomationPlanner.findPutSlot(
-                                    state.getItems(), item,
-                                    core.getApi().getItemSerializer()::getMaxStackSize);
-                            if (target.isEmpty()) {
-                                return CompletableFuture.failedFuture(
-                                        new IllegalStateException("玩家仓库没有可放入的槽位"));
+        try {
+            access(core, connection, actor, endpointKey, session)
+                    .thenCompose(access -> open(core, connection, access)
+                            .thenCompose(state -> {
+                                var target = WarehouseAutomationPlanner.findPutSlot(
+                                        state.getItems(), item,
+                                        core.getApi().getItemSerializer()::getMaxStackSize);
+                                if (target.isEmpty()) {
+                                    return CompletableFuture.failedFuture(
+                                            new IllegalStateException("玩家仓库没有可放入的槽位"));
+                                }
+                                return core.putRemoteAsync(connection.serverName(), target.getAsInt(),
+                                        item, actor, access);
+                            }))
+                    .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
+                        try {
+                            if (error != null || result == null || !result.isSuccess()) {
+                                restore(level, hopperPos, reserved);
                             }
-                            return core.putRemoteAsync(connection.serverName(), target.getAsInt(),
-                                    item, actor, access);
-                        }))
-                .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
-                    try {
-                        if (error != null || result == null || !result.isSuccess()) {
-                            restore(level, hopperPos, reserved);
+                        } finally {
+                            lease.close();
                         }
-                    } finally {
-                        IN_FLIGHT.remove(transferKey);
-                    }
-                }));
+                    }));
+        } catch (RuntimeException error) {
+            restore(level, hopperPos, reserved);
+            lease.close();
+            return Optional.of(false);
+        }
         return Optional.of(true);
     }
 
@@ -123,26 +138,32 @@ public final class PlayerWarehouseHopperBridge {
             return Optional.of(false);
         }
 
-        TransferKey transferKey = new TransferKey(actor.uuid(), TransferDirection.PULL);
-        if (!IN_FLIGHT.add(transferKey)) return Optional.of(true);
-        List<ItemStack> destinationSnapshot = snapshot(hopper);
-        access(core, connection, actor, endpointKey, session)
-                .thenCompose(access -> open(core, connection, access)
-                        .thenCompose(state -> takeFirstAcceptable(
-                                core, connection, actor, access, destinationSnapshot, state)))
-                .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
-                    try {
-                        if (error == null && result != null && result.isSuccess()
-                                && result.getItem() != null && !result.getItem().isIncompatible()) {
-                            Object decoded = core.getApi().getItemSerializer().deserialize(result.getItem());
-                            if (decoded instanceof ItemStack stack && !stack.isEmpty()) {
-                                insertPulled(level, hopper, stack);
+        Optional<WarehouseAutomationGate.Lease<String>> acquired = OPERATIONS.tryAcquire(actor.uuid());
+        if (acquired.isEmpty()) return Optional.of(false);
+        WarehouseAutomationGate.Lease<String> lease = acquired.orElseThrow();
+        try {
+            List<ItemStack> destinationSnapshot = snapshot(hopper);
+            access(core, connection, actor, endpointKey, session)
+                    .thenCompose(access -> open(core, connection, access)
+                            .thenCompose(state -> takeFirstAcceptable(
+                                    core, connection, actor, access, destinationSnapshot, state)))
+                    .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
+                        try {
+                            if (error == null && result != null && result.isSuccess()
+                                    && result.getItem() != null && !result.getItem().isIncompatible()) {
+                                Object decoded = core.getApi().getItemSerializer().deserialize(result.getItem());
+                                if (decoded instanceof ItemStack stack && !stack.isEmpty()) {
+                                    insertPulled(level, hopper, stack);
+                                }
                             }
+                        } finally {
+                            lease.close();
                         }
-                    } finally {
-                        IN_FLIGHT.remove(transferKey);
-                    }
-                }));
+                    }));
+        } catch (RuntimeException error) {
+            lease.close();
+            return Optional.of(false);
+        }
         return Optional.of(true);
     }
 
@@ -280,11 +301,6 @@ public final class PlayerWarehouseHopperBridge {
     private static TheExchangeCore readyCore() {
         TheExchangeCore core = TheExchangeCore.getInstance();
         return core != null && core.isInitialized() ? core : null;
-    }
-
-    private enum TransferDirection { PUSH, PULL }
-
-    private record TransferKey(String actorUuid, TransferDirection direction) {
     }
 
     private record EndpointKey(String actorUuid, String target) {
