@@ -22,6 +22,8 @@ public class Theexchange {
     // Directly reference a slf4j logger
     private static final Logger LOGGER = LogUtils.getLogger();
 
+    private TheExchangeCore core;
+
     // The constructor for the mod class is the first code that is run when your mod is loaded.
     // FML will recognize some parameter types like IEventBus or ModContainer and pass them in automatically.
     public Theexchange(IEventBus modEventBus, ModContainer modContainer) {
@@ -39,7 +41,7 @@ public class Theexchange {
             LOGGER.info("[Exchange] Initializing...");
             NeoForgeExchangeAPI api = new NeoForgeExchangeAPI(server);
 
-            TheExchangeCore core = new TheExchangeCore(api);
+            core = new TheExchangeCore(api);
             core.startAsync().whenComplete((ignored, error) -> {
                 if (error != null) {
                     LOGGER.error("[Exchange] Initialization failed!", error);
@@ -56,10 +58,7 @@ public class Theexchange {
 
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
-        MinecraftServer server = event.getServer();
         LOGGER.info("[Exchange] Shutting down...");
-        NeoForgeExchangeAPI api = new NeoForgeExchangeAPI(server);
-        TheExchangeCore core = new TheExchangeCore(api);
         if (core != null) {
             try {
                 core.shutdown();
