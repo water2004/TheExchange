@@ -1,5 +1,8 @@
 package org.edtp.theexchange.network.tls;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocket;
@@ -22,6 +25,7 @@ import java.util.Properties;
  */
 public final class PinnedPeerKeyStore {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(PinnedPeerKeyStore.class);
     private final Path pinFile;
     private final Properties pins = new Properties();
 
@@ -52,7 +56,7 @@ public final class PinnedPeerKeyStore {
         if (storedKey == null) {
             pins.setProperty(serverName, encodedKey);
             store();
-            System.out.println("[Exchange|TLS] Pinned public key for " + serverName);
+            LOGGER.info("Pinned TLS public key for {}", serverName);
             return;
         }
 

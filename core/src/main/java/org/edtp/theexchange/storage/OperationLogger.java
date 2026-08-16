@@ -4,6 +4,7 @@ import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.OperationType;
 
 import java.io.BufferedWriter;
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
@@ -23,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Lock-free operation audit buffer.
@@ -45,6 +47,7 @@ public class OperationLogger {
     private final AtomicInteger queuedCount = new AtomicInteger();
     private final AtomicLong sequence = new AtomicLong();
     private final AtomicBoolean flushQueued = new AtomicBoolean();
+    private final ReentrantLock ioLock = new ReentrantLock();
     private final ScheduledExecutorService flusher = Executors.newSingleThreadScheduledExecutor(task -> {
         Thread thread = new Thread(task, "exchange-operation-log-flusher");
         thread.setDaemon(true);
@@ -89,10 +92,16 @@ public class OperationLogger {
 
     public List<LogEntry> queryLogs(long sinceTimestamp) {
         List<LogEntry> results = new ArrayList<>();
-        for (LogEntry entry : entries) {
-            if (entry.timestamp() >= sinceTimestamp) {
-                results.add(entry);
+        ioLock.lock();
+        try {
+            readPersistedEntries(sinceTimestamp, results);
+            for (LogEntry entry : entries) {
+                if (entry.timestamp() >= sinceTimestamp) {
+                    results.add(entry);
+                }
             }
+        } finally {
+            ioLock.unlock();
         }
         results.sort(Comparator.comparingLong(LogEntry::timestamp).reversed());
         return results;
@@ -100,16 +109,21 @@ public class OperationLogger {
 
     public int cleanupOldLogs(int retentionDays) {
         long cutoff = System.currentTimeMillis() - (long) retentionDays * 24 * 3600 * 1000;
-        int removed = 0;
-        for (LogEntry entry : entries) {
-            if (entry.timestamp() < cutoff && entries.remove(entry)) {
-                removed++;
+        ioLock.lock();
+        try {
+            int removed = 0;
+            for (LogEntry entry : entries) {
+                if (entry.timestamp() < cutoff && entries.remove(entry)) {
+                    removed++;
+                }
             }
+            if (removed > 0) {
+                queuedCount.addAndGet(-removed);
+            }
+            return removed + deleteOldLogFiles(cutoff);
+        } finally {
+            ioLock.unlock();
         }
-        if (removed > 0) {
-            queuedCount.addAndGet(-removed);
-        }
-        return removed + deleteOldLogFiles(cutoff);
     }
 
     public void shutdown() {
@@ -134,18 +148,27 @@ public class OperationLogger {
     }
 
     private void flush() throws IOException {
-        List<LogEntry> batch = drainEntries();
-        if (batch.isEmpty()) {
-            return;
-        }
-        Files.createDirectories(logDir);
-        rotateIfNeeded();
-        try (BufferedWriter writer = Files.newBufferedWriter(activeLog, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
-            for (LogEntry entry : batch) {
-                writer.write(encode(entry));
-                writer.newLine();
+        ioLock.lock();
+        List<LogEntry> batch = List.of();
+        try {
+            batch = drainEntries();
+            if (batch.isEmpty()) {
+                return;
             }
+            Files.createDirectories(logDir);
+            rotateIfNeeded();
+            try (BufferedWriter writer = Files.newBufferedWriter(activeLog, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+                for (LogEntry entry : batch) {
+                    writer.write(encode(entry));
+                    writer.newLine();
+                }
+            }
+        } catch (IOException | RuntimeException error) {
+            restoreEntries(batch);
+            throw error;
+        } finally {
+            ioLock.unlock();
         }
     }
 
@@ -157,6 +180,41 @@ public class OperationLogger {
             batch.add(entry);
         }
         return batch;
+    }
+
+    private void restoreEntries(List<LogEntry> batch) {
+        if (batch == null || batch.isEmpty()) {
+            return;
+        }
+        for (LogEntry entry : batch) {
+            entries.offer(entry);
+        }
+        queuedCount.addAndGet(batch.size());
+    }
+
+    private void readPersistedEntries(long sinceTimestamp, List<LogEntry> results) {
+        if (!Files.isDirectory(logDir)) {
+            return;
+        }
+        try {
+            List<Path> files = archiveFiles();
+            if (Files.isRegularFile(activeLog)) {
+                files.add(activeLog);
+            }
+            for (Path file : files) {
+                try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        LogEntry entry = decode(line);
+                        if (entry != null && entry.timestamp() >= sinceTimestamp) {
+                            results.add(entry);
+                        }
+                    }
+                }
+            }
+        } catch (IOException error) {
+            throw new RuntimeException("Failed to query operation logs", error);
+        }
     }
 
     private void rotateIfNeeded() throws IOException {
@@ -229,11 +287,54 @@ public class OperationLogger {
                 + "\t" + safe(entry.requestId());
     }
 
+    private LogEntry decode(String line) {
+        if (line == null || line.isEmpty()) {
+            return null;
+        }
+        String[] fields = line.split("\t", -1);
+        if (fields.length != 12) {
+            return null;
+        }
+        try {
+            long timestamp = Long.parseLong(fields[0]);
+            OperationType operationType = OperationType.valueOf(fields[1]);
+            InventoryScope scope = InventoryScope.of(unescape(fields[2]), unescape(fields[3]));
+            int quantity = Integer.parseInt(fields[8]);
+            boolean success = "SUCCESS".equals(fields[9]);
+            return new LogEntry(0L, timestamp, operationType, scope,
+                    unescape(fields[4]), unescape(fields[5]), unescape(fields[6]),
+                    unescape(fields[7]), quantity, success, unescape(fields[10]),
+                    unescape(fields[11]));
+        } catch (IllegalArgumentException error) {
+            return null;
+        }
+    }
+
     private String safe(String value) {
         return value == null ? "" : value.replace("\\", "\\\\")
                 .replace("\t", "\\t")
                 .replace("\r", "\\r")
                 .replace("\n", "\\n");
+    }
+
+    private String unescape(String value) {
+        StringBuilder result = new StringBuilder(value.length());
+        for (int index = 0; index < value.length(); index++) {
+            char current = value.charAt(index);
+            if (current != '\\' || index + 1 >= value.length()) {
+                result.append(current);
+                continue;
+            }
+            char escaped = value.charAt(++index);
+            result.append(switch (escaped) {
+                case 't' -> '\t';
+                case 'r' -> '\r';
+                case 'n' -> '\n';
+                case '\\' -> '\\';
+                default -> escaped;
+            });
+        }
+        return result.toString();
     }
 
     public record LogEntry(long id, long timestamp, OperationType opType,

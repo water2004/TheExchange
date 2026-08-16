@@ -11,4 +11,5 @@ pluginManagement {
 rootProject.name = 'TheExchange'
 include 'core'
 include 'fabric-26.1'
+include 'fabric-26.2'
 include 'fabric-1.21.11'

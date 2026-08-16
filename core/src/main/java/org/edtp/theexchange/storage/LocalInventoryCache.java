@@ -38,9 +38,8 @@ public final class LocalInventoryCache extends AbstractSlotInventoryCache {
         return getItem(slot);
     }
 
-    public Result put(int slot, NeutralItem item, int expectedVersion, String addedBy,
-                      java.util.function.ToIntFunction<NeutralItem> maxStackSizeProvider) {
-        return putIntoSlot(slot, item, expectedVersion, maxStackSizeProvider);
+    public Result put(int slot, NeutralItem item, int expectedVersion, String addedBy) {
+        return putIntoSlot(slot, item, expectedVersion);
     }
 
     public Result take(int slot, String expectedItemId, int expectedVersion, int requestCount) {
@@ -49,9 +48,9 @@ public final class LocalInventoryCache extends AbstractSlotInventoryCache {
 
     public Result swap(int slot, NeutralItem newItem, String expectedItemId,
                        int expectedVersion, int takeCount, boolean boundedMerge,
-                       java.util.function.ToIntFunction<NeutralItem> maxStackSizeProvider) {
+                       String addedBy) {
         return swapSlot(slot, newItem, expectedItemId, expectedVersion, takeCount,
-                boundedMerge, maxStackSizeProvider);
+                boundedMerge);
     }
 
     @Override

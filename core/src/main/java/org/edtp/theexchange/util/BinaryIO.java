@@ -59,11 +59,17 @@ public final class BinaryIO {
         out.writeBoolean(item != null);
         if (item != null) {
             item.writeTo(out);
+            out.writeInt(item.getMaxStackSize());
         }
     }
 
     public static NeutralItem readNullableNeutralItem(DataInput in) throws IOException {
-        return in.readBoolean() ? NeutralItem.readFrom(in) : null;
+        if (!in.readBoolean()) {
+            return null;
+        }
+        NeutralItem item = NeutralItem.readFrom(in);
+        item.setMaxStackSize(in.readInt());
+        return item;
     }
 
     private static void writeLength(DataOutput out, int length, int max) throws IOException {

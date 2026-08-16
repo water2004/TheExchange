@@ -18,7 +18,7 @@
     "heartbeat_timeout_seconds": 30,      // 超时判定离线
     "reconnect_initial_delay_seconds": 5, // 重连初始延迟
     "reconnect_max_delay_seconds": 30,    // 重连最大延迟（指数退避上限）
-    "request_timeout_seconds": 5,         // PUT/TAKE 请求超时
+    "request_timeout_seconds": 5,         // 变更事务超时探测间隔
     "inbound_enabled": false              // 是否接受入站连接
   },
   "cache": {
@@ -36,6 +36,9 @@
   "container": {
     "rows": 6,                            // 容器行数（固定 6，即 9×6=54 槽）
     "title_template": "{server_name} 的共享空间"
+  },
+  "player_inventory": {
+    "enabled": true                       // 是否允许访问玩家私有仓库
   },
   "remoteServers": [
     {
@@ -61,14 +64,26 @@
 | `network.heartbeat_timeout_seconds` | int (>0) | 心跳超时 |
 | `network.reconnect_initial_delay_seconds` | int (>0) | 重连初始延迟 |
 | `network.reconnect_max_delay_seconds` | int (>0) | 重连最大延迟 |
-| `network.request_timeout_seconds` | int (>0) | 请求超时 |
+| `network.request_timeout_seconds` | int (>0) | 变更事务超时探测间隔（超时进入恢复，不判定失败） |
 | `network.inbound_enabled` | bool | 接收入站连接 |
 | `cache.*` | int (>0) | 缓存各项容量/时长 |
 | `performance.core_threads` | int (>0) | 线程池大小 |
 | `logging.*` | int (>0) | 日志保留/清理间隔 |
 | `container.title_template` | string | 标题模板 |
+| `player_inventory.enabled` | bool | 玩家仓库总开关；关闭后拒绝认证、查看、修改和漏斗自动化 |
 
 远端服务器用 `remote add/remove` 子命令管理。
+
+关闭玩家仓库并立即生效：
+
+```
+/exchange config set player_inventory.enabled false
+/exchange config reload
+```
+
+旧配置没有 `player_inventory` 段时按 `enabled: true` 处理。关闭后共享空间不受影响；已有玩家仓库菜单会失效，漏斗不会预扣物品或发送仓库请求。重新开启需要重新认证，因为热重载会清空内存会话。
+
+运行日志通过 SLF4J 交给 Minecraft/Fabric 的日志后端，日志级别、归档、压缩和历史文件清理由服务端日志配置统一负责。`logging.*` 配置只用于物品操作审计日志，不控制 Minecraft 运行日志。
 
 ## 命令
 
@@ -162,6 +177,7 @@ core/                         纯 Java 核心库，零 Minecraft/loader 依赖
 
 fabric-1.21.11/               Minecraft 1.21.11 适配层（Java 21）
 fabric-26.1/                  Minecraft 26.1.2 适配层（Java 25）
+fabric-26.2/                  Minecraft 26.2 适配层（Java 25）
   fabric/command/             指令注册
   fabric/container/           9×6 服务端虚拟容器
   fabric/item/                ItemStack ↔ NeutralItem
@@ -175,53 +191,56 @@ fabric-26.1/                  Minecraft 26.1.2 适配层（Java 25）
 
 测试机器：Intel Ultra 9 285H (6P+8E)，JDK 21.0.8，Windows 11
 
-### 生产线程模型
+### 测试链路
 
-所有业务操作统一走 `submit()` → `coreExecutor`。`coreExecutor` 是固定大小线程池，线程数 = `performance.core_threads`（默认 4）。网络 I/O 由 `Connection` 的 daemon 线程处理，不占用 coreExecutor。
+基准测试在 `127.0.0.1` 上启动两个真实 Exchange 节点并建立一条持久 TLS 1.3/TCP 连接。测试数据由 core 测试夹具生成，不依赖 Fabric 或 Minecraft；网络、协议和事务协调器使用生产实现。
 
 ```
-玩家点击 / 远端请求
-      │
-      ▼
-  TheExchangeCore.submit()
-      │
-      ▼
-  coreExecutor (core_threads 个线程)
-      │
-      ▼
-  ExchangeService → LocalInventoryCacheManager → LocalInventoryCache
+并发 caller
+    → Connection 写线程
+    → TLS/TCP + 帧编解码
+    → 远端 MutationTransactionCoordinator
+    → 权威库存工作线程池 + LocalInventoryCache
+    → RESULT → SETTLED → CLOSED
 ```
 
 ### 测试方法
 
-完全模拟生产路径。每条操作完整经过 `submit()`（真实 taskMonitor + generation 检查）→ `LocalItemStore` → `LocalInventoryCacheManager` → `LocalInventoryCache`（StampedLock 乐观读 + 槽位锁）→ `CompatibilityChecker.checkAndMark()` → `OperationLogger.log()`（内存队列）。仅排除网络 I/O 和 DB 异步刷盘。每个 caller 执行 20K 次 take+put。3 种竞争场景：
+异步有界窗口持续补充请求，任何 caller 都不会同步等待上一笔完成。默认使用 8 个权威库存工作线程，每个测量点执行 100K 笔事务，并把在途事务数从 1 扫到 4096。每组先执行 1000 笔独立仓库事务预热。健康路径不触发 SQLite recovery；认证、连接读写、协议编解码、事务幂等与结算流程均使用生产实现。
+
+故障测试需要保留完整帧轨迹和逐事务计数，饱和压测则显式关闭这些诊断数据，避免测试夹具进入热路径。每个测量点记录完整握手吞吐、提交成功率以及收到 RESULT 的 P50/P95/P99/最大延迟。
 
 | 场景 | 说明 |
 |------|------|
-| 零竞争 | 每个 caller 独占 2 个槽位 |
-| 随机竞争 | caller 随机选择 54 个共享槽位 |
-| 完全竞争 | 所有 caller 抢夺同一个槽位 |
+| 独立仓库 | 每条并发 lane 使用独立玩家私有仓库，SWAP 后物品总量不变，预期 100% 成功 |
+| 随机竞争 | 所有请求在同一个 54 槽服务端仓库随机 SWAP |
+| 完全竞争 | 所有请求在同一个仓库的同一槽执行 SWAP，制造最坏乐观锁竞争 |
+
+每组结束时会精确断言：每笔提交的事务都到达权威端、成功响应数等于库存提交数、双方事务状态最终全部关闭。失败率表示乐观锁冲突或库存条件不满足，不表示网络丢包。
 
 ### 结果
 
-横轴 `core_threads` 即 `performance.core_threads` 配置值。`submit()` 将实际并发攻击缓存的线程数限制为 K，2K 个 caller 在 taskMonitor 上排队。
+下表是一次开启 JFR 的默认规模实跑。吞吐按所有事务完成 `RESULT → SETTLED → CLOSED` 计算；P99 是独立玩家仓库收到 RESULT 的尾延迟。
 
 ![](bench_report.png)
 
-| core_threads | 零竞争 (ops/s) | 随机竞争 (ops/s) | 完全竞争 (ops/s) |
-|------|------------|------------|------------|
-| 1 | 138K | 233K | 116K |
-| 2 | 376K | 511K | 388K |
-| 4 | 453K | 650K | 618K |
-| 6 | 421K | 639K | 583K |
-| 8 | 438K | 628K | 591K |
+| 在途事务 | 独立仓库 tx/s | 独立仓库 P99 | 随机竞争 tx/s | 完全竞争 tx/s |
+|------:|------:|------:|------:|------:|
+| 1 | 13,740 | 0.23 ms | 15,179 | 15,555 |
+| 8 | 58,582 | 0.36 ms | 59,312 | 61,013 |
+| 32 | 66,489 | 0.87 ms | 66,138 | 68,399 |
+| 128 | 65,402 | 4.01 ms | 65,703 | 70,423 |
+| 512 | 62,461 | 12.31 ms | 68,353 | 71,327 |
+| 2048 | 61,843 | 52.90 ms | 71,685 | 71,327 |
+| 4096 | 60,716 | 82.96 ms | 68,166 | 70,621 |
 
 ### 结论
 
-- `submit()` 充当天然并发限流器——实际碰缓存的始终只有 K 个 coreExecutor 线程，StampedLock 竞争近乎零
-- 零竞争反而最慢：同一 submit 内对同槽位 take+put 导致缓存行 invalidation；随机竞争 take/put 命中不同槽位，缓存局部性更好
-- 4→8 线程无明显提升：CPU 为 Intel Ultra 9 285H（6P+8E），超过 6 线程后分配至 E-core，单核性能下降抵消了更多并发的收益
-- 默认 `core_threads=4` 时全路径 450K~650K ops/s，Minecraft 玩家交互 ~10-100 QPS，有 **3-4 个数量级余量**
+- 独立玩家仓库在约 32–128 笔在途时饱和于 65K–67K tx/s；继续加压不增加吞吐，只增加排队和尾延迟
+- TLS socket 启用 `TCP_NODELAY` 后，8 路独立仓库从约 1.1K 提升至约 59K tx/s，P99 从约 30 ms 降至 0.36 ms，消除了 Nagle/延迟 ACK 对小事务帧的低并发断崖
+- 随机/同槽吞吐包含被乐观锁快速拒绝的请求，因此不能当作成功写入容量；成功事务容量应以独立仓库场景为准
+- JFR 显示当前饱和热区转移到二进制字符串编码、帧缓冲分配以及每事务恢复定时任务；没有 Java monitor contention
+- 网络帧细节使用 SLF4J `trace`，默认不会让控制台 I/O 污染吞吐结果；运行时日志由 Minecraft 的日志后端负责归档和清理
 
 ### 本地运行
 
@@ -233,6 +252,19 @@ fabric-26.1/                  Minecraft 26.1.2 适配层（Java 25）
 bash bench.sh                      # Git Bash / WSL
 .\bench.ps1                        # PowerShell
 .\bench.ps1 -Python D:\python.exe  # 指定 Python 路径
+.\bench.ps1 -Operations 10000 -InFlight "1,32,128"  # 快速试跑
+.\bench.ps1 -Profile                # 同时生成 JFR
+
+# Git Bash / WSL 下的 JFR
+bash bench.sh python 100000 8 "1,8,32,128,512,2048,4096" --profile
 ```
 
 生成 `bench_data.csv`（原始数据）和 `bench_report.png`（吞吐/成功率折线图）。
+
+### 真实网络并发正确性
+
+`MutationTransactionNetworkStressTest` 会在 `127.0.0.1` 上启动两个真实 TLS/TCP 节点，由 16 个客户端线程并发经过认证、帧编解码、连接读写线程和 V2 事务协调器。默认测试包含 1080 笔跨 54 槽事务、256 笔同槽乐观锁竞争和 256 个同 UUID 重复帧；断言最终库存、成功/返还数量、执行次数、提交次数和双方关闭状态，不以不稳定的机器吞吐阈值判定正确性。
+
+```bash
+./gradlew :core:test --tests org.edtp.theexchange.service.MutationTransactionNetworkStressTest
+```

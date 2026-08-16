@@ -23,6 +23,7 @@ class ConcurrencyStressTest {
     private static NeutralItem diamond() {
         NeutralItem item = new NeutralItem("minecraft:diamond", 64, "diamond", new byte[0], false, "26.1.2");
         item.setVersion(1);
+        item.setMaxStackSize(MAX_STACK);
         return item;
     }
 
@@ -30,7 +31,7 @@ class ConcurrencyStressTest {
         LocalInventoryCache cache = new LocalInventoryCache(InventoryScope.server(), SLOTS);
         // Pre-fill all slots
         for (int i = 0; i < SLOTS; i++) {
-            cache.put(i, diamond(), 0, "init", item -> MAX_STACK);
+            cache.put(i, diamond(), 0, "init");
         }
         return cache;
     }
@@ -70,7 +71,7 @@ class ConcurrencyStressTest {
                         }
                     }
                     // put 1 back
-                    var putResult = cache.put(slot, diamondWithCount(1), version, "test", item -> MAX_STACK);
+                    var putResult = cache.put(slot, diamondWithCount(1), version, "test");
                     if (putResult.success()) {
                         successCount.incrementAndGet();
                         version = putResult.newVersion();
@@ -187,8 +188,7 @@ class ConcurrencyStressTest {
                     // PUT to a (possibly different) random slot
                     int putSlot = rng.nextInt(SLOTS);
                     int putVersion = cache.getVersion(putSlot);
-                    var putResult = cache.put(putSlot, diamondWithCount(1), putVersion, "test",
-                            item -> MAX_STACK);
+                    var putResult = cache.put(putSlot, diamondWithCount(1), putVersion, "test");
                     if (putResult.success()) {
                         successCount.incrementAndGet();
                     } else {
@@ -266,7 +266,7 @@ class ConcurrencyStressTest {
                     int version = cache.getVersion(slot);
                     cache.take(slot, "minecraft:diamond", version, 1);
                     version = cache.getVersion(slot);
-                    cache.put(slot, diamondWithCount(1), version, "test", item -> MAX_STACK);
+                    cache.put(slot, diamondWithCount(1), version, "test");
                 }
                 done.countDown();
             });
@@ -312,6 +312,7 @@ class ConcurrencyStressTest {
     private static NeutralItem diamondWithCount(int count) {
         NeutralItem item = new NeutralItem("minecraft:diamond", count, "diamond", new byte[0], false, "26.1.2");
         item.setVersion(1);
+        item.setMaxStackSize(MAX_STACK);
         return item;
     }
 }

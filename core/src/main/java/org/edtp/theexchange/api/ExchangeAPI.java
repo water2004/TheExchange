@@ -92,6 +92,7 @@ public interface ExchangeAPI {
         private final PerformanceConfig performance;
         private final LoggingConfig logging;
         private final ContainerConfig container;
+        private final PlayerInventoryConfig playerInventory;
         private final String displayName;
         private final int port;
         private final String password;
@@ -99,13 +100,15 @@ public interface ExchangeAPI {
 
         public RuntimeConfig(ServerConfig server, NetworkConfig network,
                              CacheConfig cache, PerformanceConfig performance, LoggingConfig logging,
-                             ContainerConfig container, List<RemoteServerConfig> remoteServers) {
+                             ContainerConfig container, PlayerInventoryConfig playerInventory,
+                             List<RemoteServerConfig> remoteServers) {
             this.server = server;
             this.network = network;
             this.cache = cache;
             this.performance = performance;
             this.logging = logging;
             this.container = container;
+            this.playerInventory = playerInventory != null ? playerInventory : new PlayerInventoryConfig(true);
             this.displayName = server != null ? server.getDisplayName() : null;
             this.port = server != null ? server.getPort() : 0;
             this.password = server != null ? server.getPassword() : null;
@@ -118,6 +121,7 @@ public interface ExchangeAPI {
         public PerformanceConfig getPerformance() { return performance; }
         public LoggingConfig getLogging() { return logging; }
         public ContainerConfig getContainer() { return container; }
+        public PlayerInventoryConfig getPlayerInventory() { return playerInventory; }
         public String getDisplayName() { return displayName; }
         public int getPort() { return port; }
         public String getPassword() { return password; }
@@ -218,6 +222,16 @@ public interface ExchangeAPI {
 
         public int getRows() { return rows; }
         public String getTitleTemplate() { return titleTemplate; }
+    }
+
+    class PlayerInventoryConfig {
+        private final boolean enabled;
+
+        public PlayerInventoryConfig(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public boolean isEnabled() { return enabled; }
     }
 
     class RemoteServerConfig {

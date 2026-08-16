@@ -2,17 +2,16 @@ package org.edtp.theexchange.fabric.automation;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.util.Mth;
 import net.minecraft.world.Container;
 import net.minecraft.world.Containers;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.HopperBlock;
 import net.minecraft.world.level.block.entity.Hopper;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import org.edtp.theexchange.TheExchangeCore;
-import org.edtp.theexchange.fabric.block.AttachedEnderChestSign;
 import org.edtp.theexchange.model.ExchangeMutationResult;
 import org.edtp.theexchange.model.ExchangeViewState;
 import org.edtp.theexchange.model.InventoryAccess;
@@ -22,10 +21,11 @@ import org.edtp.theexchange.model.PlayerInventoryConnectionSpec;
 import org.edtp.theexchange.service.ExchangeService;
 import org.edtp.theexchange.service.WarehouseAutomationFairness;
 import org.edtp.theexchange.service.WarehouseAutomationGate;
-import org.edtp.theexchange.service.WarehouseAutomationPlanner;
+import org.edtp.theexchange.service.ExchangeSlotPlanner;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -37,23 +37,34 @@ public final class PlayerWarehouseHopperBridge {
     private static final WarehouseAutomationGate<String> OPERATIONS = new WarehouseAutomationGate<>();
     private static final WarehouseAutomationFairness<String> FAIRNESS =
             new WarehouseAutomationFairness<>(ExchangeService.INVENTORY_SLOT_COUNT);
+    private static final WarehouseAutomationFairness<String> SOURCE_FAIRNESS =
+            new WarehouseAutomationFairness<>(5);
     private static final ConcurrentHashMap<EndpointKey, Long> AUTH_RETRY_AFTER = new ConcurrentHashMap<>();
 
     private PlayerWarehouseHopperBridge() {
     }
 
-    /** Empty means the target is not a mapped ender chest; present means vanilla logic must be bypassed. */
-    public static Optional<Boolean> push(Level level, BlockPos hopperPos, HopperBlockEntity hopper) {
-        Direction facing = level.getBlockState(hopperPos).getValue(HopperBlock.FACING);
-        BlockPos chestPos = hopperPos.relative(facing);
-        Optional<PlayerInventoryConnectionSpec> endpoint = mappedEndpoint(level, chestPos);
-        if (endpoint.isEmpty()) return Optional.empty();
+    public enum Decision {
+        PASS,
+        SUCCESS,
+        BLOCKED
+    }
+
+    /** PASS means the target is not a mapped ender chest; other values bypass vanilla logic. */
+    public static Decision push(Level level, BlockPos hopperPos, HopperBlockEntity hopper) {
+        Direction facing = hopper.getBlockState().getValue(HopperBlock.FACING);
+        long chestPosition = BlockPos.asLong(
+                hopperPos.getX() + facing.getStepX(),
+                hopperPos.getY() + facing.getStepY(),
+                hopperPos.getZ() + facing.getStepZ());
+        PlayerInventoryConnectionSpec connection = PlayerWarehouseEndpointCache.find(level, chestPosition);
+        if (connection == null) return Decision.PASS;
+        BlockPos chestPos = BlockPos.of(chestPosition);
 
         TheExchangeCore core = readyCore();
-        if (core == null) return Optional.of(false);
-        PlayerInventoryConnectionSpec connection = endpoint.orElseThrow();
+        if (core == null || !core.isPlayerInventoriesEnabled()) return Decision.BLOCKED;
         PlayerExchangeContext actor = automationActor(level, hopperPos);
-        if (OPERATIONS.isBusy(actor.uuid())) return Optional.of(false);
+        if (OPERATIONS.isBusy(actor.uuid())) return Decision.BLOCKED;
         EndpointKey endpointKey = EndpointKey.of(actor, connection);
         Optional<InventoryAccess> session = core.findPlayerInventorySession(
                 connection.serverName(), connection.playerName(), actor);
@@ -62,84 +73,91 @@ public final class PlayerWarehouseHopperBridge {
                     core, PlayerWarehouseEndpointId.forBlock(level, chestPos), connection);
         }
         if (session.isEmpty() && (connection.password().isEmpty() || authBackoffActive(endpointKey))) {
-            return Optional.of(false);
+            return Decision.BLOCKED;
         }
         if (FAIRNESS.shouldYield(actor.uuid(), WarehouseAutomationFairness.Direction.PUSH,
                 () -> canStartPull(core, level, hopperPos, hopper, actor))) {
-            return Optional.of(false);
+            return Decision.BLOCKED;
         }
+        OptionalInt source = SOURCE_FAIRNESS.claimSlot(actor.uuid(),
+                slot -> slot < hopper.getContainerSize() && !hopper.getItem(slot).isEmpty());
+        if (source.isEmpty()) return Decision.BLOCKED;
+        int sourceSlot = source.orElseThrow();
 
         Optional<WarehouseAutomationGate.Lease<String>> acquired = OPERATIONS.tryAcquire(actor.uuid());
-        if (acquired.isEmpty()) return Optional.of(false);
+        if (acquired.isEmpty()) return Decision.BLOCKED;
         WarehouseAutomationGate.Lease<String> lease = acquired.orElseThrow();
         FAIRNESS.recordStarted(actor.uuid(), WarehouseAutomationFairness.Direction.PUSH);
-        int sourceSlot = firstNonEmptySlot(hopper);
-        if (sourceSlot < 0) {
-            lease.close();
-            return Optional.of(false);
-        }
         ItemStack reserved = hopper.removeItem(sourceSlot, 1);
         hopper.setChanged();
         NeutralItem item;
         try {
             item = core.getApi().getItemSerializer().serialize(reserved.copy());
         } catch (RuntimeException error) {
-            restore(level, hopperPos, reserved);
+            restore(level, hopperPos, sourceSlot, reserved);
             lease.close();
-            return Optional.of(false);
+            return Decision.BLOCKED;
         }
         if (item == null || item.isEmpty() || item.isIncompatible()) {
-            restore(level, hopperPos, reserved);
+            restore(level, hopperPos, sourceSlot, reserved);
             lease.close();
-            return Optional.of(false);
+            return Decision.BLOCKED;
         }
         int slotStart = FAIRNESS.claimSlotStart(actor.uuid());
 
         try {
-            access(core, connection, actor, endpointKey, session)
+            CompletableFuture<ExchangeMutationResult> operation = access(core, connection, actor, endpointKey, session)
                     .thenCompose(access -> open(core, connection, access)
                             .thenCompose(state -> {
-                                var target = WarehouseAutomationPlanner.findPutSlot(
-                                        state.getItems(), item,
-                                        core.getApi().getItemSerializer()::getMaxStackSize,
-                                        slotStart);
+                                var target = ExchangeSlotPlanner.findPutSlot(
+                                        state.getItems(), item, slotStart);
                                 if (target.isEmpty()) {
                                     return CompletableFuture.failedFuture(
                                             new IllegalStateException("玩家仓库没有可放入的槽位"));
                                 }
                                 return core.putRemoteAsync(connection.serverName(), target.getAsInt(),
                                         item, actor, access);
-                            }))
-                    .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
+                            }));
+            operation.whenComplete((result, error) -> settleOnMainThread(core, lease, () -> {
                         try {
                             if (error != null || result == null || !result.isSuccess()) {
-                                restore(level, hopperPos, reserved);
+                                restore(level, hopperPos, sourceSlot, reserved);
+                            }
+                            if (result != null) {
+                                result.acknowledgeSettlement();
                             }
                         } finally {
-                            lease.close();
+                            hopper.setChanged();
                         }
                     }));
         } catch (RuntimeException error) {
-            restore(level, hopperPos, reserved);
+            restore(level, hopperPos, sourceSlot, reserved);
             lease.close();
-            return Optional.of(false);
+            return Decision.BLOCKED;
         }
-        return Optional.of(true);
+        return Decision.SUCCESS;
     }
 
-    /** Empty means the source is not a mapped ender chest; present means vanilla logic must be bypassed. */
-    public static Optional<Boolean> pull(Level level, Hopper hopper) {
-        BlockPos chestPos = BlockPos.containing(
-                hopper.getLevelX(), hopper.getLevelY() + 1.0, hopper.getLevelZ());
-        Optional<PlayerInventoryConnectionSpec> endpoint = mappedEndpoint(level, chestPos);
-        if (endpoint.isEmpty()) return Optional.empty();
+    /** PASS means the source is not a mapped ender chest; other values bypass vanilla logic. */
+    public static Decision pull(Level level, Hopper hopper) {
+        BlockPos blockHopperPos = hopper instanceof HopperBlockEntity blockHopper
+                ? blockHopper.getBlockPos() : null;
+        int hopperX = blockHopperPos == null ? Mth.floor(hopper.getLevelX()) : blockHopperPos.getX();
+        int hopperY = blockHopperPos == null ? Mth.floor(hopper.getLevelY()) : blockHopperPos.getY();
+        int hopperZ = blockHopperPos == null ? Mth.floor(hopper.getLevelZ()) : blockHopperPos.getZ();
+        long chestPosition = BlockPos.asLong(hopperX, hopperY + 1, hopperZ);
+        PlayerInventoryConnectionSpec connection = PlayerWarehouseEndpointCache.find(level, chestPosition);
+        if (connection == null) return Decision.PASS;
+        BlockPos hopperPos = blockHopperPos == null
+                ? new BlockPos(hopperX, hopperY, hopperZ) : blockHopperPos;
+        BlockPos chestPos = BlockPos.of(chestPosition);
 
         TheExchangeCore core = readyCore();
-        if (core == null || !hasAnySpace(hopper)) return Optional.of(false);
-        BlockPos hopperPos = BlockPos.containing(hopper.getLevelX(), hopper.getLevelY(), hopper.getLevelZ());
-        PlayerInventoryConnectionSpec connection = endpoint.orElseThrow();
+        if (core == null || !core.isPlayerInventoriesEnabled() || !hasAnySpace(hopper)) {
+            return Decision.BLOCKED;
+        }
         PlayerExchangeContext actor = automationActor(level, hopperPos, hopper);
-        if (OPERATIONS.isBusy(actor.uuid())) return Optional.of(false);
+        if (OPERATIONS.isBusy(actor.uuid())) return Decision.BLOCKED;
         EndpointKey endpointKey = EndpointKey.of(actor, connection);
         Optional<InventoryAccess> session = core.findPlayerInventorySession(
                 connection.serverName(), connection.playerName(), actor);
@@ -148,46 +166,47 @@ public final class PlayerWarehouseHopperBridge {
                     core, PlayerWarehouseEndpointId.forBlock(level, chestPos), connection);
         }
         if (session.isEmpty() && (connection.password().isEmpty() || authBackoffActive(endpointKey))) {
-            return Optional.of(false);
+            return Decision.BLOCKED;
         }
 
         Optional<WarehouseAutomationGate.Lease<String>> acquired = OPERATIONS.tryAcquire(actor.uuid());
-        if (acquired.isEmpty()) return Optional.of(false);
+        if (acquired.isEmpty()) return Decision.BLOCKED;
         WarehouseAutomationGate.Lease<String> lease = acquired.orElseThrow();
         FAIRNESS.recordStarted(actor.uuid(), WarehouseAutomationFairness.Direction.PULL);
         int slotStart = FAIRNESS.claimSlotStart(actor.uuid());
         try {
             List<ItemStack> destinationSnapshot = snapshot(hopper);
-            access(core, connection, actor, endpointKey, session)
+            CompletableFuture<ExchangeMutationResult> operation = access(core, connection, actor, endpointKey, session)
                     .thenCompose(access -> open(core, connection, access)
                             .thenCompose(state -> takeFirstAcceptable(
                                     core, connection, actor, access, destinationSnapshot, state,
-                                    slotStart)))
-                    .whenComplete((result, error) -> core.getApi().runOnMainThread(() -> {
-                        try {
-                            if (error == null && result != null && result.isSuccess()
-                                    && result.getItem() != null && !result.getItem().isIncompatible()) {
-                                Object decoded = core.getApi().getItemSerializer().deserialize(result.getItem());
-                                if (decoded instanceof ItemStack stack && !stack.isEmpty()) {
-                                    insertPulled(level, hopper, stack);
-                                }
+                                    slotStart)));
+            operation.whenComplete((result, error) -> settleOnMainThread(core, lease, () -> {
+                        boolean applied = result != null && !result.isSuccess();
+                        if (error == null && result != null && result.isSuccess()
+                                && result.getItem() != null && !result.getItem().isIncompatible()) {
+                            Object decoded = core.getApi().getItemSerializer().deserialize(result.getItem());
+                            if (decoded instanceof ItemStack stack && !stack.isEmpty()) {
+                                insertPulled(level, hopper, stack);
+                                applied = true;
                             }
-                        } finally {
-                            lease.close();
+                        }
+                        if (applied) {
+                            result.acknowledgeSettlement();
                         }
                     }));
         } catch (RuntimeException error) {
             lease.close();
-            return Optional.of(false);
+            return Decision.BLOCKED;
         }
-        return Optional.of(true);
+        return Decision.SUCCESS;
     }
 
     private static CompletableFuture<ExchangeMutationResult> takeFirstAcceptable(
             TheExchangeCore core, PlayerInventoryConnectionSpec connection,
             PlayerExchangeContext actor, InventoryAccess access, List<ItemStack> destinationSnapshot,
             ExchangeViewState state, int slotStart) {
-        var source = WarehouseAutomationPlanner.findTakeSlot(
+        var source = ExchangeSlotPlanner.findTakeSlot(
                 state.getItems(), item -> canAccept(core, destinationSnapshot, item), slotStart);
         if (source.isEmpty()) {
             return CompletableFuture.failedFuture(
@@ -222,18 +241,12 @@ public final class PlayerWarehouseHopperBridge {
                 : core.openRemoteViewAsync(connection.serverName(), access);
     }
 
-    private static Optional<PlayerInventoryConnectionSpec> mappedEndpoint(Level level, BlockPos chestPos) {
-        return level.getBlockState(chestPos).is(Blocks.ENDER_CHEST)
-                ? AttachedEnderChestSign.find(level, chestPos) : Optional.empty();
-    }
-
     private static boolean canStartPull(TheExchangeCore core, Level level, BlockPos hopperPos,
                                         Hopper hopper, PlayerExchangeContext actor) {
         if (!hasAnySpace(hopper)) return false;
         BlockPos chestPos = hopperPos.above();
-        Optional<PlayerInventoryConnectionSpec> endpoint = mappedEndpoint(level, chestPos);
-        if (endpoint.isEmpty()) return false;
-        PlayerInventoryConnectionSpec connection = endpoint.orElseThrow();
+        PlayerInventoryConnectionSpec connection = PlayerWarehouseEndpointCache.find(level, chestPos);
+        if (connection == null) return false;
         EndpointKey endpointKey = EndpointKey.of(actor, connection);
         Optional<InventoryAccess> session = core.findPlayerInventorySession(
                 connection.serverName(), connection.playerName(), actor);
@@ -289,18 +302,26 @@ public final class PlayerWarehouseHopperBridge {
         return false;
     }
 
-    private static int firstNonEmptySlot(Container hopper) {
-        for (int slot = 0; slot < hopper.getContainerSize(); slot++) {
-            if (!hopper.getItem(slot).isEmpty()) return slot;
-        }
-        return -1;
-    }
-
-    private static void restore(Level level, BlockPos hopperPos, ItemStack reserved) {
+    private static void restore(Level level, BlockPos hopperPos, int sourceSlot, ItemStack reserved) {
         if (reserved == null || reserved.isEmpty()) return;
         ItemStack remaining = reserved.copy();
-        if (level.getBlockEntity(hopperPos) instanceof Container current) {
-            remaining = HopperBlockEntity.addItem(null, current, remaining, null);
+        if (level.getBlockEntity(hopperPos) instanceof Container current
+                && sourceSlot >= 0 && sourceSlot < current.getContainerSize()) {
+            ItemStack existing = current.getItem(sourceSlot);
+            if (existing.isEmpty() && current.canPlaceItem(sourceSlot, remaining)
+                    && remaining.getCount() <= remaining.getMaxStackSize()) {
+                current.setItem(sourceSlot, remaining);
+                current.setChanged();
+                remaining = ItemStack.EMPTY;
+            } else if (ItemStack.isSameItemSameComponents(existing, remaining)) {
+                int capacity = Math.max(0, existing.getMaxStackSize() - existing.getCount());
+                int restored = Math.min(capacity, remaining.getCount());
+                if (restored > 0) {
+                    existing.grow(restored);
+                    remaining.shrink(restored);
+                    current.setChanged();
+                }
+            }
         }
         if (!remaining.isEmpty()) {
             Containers.dropItemStack(level, hopperPos.getX() + 0.5, hopperPos.getY() + 0.5,
@@ -335,6 +356,33 @@ public final class PlayerWarehouseHopperBridge {
     private static TheExchangeCore readyCore() {
         TheExchangeCore core = TheExchangeCore.getInstance();
         return core != null && core.isInitialized() ? core : null;
+    }
+
+    private static void settleOnMainThread(TheExchangeCore core,
+                                           WarehouseAutomationGate.Lease<String> lease,
+                                           Runnable settlement) {
+        try {
+            core.getApi().runOnMainThread(() -> {
+                try {
+                    settlement.run();
+                } finally {
+                    lease.close();
+                }
+            });
+        } catch (RuntimeException schedulingError) {
+            lease.close();
+            core.getApi().getLogger().error(
+                    "[Exchange|Hopper] Failed to schedule async operation settlement",
+                    schedulingError);
+        }
+    }
+
+    public static void reset() {
+        OPERATIONS.clear();
+        FAIRNESS.clear();
+        SOURCE_FAIRNESS.clear();
+        AUTH_RETRY_AFTER.clear();
+        PlayerWarehouseAutomationSessions.clear();
     }
 
     private record EndpointKey(String actorUuid, String target) {

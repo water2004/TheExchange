@@ -63,32 +63,17 @@ public class FabricItemSerializer implements ItemSerializer {
             extraData = new byte[0];
         }
 
-        return new NeutralItem(itemId, stack.getCount(), displayName,
+        NeutralItem item = new NeutralItem(itemId, stack.getCount(), displayName,
                 extraData, false, sourceVersion);
+        item.setMaxStackSize(stack.getMaxStackSize());
+        return item;
     }
 
     @Override
     public boolean canDeserialize(NeutralItem item) {
         if (item == null || item.isEmpty()) return false;
         try {
-            Identifier id = Identifier.tryParse(item.getItemId());
-            if (id == null) {
-                debugCanDeserializeFailure(item, "BAD_ID", null);
-                return false;
-            }
-            var itemHolder = BuiltInRegistries.ITEM.get(id);
-            if (itemHolder.isEmpty() || itemHolder.get().value() == Items.AIR) {
-                debugCanDeserializeFailure(item, "UNKNOWN_ITEM", null);
-                return false;
-            }
-            if (item.getExtraData() == null || item.getExtraData().length == 0) {
-                return true;
-            }
-            ByteArrayInputStream bis = new ByteArrayInputStream(item.getExtraData());
-            DataInputStream dis = new DataInputStream(bis);
-            CompoundTag tag = NbtIo.read(dis);
-            tag.putInt("count", Math.max(1, item.getCount()));
-            ItemStack.CODEC.parse(registryOps, tag).getOrThrow();
+            decodeForValidation(item);
             return true;
         } catch (Exception e) {
             debugCanDeserializeFailure(item, "NBT_OR_CODEC", e);
@@ -140,14 +125,32 @@ public class FabricItemSerializer implements ItemSerializer {
         if (item == null || item.isEmpty()) {
             throw new IllegalArgumentException("Cannot resolve max stack size for empty item");
         }
-        Identifier id = Identifier.tryParse(item.getItemId());
-        if (id != null) {
-            var itemHolder = BuiltInRegistries.ITEM.get(id);
-            if (itemHolder.isPresent() && itemHolder.get().value() != Items.AIR) {
-                return itemHolder.get().value().getDefaultMaxStackSize();
-            }
+        try {
+            ItemStack stack = decodeForValidation(item);
+            return stack.getMaxStackSize();
+        } catch (Exception error) {
+            throw new IllegalArgumentException(
+                    "Cannot resolve max stack size for " + item.getItemId(), error);
         }
-        throw new IllegalArgumentException("Cannot resolve max stack size for " + item.getItemId());
+    }
+
+    private ItemStack decodeForValidation(NeutralItem item) throws IOException {
+        Identifier id = Identifier.tryParse(item.getItemId());
+        if (id == null) {
+            throw new IllegalArgumentException("Invalid item id: " + item.getItemId());
+        }
+        var itemHolder = BuiltInRegistries.ITEM.get(id);
+        if (itemHolder.isEmpty() || itemHolder.get().value() == Items.AIR) {
+            throw new IllegalArgumentException("Unknown item: " + item.getItemId());
+        }
+        if (item.getExtraData() == null || item.getExtraData().length == 0) {
+            return new ItemStack(itemHolder.get().value(), 1);
+        }
+        ByteArrayInputStream bis = new ByteArrayInputStream(item.getExtraData());
+        DataInputStream dis = new DataInputStream(bis);
+        CompoundTag tag = NbtIo.read(dis);
+        tag.putInt("count", 1);
+        return ItemStack.CODEC.parse(registryOps, tag).getOrThrow();
     }
 
     private byte[] writeCanonical(CompoundTag tag) throws IOException {

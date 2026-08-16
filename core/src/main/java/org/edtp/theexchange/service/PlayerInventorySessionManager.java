@@ -12,6 +12,7 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 
@@ -28,6 +29,7 @@ public final class PlayerInventorySessionManager {
     public static final int DEFAULT_MAX_PASSWORD_FAILURES = 5;
 
     private static final int TOKEN_BYTES = 32;
+    private static final long CLEANUP_INTERVAL_MILLIS = Duration.ofMinutes(1).toMillis();
     private static final String INVALID_TOKEN = "玩家仓库访问令牌无效或已过期";
 
     private final PlayerInventoryAuthStore authStore;
@@ -40,6 +42,7 @@ public final class PlayerInventorySessionManager {
     private final ConcurrentHashMap<FailureKey, FailureState> failures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<PeerScopeKey, ConcurrentHashMap.KeySetView<String, Boolean>> subscriptions =
             new ConcurrentHashMap<>();
+    private final AtomicLong lastCleanupAt = new AtomicLong();
 
     public PlayerInventorySessionManager(PlayerInventoryAuthStore authStore) {
         this(authStore, System::currentTimeMillis, DEFAULT_SESSION_TTL,
@@ -71,6 +74,7 @@ public final class PlayerInventorySessionManager {
         requirePlayerScope(scope);
         AccessPrincipal normalizedPrincipal = requirePrincipal(principal);
         long now = clock.getAsLong();
+        cleanupExpiredIfDue(now);
         FailureKey failureKey = FailureKey.of(normalizedPrincipal);
         FailureState existingFailure = failures.get(failureKey);
         if (existingFailure != null && existingFailure.isLocked(now)) {
@@ -113,6 +117,7 @@ public final class PlayerInventorySessionManager {
         }
         String tokenHash = hashToken(token);
         long now = clock.getAsLong();
+        cleanupExpiredIfDue(now);
         AtomicReference<SessionResult> result = new AtomicReference<>(SessionResult.fail(INVALID_TOKEN));
         AtomicReference<SessionRecord> removed = new AtomicReference<>();
         sessions.compute(tokenHash, (ignored, record) -> {
@@ -147,6 +152,7 @@ public final class PlayerInventorySessionManager {
             return false;
         }
         long now = clock.getAsLong();
+        cleanupExpiredIfDue(now);
         boolean active = false;
         for (String tokenHash : tokenHashes) {
             SessionRecord record = sessions.get(tokenHash);
@@ -197,6 +203,7 @@ public final class PlayerInventorySessionManager {
         sessions.clear();
         subscriptions.clear();
         failures.clear();
+        lastCleanupAt.set(0L);
     }
 
     public long sessionTtlMillis() {
@@ -206,15 +213,33 @@ public final class PlayerInventorySessionManager {
     private FailureState recordFailure(FailureKey key, long now) {
         return failures.compute(key, (ignored, previous) -> {
             if (previous == null || (previous.lockedUntil() > 0 && previous.lockedUntil() <= now)) {
-                previous = new FailureState(0, 0);
+                previous = new FailureState(0, 0, now);
             }
             if (previous.isLocked(now)) {
                 return previous;
             }
             int attempts = previous.attempts() + 1;
             long lockedUntil = attempts >= maxPasswordFailures ? safeAdd(now, lockDurationMillis) : 0;
-            return new FailureState(attempts, lockedUntil);
+            return new FailureState(attempts, lockedUntil, now);
         });
+    }
+
+    private void cleanupExpiredIfDue(long now) {
+        long previous = lastCleanupAt.get();
+        if (previous != 0L && now >= previous
+                && now < safeAdd(previous, CLEANUP_INTERVAL_MILLIS)) {
+            return;
+        }
+        if (!lastCleanupAt.compareAndSet(previous, now)) {
+            return;
+        }
+        for (Map.Entry<String, SessionRecord> entry : sessions.entrySet()) {
+            SessionRecord record = entry.getValue();
+            if (record.expiresAt() <= now && sessions.remove(entry.getKey(), record)) {
+                removeSubscription(entry.getKey(), record);
+            }
+        }
+        failures.entrySet().removeIf(entry -> entry.getValue().isStale(now, lockDurationMillis));
     }
 
     private void removeSubscription(String tokenHash, SessionRecord record) {
@@ -317,9 +342,15 @@ public final class PlayerInventorySessionManager {
         }
     }
 
-    private record FailureState(int attempts, long lockedUntil) {
+    private record FailureState(int attempts, long lockedUntil, long lastAttemptAt) {
         boolean isLocked(long now) {
             return lockedUntil > now;
+        }
+
+        boolean isStale(long now, long retentionMillis) {
+            long expiresAt = lockedUntil > 0
+                    ? lockedUntil : safeAdd(lastAttemptAt, retentionMillis);
+            return expiresAt <= now;
         }
     }
 

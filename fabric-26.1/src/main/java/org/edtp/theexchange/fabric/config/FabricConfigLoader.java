@@ -66,6 +66,9 @@ public class FabricConfigLoader implements ExchangeAPI.ConfigLoader {
                         "rows": 6,
                         "title_template": "{server_name} 的共享空间"
                       },
+                      "player_inventory": {
+                        "enabled": true
+                      },
                       "remoteServers": []
                     }
                     """;

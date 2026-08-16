@@ -7,7 +7,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.StampedLock;
-import java.util.function.ToIntFunction;
 
 public abstract class AbstractSlotInventoryCache {
 
@@ -106,14 +105,19 @@ public abstract class AbstractSlotInventoryCache {
     }
 
     public final List<Integer> changedSlots(List<Integer> remoteVersions) {
-        List<Integer> localVersions = versions();
+        List<SlotSnapshot> localSlots = snapshotSlots();
         List<Integer> remote = remoteVersions != null ? remoteVersions : List.of();
         List<Integer> changed = new ArrayList<>();
-        int max = Math.max(localVersions.size(), remote.size());
+        int max = Math.max(localSlots.size(), remote.size());
         for (int slot = 0; slot < max; slot++) {
-            int localVersion = slot < localVersions.size() && localVersions.get(slot) != null ? localVersions.get(slot) : 0;
+            SlotSnapshot local = slot < localSlots.size() ? localSlots.get(slot) : null;
+            int localVersion = local != null ? local.version() : 0;
             int remoteVersion = slot < remote.size() && remote.get(slot) != null ? remote.get(slot) : 0;
-            if (localVersion != remoteVersion) {
+            NeutralItem localItem = local != null ? local.item() : null;
+            boolean missingTransientMetadata = localItem != null
+                    && !localItem.isEmpty()
+                    && localItem.getMaxStackSize() <= 0;
+            if (localVersion != remoteVersion || missingTransientMetadata) {
                 changed.add(slot);
             }
         }
@@ -219,8 +223,7 @@ public abstract class AbstractSlotInventoryCache {
         }
     }
 
-    protected final Result putIntoSlot(int slot, NeutralItem item, int expectedVersion,
-                                       ToIntFunction<NeutralItem> maxStackSizeProvider) {
+    protected final Result putIntoSlot(int slot, NeutralItem item, int expectedVersion) {
         if (slot < 0) {
             return Result.fail("INVALID_SLOT");
         }
@@ -237,6 +240,13 @@ public abstract class AbstractSlotInventoryCache {
             }
             if (item.isIncompatible()) {
                 return Result.fail("INCOMPATIBLE");
+            }
+            int incomingLimit = item.getMaxStackSize();
+            if (incomingLimit <= 0) {
+                return Result.fail("STACK_LIMIT_UNKNOWN");
+            }
+            if (item.getCount() > incomingLimit) {
+                return Result.fail("STACK_OVERFLOW");
             }
             if (current == null || current.isEmpty()) {
                 if (state.version != expectedVersion) {
@@ -260,15 +270,16 @@ public abstract class AbstractSlotInventoryCache {
             if (!current.sameStackKind(item)) {
                 return Result.fail("SLOT_OCCUPIED");
             }
-            int maxStack = maxStackSizeProvider != null
-                    ? Math.max(1, maxStackSizeProvider.applyAsInt(current.copy()))
-                    : 64;
-            int mergedCount = current.getCount() + item.getCount();
+            int maxStack = current.getMaxStackSize();
+            if (maxStack <= 0) {
+                return Result.fail("STACK_LIMIT_UNKNOWN");
+            }
+            long mergedCount = (long) current.getCount() + item.getCount();
             if (mergedCount > maxStack) {
                 return Result.fail("STACK_OVERFLOW");
             }
             int newVersion = state.version + 1;
-            current.setCount(mergedCount);
+            current.setCount((int) mergedCount);
             current.setVersion(newVersion);
             state.item = current;
             state.version = newVersion;
@@ -330,8 +341,7 @@ public abstract class AbstractSlotInventoryCache {
 
     protected final Result swapSlot(int slot, NeutralItem newItem, String expectedItemId,
                                     int expectedVersion, int takeCount,
-                                    boolean boundedMerge,
-                                    java.util.function.ToIntFunction<NeutralItem> maxStackSizeProvider) {
+                                    boolean boundedMerge) {
         if (slot < 0) {
             return Result.fail("INVALID_SLOT");
         }
@@ -355,6 +365,12 @@ public abstract class AbstractSlotInventoryCache {
             if (current.isIncompatible() || newItem == null || newItem.isEmpty() || newItem.isIncompatible()) {
                 return Result.fail("INCOMPATIBLE");
             }
+            if (newItem.getMaxStackSize() <= 0) {
+                return Result.fail("STACK_LIMIT_UNKNOWN");
+            }
+            if (newItem.getCount() > newItem.getMaxStackSize()) {
+                return Result.fail("STACK_OVERFLOW");
+            }
             if (takeCount <= 0 || current.getCount() != takeCount) {
                 return Result.fail("INSUFFICIENT");
             }
@@ -362,9 +378,10 @@ public abstract class AbstractSlotInventoryCache {
                 if (!current.sameStackKind(newItem)) {
                     return Result.fail("ITEM_MISMATCH");
                 }
-                int maxStack = maxStackSizeProvider != null
-                        ? Math.max(1, maxStackSizeProvider.applyAsInt(current.copy()))
-                        : 64;
+                int maxStack = current.getMaxStackSize();
+                if (maxStack <= 0) {
+                    return Result.fail("STACK_LIMIT_UNKNOWN");
+                }
                 int capacity = Math.max(0, maxStack - current.getCount());
                 if (capacity <= 0) {
                     return Result.fail("STACK_FULL");

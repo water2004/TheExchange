@@ -5,6 +5,7 @@ import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.compat.ItemSerializer;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,6 +35,7 @@ public final class LocalInventoryCacheManager {
     });
     private final LinkedHashMap<InventoryScope, LocalInventoryCache> caches =
             new LinkedHashMap<>(16, 0.75f, true);
+    private final IdentityHashMap<LocalInventoryCache, Integer> activeMutations = new IdentityHashMap<>();
     private volatile boolean closed;
 
     public LocalInventoryCacheManager(LocalItemStore store, ItemSerializer itemSerializer,
@@ -74,37 +76,48 @@ public final class LocalInventoryCacheManager {
     }
 
     public LocalItemStore.PutResult put(InventoryScope scope, int slot, NeutralItem item, int expectedVersion, String addedBy) {
-        LocalInventoryCache cache = getOrLoad(scope);
-        LocalInventoryCache.Result result = cache.put(slot, item, expectedVersion, addedBy,
-                itemSerializer::getMaxStackSize);
-        if (!result.success()) {
-            return LocalItemStore.PutResult.fail(result.failReason());
+        LocalInventoryCache cache = acquireMutationCache(scope);
+        try {
+            LocalInventoryCache.Result result = cache.put(slot, normalizeAuthoritative(item), expectedVersion, addedBy);
+            if (!result.success()) {
+                return LocalItemStore.PutResult.fail(result.failReason());
+            }
+            scheduleFlush(scope, cache);
+            return LocalItemStore.PutResult.success(result.item(), result.newVersion());
+        } finally {
+            releaseMutationCache(cache);
         }
-        scheduleFlush(scope, cache);
-        return LocalItemStore.PutResult.success(result.item(), result.newVersion());
     }
 
     public LocalItemStore.TakeResult take(InventoryScope scope, int slot, String expectedItemId, int expectedVersion, int requestCount) {
-        LocalInventoryCache cache = getOrLoad(scope);
-        LocalInventoryCache.Result result = cache.take(slot, expectedItemId, expectedVersion, requestCount);
-        if (!result.success()) {
-            return LocalItemStore.TakeResult.fail(result.failReason());
+        LocalInventoryCache cache = acquireMutationCache(scope);
+        try {
+            LocalInventoryCache.Result result = cache.take(slot, expectedItemId, expectedVersion, requestCount);
+            if (!result.success()) {
+                return LocalItemStore.TakeResult.fail(result.failReason());
+            }
+            scheduleFlush(scope, cache);
+            return LocalItemStore.TakeResult.success(result.item(), result.newVersion());
+        } finally {
+            releaseMutationCache(cache);
         }
-        scheduleFlush(scope, cache);
-        return LocalItemStore.TakeResult.success(result.item(), result.newVersion());
     }
 
     public LocalItemStore.SwapResult swap(InventoryScope scope, int slot, NeutralItem newItem,
                                           String expectedItemId, int expectedVersion,
                                           int takeCount, boolean boundedMerge, String addedBy) {
-        LocalInventoryCache cache = getOrLoad(scope);
-        LocalInventoryCache.Result result = cache.swap(slot, newItem, expectedItemId, expectedVersion, takeCount,
-                boundedMerge, itemSerializer::getMaxStackSize);
-        if (!result.success()) {
-            return LocalItemStore.SwapResult.fail(result.failReason());
+        LocalInventoryCache cache = acquireMutationCache(scope);
+        try {
+            LocalInventoryCache.Result result = cache.swap(slot, normalizeAuthoritative(newItem), expectedItemId,
+                    expectedVersion, takeCount, boundedMerge, addedBy);
+            if (!result.success()) {
+                return LocalItemStore.SwapResult.fail(result.failReason());
+            }
+            scheduleFlush(scope, cache);
+            return LocalItemStore.SwapResult.success(result.item(), result.newVersion());
+        } finally {
+            releaseMutationCache(cache);
         }
-        scheduleFlush(scope, cache);
-        return LocalItemStore.SwapResult.success(result.item(), result.newVersion());
     }
 
     public void flushAll() {
@@ -133,11 +146,10 @@ public final class LocalInventoryCacheManager {
 
     private LocalInventoryCache load(InventoryScope scope) {
         LocalItemStore.ScopeSnapshot snapshot = store.loadScopeSnapshot(scope);
-        List<LocalInventoryCache.SlotSnapshot> items = snapshot.slots();
+        List<LocalInventoryCache.SlotSnapshot> items = normalizeSnapshots(snapshot.slots());
         long ts = snapshot.lastModifiedAt();
         LocalInventoryCache cache = new LocalInventoryCache(scope, Math.max(54, items.size()));
         cache.markLoaded(items, ts);
-        List<Map.Entry<InventoryScope, LocalInventoryCache>> evicted;
         lock.lock();
         try {
             LocalInventoryCache existing = caches.get(scope);
@@ -145,26 +157,91 @@ public final class LocalInventoryCacheManager {
                 return existing;
             }
             caches.put(scope, cache);
-            evicted = evictIfNeeded();
+            evictIfNeededLocked();
         } finally {
             lock.unlock();
-        }
-        for (Map.Entry<InventoryScope, LocalInventoryCache> entry : evicted) {
-            flushCache(entry.getKey(), entry.getValue());
         }
         return cache;
     }
 
-    private List<Map.Entry<InventoryScope, LocalInventoryCache>> evictIfNeeded() {
-        List<Map.Entry<InventoryScope, LocalInventoryCache>> evicted = new ArrayList<>();
+    private LocalInventoryCache acquireMutationCache(InventoryScope scope) {
+        while (true) {
+            lock.lock();
+            try {
+                if (closed) {
+                    throw new IllegalStateException("Local inventory cache is closed");
+                }
+                LocalInventoryCache cache = caches.get(scope);
+                if (cache != null) {
+                    activeMutations.merge(cache, 1, Integer::sum);
+                    return cache;
+                }
+            } finally {
+                lock.unlock();
+            }
+            getOrLoad(scope);
+        }
+    }
+
+    private void releaseMutationCache(LocalInventoryCache cache) {
+        lock.lock();
+        try {
+            Integer users = activeMutations.get(cache);
+            if (users == null || users <= 0) {
+                throw new IllegalStateException("Local cache mutation lifecycle mismatch");
+            }
+            if (users == 1) {
+                activeMutations.remove(cache);
+            } else {
+                activeMutations.put(cache, users - 1);
+            }
+            evictIfNeededLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private List<LocalInventoryCache.SlotSnapshot> normalizeSnapshots(
+            List<LocalInventoryCache.SlotSnapshot> snapshots) {
+        List<LocalInventoryCache.SlotSnapshot> normalized = new ArrayList<>();
+        if (snapshots == null) return normalized;
+        for (LocalInventoryCache.SlotSnapshot snapshot : snapshots) {
+            if (snapshot == null) continue;
+            normalized.add(new LocalInventoryCache.SlotSnapshot(
+                    snapshot.slot(), normalizeAuthoritative(snapshot.item()), snapshot.version()));
+        }
+        return normalized;
+    }
+
+    private NeutralItem normalizeAuthoritative(NeutralItem item) {
+        if (item == null || item.isEmpty()) return item;
+        NeutralItem normalized = item.copy();
+        try {
+            normalized.setMaxStackSize(itemSerializer.getMaxStackSize(normalized));
+            normalized.setIncompatible(false);
+        } catch (RuntimeException error) {
+            normalized.setIncompatible(true);
+            normalized.setMaxStackSize(0);
+        }
+        return normalized;
+    }
+
+    private void evictIfNeededLocked() {
         while (caches.size() > capacity) {
             InventoryScope eldestScope = caches.keySet().iterator().next();
-            LocalInventoryCache eldest = caches.remove(eldestScope);
-            if (eldest != null) {
-                evicted.add(Map.entry(eldestScope, eldest));
+            LocalInventoryCache eldest = caches.get(eldestScope);
+            if (eldest == null) {
+                caches.remove(eldestScope);
+                continue;
             }
+            if (activeMutations.containsKey(eldest)) {
+                return;
+            }
+            // Keep the entry discoverable until its last snapshot has reached storage. This
+            // prevents another thread from loading a stale second cache for the same scope.
+            flushCache(eldestScope, eldest);
+            caches.remove(eldestScope, eldest);
         }
-        return evicted;
     }
 
     private void scheduleFlush(InventoryScope scope, LocalInventoryCache cache) {

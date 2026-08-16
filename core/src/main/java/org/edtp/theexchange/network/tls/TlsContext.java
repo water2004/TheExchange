@@ -1,6 +1,7 @@
 package org.edtp.theexchange.network.tls;
 
 import javax.net.ssl.*;
+import java.net.SocketException;
 import java.nio.file.Path;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
@@ -53,7 +54,8 @@ public class TlsContext {
         return ctx;
     }
 
-    public static void configureSocket(SSLSocket socket) {
+    public static void configureSocket(SSLSocket socket) throws SocketException {
+        socket.setTcpNoDelay(true);
         socket.setEnabledProtocols(new String[]{"TLSv1.3"});
         socket.setEnabledCipherSuites(new String[]{
                 "TLS_AES_256_GCM_SHA384",

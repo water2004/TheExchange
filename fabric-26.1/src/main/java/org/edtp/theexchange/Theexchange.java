@@ -6,6 +6,8 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.server.MinecraftServer;
 import org.edtp.theexchange.fabric.FabricExchangeAPI;
+import org.edtp.theexchange.fabric.automation.PlayerWarehouseHopperBridge;
+import org.edtp.theexchange.fabric.automation.PlayerWarehouseEndpointCache;
 import org.edtp.theexchange.fabric.command.ExchangeCommand;
 import org.slf4j.Logger;
 
@@ -29,6 +31,7 @@ public class Theexchange implements ModInitializer {
     private void onServerStarted(MinecraftServer server) {
         try {
             LOGGER.info("[Exchange] Initializing...");
+            PlayerWarehouseHopperBridge.reset();
             FabricExchangeAPI api = new FabricExchangeAPI(server);
 
             core = new TheExchangeCore(api);
@@ -46,6 +49,8 @@ public class Theexchange implements ModInitializer {
 
     private void onServerStopping(MinecraftServer server) {
         LOGGER.info("[Exchange] Shutting down...");
+        PlayerWarehouseHopperBridge.reset();
+        PlayerWarehouseEndpointCache.clear();
         if (core != null) {
             try {
                 core.shutdown();

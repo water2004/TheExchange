@@ -41,6 +41,20 @@ class WarehouseAutomationFairnessTest {
     }
 
     @Test
+    void skipsEmptySlotsAndAdvancesPastTheAttemptedCandidate() {
+        WarehouseAutomationFairness<String> fairness = new WarehouseAutomationFairness<>(
+                5, System::currentTimeMillis, Duration.ofMinutes(10));
+        Set<Integer> candidates = Set.of(1, 3);
+
+        int first = fairness.claimSlot("hopper-a", candidates::contains).orElseThrow();
+        int second = fairness.claimSlot("hopper-a", candidates::contains).orElseThrow();
+
+        assertNotEquals(first, second);
+        assertEquals(first, fairness.claimSlot("hopper-a", candidates::contains).orElseThrow());
+        assertTrue(fairness.claimSlot("empty", ignored -> false).isEmpty());
+    }
+
+    @Test
     void alternatesDirectionsOnlyWhenTheOtherDirectionCanWork() {
         WarehouseAutomationFairness<String> fairness = new WarehouseAutomationFairness<>(
                 54, System::currentTimeMillis, Duration.ofMinutes(10));

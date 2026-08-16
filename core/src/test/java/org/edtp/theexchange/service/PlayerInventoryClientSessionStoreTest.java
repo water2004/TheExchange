@@ -4,6 +4,8 @@ import org.edtp.theexchange.model.InventoryAccess;
 import org.edtp.theexchange.model.InventoryScope;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -63,6 +65,27 @@ class PlayerInventoryClientSessionStoreTest {
         store.remember("survival", access("Steve", "token-one", 2_000, 1_000));
 
         assertTrue(store.findValid("survival", "Steve", "someone-else").isEmpty());
+    }
+
+    @Test
+    void rememberingNewSessionReclaimsOtherExpiredEntries() throws Exception {
+        AtomicLong now = new AtomicLong(1_000);
+        PlayerInventoryClientSessionStore store = new PlayerInventoryClientSessionStore(now::get);
+        store.remember("survival", access("Steve", "token-one", 1_500, 500));
+        store.remember("survival", access("Alex", "token-two", 1_500, 500));
+        assertEquals(2, privateSessionCount(store));
+
+        now.set(61_501);
+        store.remember("survival", access("Current", "token-three", 62_000, 500));
+
+        assertEquals(1, privateSessionCount(store));
+    }
+
+    private static int privateSessionCount(PlayerInventoryClientSessionStore store)
+            throws ReflectiveOperationException {
+        Field field = PlayerInventoryClientSessionStore.class.getDeclaredField("sessions");
+        field.setAccessible(true);
+        return ((Map<?, ?>) field.get(store)).size();
     }
 
     private static InventoryAccess access(String owner, String token, long expiresAt, long ttl) {

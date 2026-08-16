@@ -21,6 +21,8 @@ public class NeutralItem {
     private boolean incompatible;
     private String sourceVersion;
     private int version = 1;
+    /** Transient V2 snapshot metadata. Deliberately excluded from database blobs. */
+    private int maxStackSize;
 
     public NeutralItem() {}
 
@@ -55,6 +57,9 @@ public class NeutralItem {
     public int getVersion() { return version; }
     public void setVersion(int version) { this.version = version; }
 
+    public int getMaxStackSize() { return maxStackSize; }
+    public void setMaxStackSize(int maxStackSize) { this.maxStackSize = Math.max(0, maxStackSize); }
+
     public boolean isEmpty() {
         return itemId == null || count <= 0;
     }
@@ -63,6 +68,7 @@ public class NeutralItem {
         byte[] extraCopy = extraData != null ? Arrays.copyOf(extraData, extraData.length) : null;
         NeutralItem copy = new NeutralItem(itemId, count, displayName, extraCopy, incompatible, sourceVersion);
         copy.setVersion(version);
+        copy.setMaxStackSize(maxStackSize);
         return copy;
     }
 

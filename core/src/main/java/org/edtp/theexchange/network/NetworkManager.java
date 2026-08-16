@@ -6,6 +6,8 @@ import org.edtp.theexchange.network.protocol.FrameType;
 import org.edtp.theexchange.network.protocol.messages.*;
 import org.edtp.theexchange.network.tls.PinnedPeerKeyStore;
 import org.edtp.theexchange.network.tls.TlsContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
@@ -13,15 +15,17 @@ import java.security.MessageDigest;
 import java.util.Set;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 public class NetworkManager {
 
-    private static final String TAG = "[Exchange|Net] ";
+    private static final Logger LOGGER = LoggerFactory.getLogger(NetworkManager.class);
     private static final int MAX_AUTH_FAILURES = 5;
     private static final long AUTH_BAN_MS = 30_000L;
+    private static final long AUTH_FAILURE_CLEANUP_INTERVAL_MS = 30_000L;
 
     private final TlsContext tlsContext;
     private final PinnedPeerKeyStore pinnedPeerKeyStore;
@@ -31,6 +35,7 @@ public class NetworkManager {
     private final ConcurrentHashMap<String, Connection> connections = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ServerStatus> serverStatus = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AuthFailure> authFailures = new ConcurrentHashMap<>();
+    private final AtomicLong lastAuthFailureCleanupAt = new AtomicLong();
 
     private volatile String localServerName;
     private volatile String localPassword;
@@ -50,17 +55,17 @@ public class NetworkManager {
         this.tcpServer = new TcpServer(localPort, tlsContext);
         this.tcpClient = new TcpClient(tlsContext, pinnedPeerKeyStore);
         this.serverVersion = serverVersion;
-        System.out.println(TAG + "Created, local port=" + localPort);
+        LOGGER.debug("Created network manager on local port {}", localPort);
     }
 
     public void setLocalPassword(String password) {
         this.localPassword = password;
-        System.out.println(TAG + "Local password set");
+        LOGGER.debug("Local network password configured");
     }
 
     public void setLocalServerName(String localServerName) {
         this.localServerName = localServerName;
-        System.out.println(TAG + "Local server name set to " + localServerName);
+        LOGGER.debug("Local server name set to {}", localServerName);
     }
 
     public void setMessageRouter(MessageHandler router) {
@@ -80,12 +85,12 @@ public class NetworkManager {
             acceptingInbound = true;
             return;
         }
-        System.out.println(TAG + "Starting TCP server...");
+        LOGGER.debug("Starting TCP server");
         tcpServer.start(conn -> {
-            System.out.println(TAG + "Inbound connection from " + conn.getRemoteName());
+            LOGGER.debug("Inbound connection from {}", conn.getRemoteName());
             conn.start((type, msg) -> {
-                System.out.println(TAG + "Inbound frame: type=" + type + " msg="
-                        + (msg != null ? msg.getClass().getSimpleName() : "null"));
+                LOGGER.trace("Inbound frame: type={} message={}", type,
+                        msg != null ? msg.getClass().getSimpleName() : "null");
                 if (type == FrameType.AUTH_REQUEST) {
                     handleInboundAuth(conn, (AuthRequest) msg);
                 } else if (conn.isAuthenticated()) {
@@ -93,15 +98,19 @@ public class NetworkManager {
                     if (messageRouter != null) {
                         messageRouter.handle(conn, type, msg);
                     }
+                } else {
+                    conn.send(FrameType.ERROR, new ErrorMessage(426, "Protocol V2 authentication required"));
+                    conn.close();
                 }
             });
             conn.setDisconnectHandler((c, graceful) -> {
-                System.out.println(TAG + "Inbound connection closed: " + c.getRemoteName());
+                LOGGER.debug("Inbound connection closed: {}", c.getRemoteName());
                 tcpServer.removeConnection(c);
+                removeCurrentConnection(c);
             });
         });
         acceptingInbound = true;
-        System.out.println(TAG + "TCP server started");
+        LOGGER.debug("TCP server started");
     }
 
     public void stopInbound() {
@@ -113,30 +122,36 @@ public class NetworkManager {
                 disconnect(name);
             }
         }
-        System.out.println(TAG + "TCP server stopped");
+        LOGGER.debug("TCP server stopped");
     }
 
     private void handleInboundAuth(Connection conn, AuthRequest request) {
-        conn.setPeerProtocolVersion(request != null ? request.getVersion() : null);
         if (!acceptingInbound) {
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(false, "Inbound connections disabled", null, null, 0));
             conn.close();
             return;
         }
+        if (request == null || !AuthRequest.CURRENT_PROTOCOL_VERSION.equals(request.getVersion())) {
+            conn.send(FrameType.AUTH_RESPONSE,
+                    new AuthResponse(false, "UNSUPPORTED_PROTOCOL required="
+                            + AuthRequest.CURRENT_PROTOCOL_VERSION, null, null, 0));
+            conn.close();
+            return;
+        }
         String authKey = authFailureKey(conn);
         if (isAuthBanned(authKey)) {
-            System.out.println(TAG + "AUTH throttled from " + authKey);
+            LOGGER.warn("Authentication throttled from {}", authKey);
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(false, "Authentication temporarily blocked", null, null, 0));
             conn.close();
             return;
         }
-        System.out.println(TAG + "AUTH from " + request.getServerName()
-                + " mcVer=" + request.getMcVersion());
+        LOGGER.debug("Authentication request from {} (Minecraft {})",
+                request.getServerName(), request.getMcVersion());
 
         if (localPassword == null) {
-            System.out.println(TAG + "AUTH FAIL: localPassword is null (config not loaded?)");
+            LOGGER.error("Authentication rejected because the local password is not configured");
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(false, "Server not configured", null, null, 0));
             conn.close();
@@ -145,12 +160,11 @@ public class NetworkManager {
 
         if (passwordMatches(localPassword, request.getPassword())) {
             authFailures.remove(authKey);
-            System.out.println(TAG + "AUTH OK from " + request.getServerName());
+            LOGGER.info("Authenticated inbound peer {}", request.getServerName());
             conn.setAuthenticated(true);
             conn.setInbound(true);
             conn.setPeerServerName(request.getServerName());
-            connections.put(request.getServerName(), conn);
-            serverStatus.put(request.getServerName(), ServerStatus.ONLINE);
+            boolean installed = installConnection(request.getServerName(), conn);
 
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(true, "OK",
@@ -158,10 +172,17 @@ public class NetworkManager {
                             serverVersion,
                             System.currentTimeMillis()));
 
+            if (!installed) {
+                conn.close();
+                return;
+            }
+
+            serverStatus.put(request.getServerName(), ServerStatus.ONLINE);
+
             notifyStatusChange(request.getServerName(), ServerStatus.ONLINE);
         } else {
             recordAuthFailure(authKey);
-            System.out.println(TAG + "AUTH FAIL: password mismatch for " + request.getServerName());
+            LOGGER.warn("Authentication failed for {}: password mismatch", request.getServerName());
             conn.send(FrameType.AUTH_RESPONSE,
                     new AuthResponse(false, "Authentication failed", null, null, 0));
             conn.close();
@@ -176,60 +197,67 @@ public class NetworkManager {
         if (existing != null) {
             connections.remove(server.getName());
         }
-        System.out.println(TAG + "Connecting to " + server.getName()
-                + " at " + server.getAddress() + ":" + server.getPort());
+        LOGGER.debug("Connecting to {} at {}:{}", server.getName(), server.getAddress(), server.getPort());
         Connection conn = tcpClient.connect(server.getName(), server.getAddress(), server.getPort());
         if (conn == null) {
-            System.out.println(TAG + "Connect FAILED to " + server.getName());
             serverStatus.put(server.getName(), ServerStatus.OFFLINE);
             return false;
         }
 
-        System.out.println(TAG + "TLS connected to " + server.getName() + ", sending AUTH...");
+        LOGGER.debug("TLS connected to {}; sending authentication", server.getName());
         String authServerName = localServerName != null ? localServerName : "local";
         AuthRequest auth = new AuthRequest(authServerName, server.getPasswordHash(),
                 AuthRequest.CURRENT_PROTOCOL_VERSION, serverVersion);
         conn.send(FrameType.AUTH_REQUEST, auth);
 
         conn.start((type, msg) -> {
-            System.out.println(TAG + "Response from " + server.getName()
-                    + ": type=" + type + " msg="
-                    + (msg != null ? msg.getClass().getSimpleName() : "null"));
+            LOGGER.trace("Frame from {}: type={} message={}", server.getName(), type,
+                    msg != null ? msg.getClass().getSimpleName() : "null");
             conn.onResponse(type, msg);
             if (type == FrameType.AUTH_RESPONSE) {
                 AuthResponse resp = (AuthResponse) msg;
-                System.out.println(TAG + "AUTH response from " + server.getName()
-                        + ": success=" + resp.isSuccess()
-                        + " msg=" + resp.getMessage());
-                if (resp.isSuccess()) {
+                LOGGER.debug("Authentication response from {}: success={} message={}",
+                        server.getName(), resp.isSuccess(), resp.getMessage());
+                if (resp.isSuccess()
+                        && AuthResponse.CURRENT_PROTOCOL_VERSION.equals(resp.getVersion())) {
                     conn.setAuthenticated(true);
                     conn.setInbound(false);
                     conn.setPeerServerName(server.getName());
-                    conn.setPeerProtocolVersion(resp.getVersion());
-                    connections.put(server.getName(), conn);
+                    if (!installConnection(server.getName(), conn)) {
+                        conn.close();
+                        return;
+                    }
                     serverStatus.put(server.getName(), ServerStatus.ONLINE);
+                    LOGGER.info("Authenticated with outbound peer {}", server.getName());
                     notifyStatusChange(server.getName(), ServerStatus.ONLINE);
                     if (messageRouter != null) {
                         // let higher layer decide whether to refresh open views
                     }
                 } else {
+                    if (resp.isSuccess()) {
+                        LOGGER.warn("Authentication failed for {}: unsupported protocol {}",
+                                server.getName(), resp.getVersion());
+                    }
                     serverStatus.put(server.getName(), ServerStatus.OFFLINE);
                     connections.remove(server.getName());
                     conn.close();
                 }
             } else if (conn.isAuthenticated() && messageRouter != null) {
                 messageRouter.handle(conn, type, msg);
+            } else if (!conn.isAuthenticated()) {
+                conn.close();
             }
         });
 
         conn.setDisconnectHandler((c, graceful) -> {
-            System.out.println(TAG + "Disconnected from " + server.getName());
-            serverStatus.put(server.getName(), ServerStatus.OFFLINE);
-            connections.remove(server.getName());
-            notifyStatusChange(server.getName(), ServerStatus.OFFLINE);
+            LOGGER.info("Disconnected from {}", server.getName());
+            if (connections.remove(server.getName(), c)) {
+                serverStatus.put(server.getName(), ServerStatus.OFFLINE);
+                notifyStatusChange(server.getName(), ServerStatus.OFFLINE);
+            }
         });
 
-        System.out.println(TAG + "Connection pending auth for " + server.getName());
+        LOGGER.debug("Connection to {} is pending authentication", server.getName());
         return true;
     }
 
@@ -254,6 +282,11 @@ public class NetworkManager {
         return connections.get(serverName);
     }
 
+    public boolean isCurrentConnection(Connection connection) {
+        if (connection == null || connection.getPeerServerName() == null) return false;
+        return connections.get(connection.getPeerServerName()) == connection;
+    }
+
     public Collection<Connection> getConnections() {
         return connections.values();
     }
@@ -266,7 +299,6 @@ public class NetworkManager {
                           Predicate<Connection> recipientFilter) {
         for (Connection conn : connections.values()) {
             if (conn == null || conn == exclude || !conn.isRunning()) continue;
-            if (requiresInventoryAccessSupport(message) && !conn.supportsInventoryAccess()) continue;
             if (recipientFilter != null && !recipientFilter.test(conn)) continue;
             conn.send(type, message);
         }
@@ -277,7 +309,7 @@ public class NetworkManager {
     }
 
     private void notifyStatusChange(String serverName, ServerStatus status) {
-        System.out.println(TAG + "Status: " + serverName + " → " + status);
+        LOGGER.debug("Peer status changed: {} -> {}", serverName, status);
         if (status == ServerStatus.ONLINE) {
             Consumer<String> handler = onlineHandler;
             if (handler != null) {
@@ -289,12 +321,45 @@ public class NetworkManager {
     public int getLocalPort() { return tcpServer.getPort(); }
     public boolean isInboundRunning() { return tcpServer.isRunning(); }
 
-    private boolean requiresInventoryAccessSupport(Object message) {
-        return message instanceof PushUpdate update && update.getScope().isPlayer();
-    }
-
     private boolean isInboundConnection(Connection conn) {
         return conn != null && conn.isInbound();
+    }
+
+    private boolean installConnection(String serverName, Connection connection) {
+        while (true) {
+            Connection existing = connections.get(serverName);
+            if (existing == connection) return true;
+            if (existing != null && existing.isRunning()
+                    && prefer(existing, connection, serverName) == existing) {
+                return false;
+            }
+            boolean installed = existing == null
+                    ? connections.putIfAbsent(serverName, connection) == null
+                    : connections.replace(serverName, existing, connection);
+            if (!installed) continue;
+            if (existing != null) existing.close();
+            return true;
+        }
+    }
+
+    /** Both peers deterministically retain the same physical connection during simultaneous dialing. */
+    private Connection prefer(Connection existing, Connection candidate, String peerName) {
+        String local = localServerName != null ? localServerName : "local";
+        boolean preferInbound = local.compareToIgnoreCase(peerName) > 0;
+        boolean existingPreferred = existing.isInbound() == preferInbound;
+        boolean candidatePreferred = candidate.isInbound() == preferInbound;
+        if (existingPreferred != candidatePreferred) {
+            return existingPreferred ? existing : candidate;
+        }
+        return candidate;
+    }
+
+    private void removeCurrentConnection(Connection connection) {
+        String serverName = connection != null ? connection.getPeerServerName() : null;
+        if (serverName != null && connections.remove(serverName, connection)) {
+            serverStatus.put(serverName, ServerStatus.OFFLINE);
+            notifyStatusChange(serverName, ServerStatus.OFFLINE);
+        }
     }
 
     private boolean passwordMatches(String expected, String actual) {
@@ -310,23 +375,39 @@ public class NetworkManager {
     }
 
     private boolean isAuthBanned(String key) {
+        long now = System.currentTimeMillis();
+        cleanupExpiredAuthFailures(now);
         AuthFailure failure = authFailures.get(key);
-        if (failure == null || failure.failCount < MAX_AUTH_FAILURES) {
+        if (failure == null) {
             return false;
         }
-        long elapsed = System.currentTimeMillis() - failure.lastFailTime;
-        if (elapsed < AUTH_BAN_MS) {
-            return true;
+        if (now - failure.lastFailTime >= AUTH_BAN_MS) {
+            authFailures.remove(key, failure);
+            return false;
         }
-        authFailures.remove(key, failure);
-        return false;
+        return failure.failCount >= MAX_AUTH_FAILURES;
     }
 
     private void recordAuthFailure(String key) {
         long now = System.currentTimeMillis();
+        cleanupExpiredAuthFailures(now);
         authFailures.compute(key, (ignored, previous) -> previous == null
                 ? new AuthFailure(1, now)
                 : new AuthFailure(previous.failCount + 1, now));
+    }
+
+    private void cleanupExpiredAuthFailures(long now) {
+        long previousCleanup = lastAuthFailureCleanupAt.get();
+        if (now - previousCleanup < AUTH_FAILURE_CLEANUP_INTERVAL_MS
+                || !lastAuthFailureCleanupAt.compareAndSet(previousCleanup, now)) {
+            return;
+        }
+        for (var entry : authFailures.entrySet()) {
+            AuthFailure failure = entry.getValue();
+            if (now - failure.lastFailTime >= AUTH_BAN_MS) {
+                authFailures.remove(entry.getKey(), failure);
+            }
+        }
     }
 
     public void shutdown() {

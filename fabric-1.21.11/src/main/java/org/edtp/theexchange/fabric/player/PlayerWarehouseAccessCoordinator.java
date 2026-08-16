@@ -10,6 +10,7 @@ import org.edtp.theexchange.model.ExchangeViewState;
 import org.edtp.theexchange.model.InventoryAccess;
 import org.edtp.theexchange.model.PlayerExchangeContext;
 import org.edtp.theexchange.model.PlayerInventoryConnectionSpec;
+import org.edtp.theexchange.service.ExchangeService;
 import org.slf4j.Logger;
 
 import java.util.Optional;
@@ -34,6 +35,10 @@ public final class PlayerWarehouseAccessCoordinator {
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized()) {
             player.sendSystemMessage(Component.literal("Exchange 尚未就绪"));
+            return;
+        }
+        if (!core.isPlayerInventoriesEnabled()) {
+            player.sendSystemMessage(Component.literal(ExchangeService.PLAYER_INVENTORIES_DISABLED));
             return;
         }
         PlayerExchangeContext requester = context(player);
@@ -66,6 +71,10 @@ public final class PlayerWarehouseAccessCoordinator {
         TheExchangeCore core = TheExchangeCore.getInstance();
         if (core == null || !core.isInitialized()) {
             player.sendSystemMessage(Component.literal("Exchange 尚未就绪"));
+            return false;
+        }
+        if (!core.isPlayerInventoriesEnabled()) {
+            player.sendSystemMessage(Component.literal(ExchangeService.PLAYER_INVENTORIES_DISABLED));
             return false;
         }
         authenticateAndOpen(player, core, pending.connection(), password, pending.automationEndpointId());

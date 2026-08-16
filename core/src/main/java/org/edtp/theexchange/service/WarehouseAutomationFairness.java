@@ -2,9 +2,11 @@ package org.edtp.theexchange.service;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntPredicate;
 import java.util.function.LongSupplier;
 
 /**
@@ -58,6 +60,28 @@ public final class WarehouseAutomationFairness<K> {
         return result;
     }
 
+    /** Returns the next matching slot and advances past it without treating skipped slots as attempts. */
+    public OptionalInt claimSlot(K hopperKey, IntPredicate matches) {
+        Objects.requireNonNull(matches, "matches");
+        long now = clock.getAsLong();
+        HopperState state = state(hopperKey, now);
+        synchronized (state) {
+            int slot = state.nextSlot;
+            for (int checked = 0; checked < slotCount; checked++) {
+                if (matches.test(slot)) {
+                    state.nextSlot = (slot + state.stride) % slotCount;
+                    state.lastTouched = now;
+                    cleanupIfDue(now);
+                    return OptionalInt.of(slot);
+                }
+                slot = (slot + state.stride) % slotCount;
+            }
+            state.lastTouched = now;
+        }
+        cleanupIfDue(now);
+        return OptionalInt.empty();
+    }
+
     /**
      * Returns true when the same direction ran last and the opposite direction
      * is currently able to make an attempt. The supplier is evaluated lazily.
@@ -79,6 +103,10 @@ public final class WarehouseAutomationFairness<K> {
         state.lastDirection = Objects.requireNonNull(direction, "direction");
         state.lastTouched = now;
         cleanupIfDue(now);
+    }
+
+    public void clear() {
+        states.clear();
     }
 
     int trackedHoppers() {

@@ -8,9 +8,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -148,6 +150,53 @@ class PlayerInventorySessionManagerTest {
         assertFalse(context.manager.hasActiveSession("survival", scope));
         assertTrue(context.manager.authenticate(scope, "Steve", "secret", principal).success(),
                 "a core restart/reload starts with no persisted lockout or token state");
+    }
+
+    @Test
+    void laterAuthenticationReclaimsExpiredUnusedSessions() throws Exception {
+        TestContext context = context();
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        context.authStore.setPassword(scope, "secret");
+        for (int index = 0; index < 3; index++) {
+            assertTrue(context.manager.authenticate(scope, "Steve", "secret",
+                    new PlayerInventorySessionManager.AccessPrincipal(
+                            "survival", "old-viewer-" + index)).success());
+        }
+        assertEquals(3, privateMapSize(context.manager, "sessions"));
+
+        context.clock.addAndGet(SESSION_TTL.plusMillis(1).toMillis());
+        assertTrue(context.manager.authenticate(scope, "Steve", "secret",
+                new PlayerInventorySessionManager.AccessPrincipal(
+                        "survival", "current-viewer")).success());
+
+        assertEquals(1, privateMapSize(context.manager, "sessions"));
+    }
+
+    @Test
+    void laterAuthenticationReclaimsStalePasswordFailureRecords() throws Exception {
+        TestContext context = context();
+        InventoryScope scope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        context.authStore.setPassword(scope, "secret");
+        for (int index = 0; index < 3; index++) {
+            assertFalse(context.manager.authenticate(scope, "Steve", "wrong",
+                    new PlayerInventorySessionManager.AccessPrincipal(
+                            "survival", "old-attacker-" + index)).success());
+        }
+        assertEquals(3, privateMapSize(context.manager, "failures"));
+
+        context.clock.addAndGet(LOCK_DURATION.plusMillis(1).toMillis());
+        assertTrue(context.manager.authenticate(scope, "Steve", "secret",
+                new PlayerInventorySessionManager.AccessPrincipal(
+                        "survival", "current-viewer")).success());
+
+        assertEquals(0, privateMapSize(context.manager, "failures"));
+    }
+
+    private int privateMapSize(PlayerInventorySessionManager manager, String fieldName)
+            throws ReflectiveOperationException {
+        Field field = PlayerInventorySessionManager.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return ((Map<?, ?>) field.get(manager)).size();
     }
 
     private TestContext context() {

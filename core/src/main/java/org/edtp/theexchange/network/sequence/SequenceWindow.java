@@ -24,7 +24,7 @@ public class SequenceWindow {
     public synchronized boolean validate(long sequence, long timestamp) {
         // Timestamp check: reject messages more than 60s out of sync
         long now = System.currentTimeMillis();
-        if (Math.abs(now - timestamp) > 60_000) {
+        if (timestamp < now - 60_000 || timestamp > now + 60_000) {
             return false;
         }
 
@@ -34,8 +34,9 @@ public class SequenceWindow {
         }
 
         // Too far ahead: shift window forward
-        if (sequence >= base + WINDOW_SIZE) {
-            long shift = sequence - base - WINDOW_SIZE / 2;
+        long distance = sequence - base;
+        if (distance >= WINDOW_SIZE) {
+            long shift = distance - WINDOW_SIZE / 2;
             base += shift;
             // Shift bitset
             if (shift >= WINDOW_SIZE) {

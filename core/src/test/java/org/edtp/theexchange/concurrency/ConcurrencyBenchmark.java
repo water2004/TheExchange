@@ -1,358 +1,322 @@
 package org.edtp.theexchange.concurrency;
 
-import org.edtp.theexchange.api.ExchangeAPI;
-import org.edtp.theexchange.compat.CompatibilityChecker;
-import org.edtp.theexchange.compat.ItemSerializer;
+import org.edtp.theexchange.model.InventoryAccess;
 import org.edtp.theexchange.model.InventoryScope;
-import org.edtp.theexchange.model.NeutralItem;
-import org.edtp.theexchange.model.OperationType;
-import org.edtp.theexchange.storage.DatabaseManager;
-import org.edtp.theexchange.storage.LocalInventoryCache;
-import org.edtp.theexchange.storage.LocalInventoryCacheManager;
-import org.edtp.theexchange.storage.LocalItemStore;
-import org.edtp.theexchange.storage.OperationLogger;
+import org.edtp.theexchange.network.protocol.messages.MutationExecute;
+import org.edtp.theexchange.service.LoopbackMutationTestCluster;
+import org.edtp.theexchange.service.MutationTransactionCoordinator;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Realistic throughput benchmark: full production path minus network and DB I/O.
+ * Saturation benchmark for V2 over one real loopback TLS/TCP connection.
  *
- * Goes through:
- *   1. submit() with synchronized(taskMonitor) + inFlightTasks counting
- *   2. LocalItemStore → LocalInventoryCacheManager → LocalInventoryCache
- *   3. OperationLogger.log() (in-memory SQLite, no persistent file)
- *   4. CompatibilityChecker.checkAndMark()
- *   5. Slot-level ReentrantLock + StampedLock optimistic read
- *
- * Excludes: network, CacheManager (remote), async DB flush (separate writer thread)
+ * A bounded asynchronous window keeps the requested number of transactions in flight. Every
+ * measured transaction traverses Connection writers/readers, frame encoding/decoding,
+ * MutationTransactionCoordinator, the authoritative inventory and RESULT -> SETTLED -> CLOSED.
+ * Diagnostic frame histories and per-transaction fixture maps are disabled on this benchmark
+ * path so the harness does not dominate the protocol being measured.
  */
 class ConcurrencyBenchmark {
-
     private static final int SLOTS = 54;
-    private static final int MAX_STACK = 64;
-    private static final int ITERS_PER_CALLER = 20000;
-
-    // ---- submit harness (mimics TheExchangeCore.submit) ----
-
-    private final Object taskMonitor = new Object();
-    private volatile boolean acceptingTasks = true;
-    private int inFlightTasks;
-
-    private <T> CompletableFuture<T> submit(Callable<T> task, ExecutorService coreExecutor,
-                                             AtomicLong gen) {
-        CompletableFuture<T> future = new CompletableFuture<>();
-        long taskGeneration = gen.get();
-        synchronized (taskMonitor) {
-            if (!acceptingTasks) {
-                return CompletableFuture.failedFuture(new IllegalStateException("reloading"));
-            }
-            inFlightTasks++;
-        }
-        coreExecutor.execute(() -> {
-            try {
-                if (taskGeneration != gen.get()) {
-                    future.completeExceptionally(new IllegalStateException("reloaded"));
-                    return;
-                }
-                future.complete(task.call());
-            } catch (Throwable t) {
-                future.completeExceptionally(t);
-            } finally {
-                synchronized (taskMonitor) {
-                    if (inFlightTasks > 0) inFlightTasks--;
-                    if (inFlightTasks == 0) taskMonitor.notifyAll();
-                }
-            }
-        });
-        return future;
-    }
-
-    // ---- stub ItemSerializer for compatibility check ----
-
-    private static final ItemSerializer STUB_SERIALIZER = new ItemSerializer() {
-        @Override public NeutralItem serialize(Object itemStack) { return null; }
-        @Override public Object deserialize(NeutralItem item) { return null; }
-        @Override public boolean canDeserialize(NeutralItem item) { return true; }
-        @Override public int getMaxStackSize(NeutralItem item) { return 64; }
-    };
-
-    private static final CompatibilityChecker COMPAT = new CompatibilityChecker(STUB_SERIALIZER);
-
-    private static NeutralItem diamond() {
-        NeutralItem item = new NeutralItem("minecraft:diamond", 64, "diamond", new byte[0], false, "26.1.2");
-        item.setVersion(1);
-        return item;
-    }
-
-    private static NeutralItem diamondWithCount(int count) {
-        NeutralItem item = new NeutralItem("minecraft:diamond", count, "diamond", new byte[0], false, "26.1.2");
-        item.setVersion(1);
-        return item;
-    }
+    private static final int DEFAULT_OPERATIONS = 100_000;
+    private static final int DEFAULT_AUTHORITY_THREADS = 8;
+    private static final int WARMUP_OPERATIONS = 1_000;
+    private static final long PROBE_MILLIS = 30_000L;
+    private static final Duration CLOSE_TIMEOUT = Duration.ofSeconds(120);
+    private static final AtomicLong TRANSACTION_IDS = new AtomicLong();
 
     @Tag("bench")
     @Test
     void run() throws Exception {
-        int maxCores = Runtime.getRuntime().availableProcessors();
-        int[] poolSizes = {1, 2, 4, 6, 8};
-        Path csvFile = findProjectRoot().resolve("bench_data.csv");
+        int availableProcessors = Runtime.getRuntime().availableProcessors();
+        int authorityThreads = Math.min(availableProcessors, positiveInteger(
+                "exchange.bench.authorityThreads", DEFAULT_AUTHORITY_THREADS));
+        int operations = positiveInteger("exchange.bench.operations", DEFAULT_OPERATIONS);
+        int[] concurrencyLevels = concurrencyLevels();
+        Path projectRoot = findProjectRoot();
+        Path csvFile = projectRoot.resolve("bench_data.csv");
+        Path fixtureRoot = Files.createTempDirectory("exchange-network-bench-");
         List<String> lines = new ArrayList<>();
-        lines.add("scenario,core_threads,ops,elapsedMs,rate_s,successRate");
-        System.out.println("[bench] cores=" + maxCores + "  csv=" + csvFile);
+        lines.add("scenario,authority_threads,in_flight,ops,elapsedMs,rate_s,successRate,"
+                + "result_p50_us,result_p95_us,result_p99_us,result_max_us");
+        System.out.println("[bench] mode=real-loopback-tls-saturation cores="
+                + availableProcessors + " authority_threads=" + authorityThreads
+                + " operations=" + operations + " concurrency="
+                + Arrays.toString(concurrencyLevels) + " csv=" + csvFile);
 
-        for (int k : poolSizes) {
-            if (k > maxCores) break;
-            int callers = k * 2;
-            System.out.println("[bench] --- core_threads=" + k + "  callers=" + callers + " ---");
-
-            runScenario("dedicated", k, callers, lines, this::benchDedicated);
-            runScenario("random",    k, callers, lines, this::benchRandom);
-            runScenario("sameSlot",  k, callers, lines, this::benchSameSlot);
-        }
-
-        Files.write(csvFile, lines);
-        System.out.println("[bench] wrote " + csvFile + " (" + lines.size() + " rows)");
-    }
-
-    @FunctionalInterface
-    interface Scenario {
-        long[] run(ExecutorService coreExecutor, AtomicLong gen,
-                    LocalItemStore store, OperationLogger opLogger) throws Exception;
-    }
-
-    private void runScenario(String name, int coreThreads, int callers,
-                              List<String> lines, Scenario scenario) throws Exception {
-        Path tempDir = Files.createTempDirectory("exchange-bench-" + name + "-" + coreThreads + "-");
-        OperationLogger opLogger = new OperationLogger(tempDir.resolve("oplog"));
-
-        DatabaseManager db = new DatabaseManager(tempDir.resolve("data.db").toString());
-        db.initialize();
-
-        LocalItemStore store = new LocalItemStore(db);
-        ExchangeAPI.Logger benchLogger = new ExchangeAPI.Logger() {
-            @Override public void info(String msg) {}
-            @Override public void warn(String msg) {}
-            @Override public void error(String msg) {}
-            @Override public void error(String msg, Throwable t) {}
-        };
-        LocalInventoryCacheManager cacheMgr = new LocalInventoryCacheManager(
-                store, STUB_SERIALIZER, benchLogger, 256);
-        store.setCacheManager(cacheMgr);
-
-        // Pre-fill all slots
-        for (int i = 0; i < SLOTS; i++) {
-            store.putItem(InventoryScope.server(), i, diamond(), 0, "init");
-        }
-
-        ExecutorService coreExecutor = Executors.newFixedThreadPool(coreThreads);
-        AtomicLong gen = new AtomicLong();
-
-        long begin = System.nanoTime();
-        long[] counts = scenario.run(coreExecutor, gen, store, opLogger);
-        long elapsedMs = Math.max(1, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin));
-
-        long ops = counts[0] + counts[1];
-        double rate = ops * 1000.0 / elapsedMs;
-        double sr = ops > 0 ? counts[0] * 100.0 / ops : 0;
-        String line = String.format("%s,%d,%d,%d,%.0f,%.1f", name, coreThreads, ops, elapsedMs, rate, sr);
-        lines.add(line);
-        System.out.printf("[bench] %-10s  ops=%d  elapsed=%dms  rate=%,.0f/s  success=%.1f%%%n",
-                name, ops, elapsedMs, rate, sr);
-
-        coreExecutor.shutdownNow();
-        cacheMgr.flushAll();
-        db.close();
-        deleteRecursively(tempDir);
-    }
-
-    // ---- caller harness ----
-
-    private long[] runCallers(ExecutorService coreExecutor, AtomicLong gen,
-                               LocalItemStore store, OperationLogger opLogger,
-                               int callers, CallerTask task) throws Exception {
-        AtomicLong success = new AtomicLong();
-        AtomicLong fail = new AtomicLong();
-        CountDownLatch start = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(callers);
-        ExecutorService callerPool = Executors.newFixedThreadPool(callers);
-
-        for (int t = 0; t < callers; t++) {
-            final int id = t;
-            callerPool.submit(() -> {
-                try { start.await(); } catch (InterruptedException ignored) {}
-                task.run(id, coreExecutor, gen, store, opLogger, ITERS_PER_CALLER, success, fail);
-                done.countDown();
-            });
-        }
-
-        start.countDown();
-        assertTrue(done.await(120, TimeUnit.SECONDS));
-        callerPool.shutdownNow();
-        return new long[]{success.get(), fail.get()};
-    }
-
-    @FunctionalInterface
-    interface CallerTask {
-        void run(int id, ExecutorService exec, AtomicLong gen,
-                 LocalItemStore store, OperationLogger opLogger,
-                 int iters, AtomicLong success, AtomicLong fail);
-    }
-
-    // ---- full-path PUT/TAKE helpers ----
-
-    private void fullTake(LocalItemStore store, OperationLogger opLogger,
-                           int slot, int version, AtomicLong success, AtomicLong fail) {
-        String reqId = UUID.randomUUID().toString();
-        var item = store.getItem(slot);
-        if (item == null || item.item() == null || item.item().isEmpty()) {
-            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, false, "EMPTY");
-            fail.incrementAndGet();
-            return;
-        }
-        COMPAT.checkAndMark(item.item());
-        if (item.item().isIncompatible()) {
-            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, false, "INCOMPATIBLE");
-            fail.incrementAndGet();
-            return;
-        }
-        var result = store.takeItem(slot, "minecraft:diamond", version, 1);
-        if (result.isSuccess()) {
-            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, true, null);
-            success.incrementAndGet();
-        } else {
-            opLogger.log(reqId, OperationType.TAKE, "u", "n", "local", "minecraft:diamond", 1, false, result.getFailReason());
-            fail.incrementAndGet();
-        }
-    }
-
-    private void fullPut(LocalItemStore store, OperationLogger opLogger,
-                          int slot, int version, AtomicLong success, AtomicLong fail) {
-        String reqId = UUID.randomUUID().toString();
-        var cached = store.getItem(slot);
-        if (cached != null && cached.item() != null && cached.item().isIncompatible()) {
-            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", "minecraft:diamond", 1, false, "INCOMPATIBLE");
-            fail.incrementAndGet();
-            return;
-        }
-        var putItem = diamondWithCount(1);
-        COMPAT.checkAndMark(putItem);
-        if (putItem.isIncompatible()) {
-            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", "minecraft:diamond", 1, false, "INCOMPATIBLE");
-            fail.incrementAndGet();
-            return;
-        }
-        var result = store.putItem(slot, putItem, version, "bench");
-        if (result.isSuccess()) {
-            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", putItem.getItemId(), putItem.getCount(), true, null);
-            success.incrementAndGet();
-        } else {
-            opLogger.log(reqId, OperationType.PUT, "u", "n", "local", putItem.getItemId(), putItem.getCount(), false, result.getFailReason());
-            fail.incrementAndGet();
-        }
-    }
-
-    // ---- scenarios ----
-
-    private long[] benchDedicated(ExecutorService exec, AtomicLong gen,
-                                   LocalItemStore store, OperationLogger opLogger) throws Exception {
-        int callers = ((java.util.concurrent.ThreadPoolExecutor) exec).getCorePoolSize() * 2;
-        return runCallers(exec, gen, store, opLogger, callers, (id, e, g, s, l, iters, ok, fail) -> {
-            int slotA = (id * 2) % SLOTS;
-            int slotB = (id * 2 + 1) % SLOTS;
-            int va = 1, vb = 1;
-            for (int i = 0; i < iters; i++) {
-                int slot = (i % 2 == 0) ? slotA : slotB;
-                int v = (i % 2 == 0) ? va : vb;
-                try {
-                    int finalV = v;
-                    submit(() -> {
-                        var before = s.getItem(slot);
-                        fullTake(s, l, slot, before != null ? before.version() : finalV, ok, fail);
-                        var after = s.getItem(slot);
-                        fullPut(s, l, slot, after != null ? after.version() : 0, ok, fail);
-                        return null;
-                    }, e, g).get();
-                    v = afterSuccessfulTakePut(s, slot);
-                } catch (Exception ex) { fail.incrementAndGet(); }
-                if (i % 2 == 0) va = v; else vb = v;
-            }
-        });
-    }
-
-    private int afterSuccessfulTakePut(LocalItemStore store, int slot) {
-        var item = store.getItem(slot);
-        return item != null ? item.version() : 0;
-    }
-
-    private long[] benchRandom(ExecutorService exec, AtomicLong gen,
-                                LocalItemStore store, OperationLogger opLogger) throws Exception {
-        int callers = ((java.util.concurrent.ThreadPoolExecutor) exec).getCorePoolSize() * 2;
-        return runCallers(exec, gen, store, opLogger, callers, (id, e, g, s, l, iters, ok, fail) -> {
-            java.util.Random rng = new java.util.Random(Thread.currentThread().getId());
-            for (int i = 0; i < iters; i++) {
-                int takeSlot = rng.nextInt(SLOTS);
-                int putSlot = rng.nextInt(SLOTS);
-                try {
-                    submit(() -> {
-                        var b = s.getItem(takeSlot);
-                        fullTake(s, l, takeSlot, b != null ? b.version() : 0, ok, fail);
-                        var p = s.getItem(putSlot);
-                        fullPut(s, l, putSlot, p != null ? p.version() : 0, ok, fail);
-                        return null;
-                    }, e, g).get();
-                } catch (Exception ex) { fail.incrementAndGet(); }
-            }
-        });
-    }
-
-    private long[] benchSameSlot(ExecutorService exec, AtomicLong gen,
-                                  LocalItemStore store, OperationLogger opLogger) throws Exception {
-        int callers = ((java.util.concurrent.ThreadPoolExecutor) exec).getCorePoolSize() * 2;
-        return runCallers(exec, gen, store, opLogger, callers, (id, e, g, s, l, iters, ok, fail) -> {
-            for (int i = 0; i < iters; i++) {
-                try {
-                    submit(() -> {
-                        var b = s.getItem(0);
-                        int v = b != null ? b.version() : 0;
-                        fullTake(s, l, 0, v, ok, fail);
-                        return null;
-                    }, e, g).get();
-                } catch (Exception ex) { fail.incrementAndGet(); }
-            }
-        });
-    }
-
-    private static void deleteRecursively(Path dir) {
         try {
-            if (Files.isDirectory(dir)) {
-                try (var s = Files.list(dir)) { s.forEach(ConcurrencyBenchmark::deleteRecursively); }
+            for (int inFlight : concurrencyLevels) {
+                System.out.println("[bench] --- in_flight=" + inFlight + " ---");
+                runScenario("partitioned", authorityThreads, inFlight, operations,
+                        fixtureRoot, lines, this::partitionedRequests);
+                runScenario("random", authorityThreads, inFlight, operations,
+                        fixtureRoot, lines, this::randomRequests);
+                runScenario("sameSlot", authorityThreads, inFlight, operations,
+                        fixtureRoot, lines, this::sameSlotRequests);
             }
-            Files.deleteIfExists(dir);
-        } catch (Exception ignored) {}
+            Files.write(csvFile, lines);
+            System.out.println("[bench] wrote " + csvFile + " (" + lines.size() + " rows)");
+        } finally {
+            deleteRecursively(fixtureRoot);
+        }
+    }
+
+    @FunctionalInterface
+    private interface Scenario {
+        RequestFactory prepare(LoopbackMutationTestCluster cluster, int inFlight, String runId);
+    }
+
+    @FunctionalInterface
+    private interface RequestFactory {
+        MutationExecute create(int operation, int lane);
+    }
+
+    private void runScenario(String name, int authorityThreads, int inFlight, int operations,
+                             Path fixtureRoot, List<String> lines, Scenario scenario) throws Exception {
+        try (LoopbackMutationTestCluster cluster = new LoopbackMutationTestCluster(
+                fixtureRoot, PROBE_MILLIS, false, authorityThreads, false)) {
+            int warmupConcurrency = Math.min(inFlight, 128);
+            RequestFactory warmup = partitionedRequests(cluster, warmupConcurrency,
+                    "warmup-" + name + '-' + inFlight);
+            Sample warmupSample = runWindow(cluster, warmupConcurrency, WARMUP_OPERATIONS, warmup);
+            cluster.awaitTransactionsClosed(Duration.ofSeconds(30));
+            assertEquals(WARMUP_OPERATIONS, warmupSample.success(), "warm-up mutations must succeed");
+
+            RequestFactory requests = scenario.prepare(cluster, inFlight,
+                    "measure-" + name + '-' + inFlight);
+            long executionsBeforeMeasurement = cluster.remoteExecutions();
+            long commitsBeforeMeasurement = cluster.remoteCommits();
+            long begin = System.nanoTime();
+            Sample sample = runWindow(cluster, inFlight, operations, requests);
+            cluster.awaitTransactionsClosed(CLOSE_TIMEOUT);
+            long elapsedMs = Math.max(1L,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - begin));
+
+            assertEquals(operations, sample.success() + sample.failure(),
+                    "every benchmark operation must produce a result");
+            assertEquals(operations, cluster.remoteExecutions() - executionsBeforeMeasurement,
+                    "every submitted mutation must reach the authority");
+            assertEquals(sample.success(), cluster.remoteCommits() - commitsBeforeMeasurement,
+                    "only successful authority results may commit inventory state");
+            assertEquals(Math.min(inFlight, operations), sample.maxInFlight(),
+                    "the asynchronous generator must reach its requested in-flight window");
+
+            double rate = operations * 1_000.0 / elapsedMs;
+            double successRate = sample.success() * 100.0 / operations;
+            lines.add(String.format("%s,%d,%d,%d,%d,%.0f,%.1f,%d,%d,%d,%d",
+                    name, authorityThreads, inFlight, operations, elapsedMs, rate, successRate,
+                    sample.p50Micros(), sample.p95Micros(), sample.p99Micros(), sample.maxMicros()));
+            System.out.printf("[bench] %-11s inFlight=%d ops=%d elapsed=%dms rate=%,.0f tx/s "
+                            + "success=%.1f%% result-p50/p95/p99=%d/%d/%d us%n",
+                    name, inFlight, operations, elapsedMs, rate, successRate,
+                    sample.p50Micros(), sample.p95Micros(), sample.p99Micros());
+        }
+    }
+
+    /** Independent player warehouses: high concurrency without artificial slot conflicts. */
+    private RequestFactory partitionedRequests(LoopbackMutationTestCluster cluster,
+                                               int inFlight, String runId) {
+        InventoryScope[] scopes = new InventoryScope[inFlight];
+        InventoryAccess[] accesses = new InventoryAccess[inFlight];
+        String[] playerUuids = new String[inFlight];
+        for (int lane = 0; lane < inFlight; lane++) {
+            String playerUuid = runId + "-player-" + lane;
+            InventoryScope scope = InventoryScope.player(playerUuid);
+            playerUuids[lane] = playerUuid;
+            scopes[lane] = scope;
+            accesses[lane] = InventoryAccess.playerSession(
+                    playerUuid, "benchmark-token", playerUuid, "Benchmark" + lane,
+                    scope, Long.MAX_VALUE);
+            cluster.seedRemote(scope, 0, cluster.item("minecraft:diamond", 64));
+        }
+        return (operation, lane) -> cluster.swapRequest(nextId(), 0,
+                cluster.item("minecraft:diamond", 64), "minecraft:diamond",
+                cluster.remoteVersion(scopes[lane], 0), 64, false,
+                playerUuids[lane], "Benchmark" + lane, accesses[lane]);
+    }
+
+    /** One server warehouse, uniformly distributed over its 54 real slots. */
+    private RequestFactory randomRequests(LoopbackMutationTestCluster cluster,
+                                          int inFlight, String runId) {
+        seedServerWarehouse(cluster);
+        return (operation, lane) -> {
+            int slot = mixedSlot(operation);
+            return cluster.swapRequest(nextId(), slot,
+                    cluster.item("minecraft:diamond", 64), "minecraft:diamond",
+                    cluster.remoteVersion(slot), 64, false);
+        };
+    }
+
+    /** Worst-case optimistic-lock contention on one real server-warehouse slot. */
+    private RequestFactory sameSlotRequests(LoopbackMutationTestCluster cluster,
+                                            int inFlight, String runId) {
+        cluster.seedRemote(0, cluster.item("minecraft:diamond", 64));
+        return (operation, lane) -> cluster.swapRequest(nextId(), 0,
+                cluster.item("minecraft:diamond", 64), "minecraft:diamond",
+                cluster.remoteVersion(0), 64, false);
+    }
+
+    private void seedServerWarehouse(LoopbackMutationTestCluster cluster) {
+        for (int slot = 0; slot < SLOTS; slot++) {
+            cluster.seedRemote(slot, cluster.item("minecraft:diamond", 64));
+        }
+    }
+
+    private Sample runWindow(LoopbackMutationTestCluster cluster, int requestedInFlight,
+                             int operations, RequestFactory factory) throws Exception {
+        int lanes = Math.min(requestedInFlight, operations);
+        AtomicInteger nextOperation = new AtomicInteger();
+        AtomicInteger currentInFlight = new AtomicInteger();
+        AtomicInteger maxInFlight = new AtomicInteger();
+        AtomicLong success = new AtomicLong();
+        AtomicLong failure = new AtomicLong();
+        long[] resultLatencyNanos = new long[operations];
+        CountDownLatch completed = new CountDownLatch(operations);
+        ConcurrentLinkedQueue<Throwable> errors = new ConcurrentLinkedQueue<>();
+
+        for (int lane = 0; lane < lanes; lane++) {
+            submitNext(cluster, factory, lane, operations, nextOperation,
+                    currentInFlight, maxInFlight, success, failure,
+                    resultLatencyNanos, completed, errors);
+        }
+
+        assertTrue(completed.await(180, TimeUnit.SECONDS),
+                "benchmark timed out with " + completed.getCount() + " transactions incomplete");
+        if (!errors.isEmpty()) {
+            AssertionError benchmarkError = new AssertionError(
+                    "benchmark transaction failed unexpectedly", errors.peek());
+            errors.stream().skip(1).forEach(benchmarkError::addSuppressed);
+            throw benchmarkError;
+        }
+        Arrays.sort(resultLatencyNanos);
+        return new Sample(success.get(), failure.get(), maxInFlight.get(),
+                percentileMicros(resultLatencyNanos, 0.50),
+                percentileMicros(resultLatencyNanos, 0.95),
+                percentileMicros(resultLatencyNanos, 0.99),
+                TimeUnit.NANOSECONDS.toMicros(resultLatencyNanos[resultLatencyNanos.length - 1]));
+    }
+
+    private void submitNext(LoopbackMutationTestCluster cluster, RequestFactory factory, int lane,
+                            int operations, AtomicInteger nextOperation,
+                            AtomicInteger currentInFlight, AtomicInteger maxInFlight,
+                            AtomicLong success, AtomicLong failure, long[] resultLatencyNanos,
+                            CountDownLatch completed, ConcurrentLinkedQueue<Throwable> errors) {
+        int operation = nextOperation.getAndIncrement();
+        if (operation >= operations) return;
+
+        MutationExecute request;
+        CompletableFuture<MutationTransactionCoordinator.Receipt> future;
+        boolean admitted = false;
+        long startedAt = System.nanoTime();
+        try {
+            request = factory.create(operation, lane);
+            int current = currentInFlight.incrementAndGet();
+            admitted = true;
+            maxInFlight.accumulateAndGet(current, Math::max);
+            future = cluster.executeFromA(request);
+        } catch (Throwable error) {
+            if (admitted) currentInFlight.decrementAndGet();
+            errors.add(error);
+            completed.countDown();
+            submitNext(cluster, factory, lane, operations, nextOperation,
+                    currentInFlight, maxInFlight, success, failure,
+                    resultLatencyNanos, completed, errors);
+            return;
+        }
+
+        future.whenComplete((receipt, error) -> {
+            resultLatencyNanos[operation] = System.nanoTime() - startedAt;
+            currentInFlight.decrementAndGet();
+            if (error != null || receipt == null) {
+                errors.add(error != null ? error
+                        : new IllegalStateException("mutation completed without a receipt"));
+            } else {
+                if (receipt.result().isSuccess()) success.incrementAndGet();
+                else failure.incrementAndGet();
+                receipt.acknowledgeSettlement();
+            }
+            completed.countDown();
+            submitNext(cluster, factory, lane, operations, nextOperation,
+                    currentInFlight, maxInFlight, success, failure,
+                    resultLatencyNanos, completed, errors);
+        });
+    }
+
+    private static long percentileMicros(long[] sortedNanos, double percentile) {
+        int index = Math.max(0, (int) Math.ceil(sortedNanos.length * percentile) - 1);
+        return TimeUnit.NANOSECONDS.toMicros(sortedNanos[index]);
+    }
+
+    private static int mixedSlot(int operation) {
+        int mixed = operation * 0x9E3779B9;
+        mixed ^= mixed >>> 16;
+        return Math.floorMod(mixed, SLOTS);
+    }
+
+    private static int positiveInteger(String property, int defaultValue) {
+        return Math.max(1, Integer.getInteger(property, defaultValue));
+    }
+
+    private static int[] concurrencyLevels() {
+        String configured = System.getProperty(
+                "exchange.bench.inFlight", "1,8,32,128,512,2048,4096");
+        int[] levels = Arrays.stream(configured.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .mapToInt(Integer::parseInt)
+                .filter(value -> value > 0)
+                .distinct()
+                .sorted()
+                .toArray();
+        if (levels.length == 0) {
+            throw new IllegalArgumentException("exchange.bench.inFlight must contain a positive integer");
+        }
+        return levels;
+    }
+
+    private String nextId() {
+        return "bench-" + TRANSACTION_IDS.incrementAndGet();
+    }
+
+    private record Sample(long success, long failure, int maxInFlight,
+                          long p50Micros, long p95Micros, long p99Micros, long maxMicros) {}
+
+    private static void deleteRecursively(Path path) {
+        try {
+            if (Files.isDirectory(path)) {
+                try (var children = Files.list(path)) {
+                    children.forEach(ConcurrencyBenchmark::deleteRecursively);
+                }
+            }
+            Files.deleteIfExists(path);
+        } catch (Exception ignored) {
+        }
     }
 
     private static Path findProjectRoot() {
-        Path dir = Paths.get("").toAbsolutePath();
-        while (dir != null && !Files.exists(dir.resolve("settings.gradle"))) {
-            dir = dir.getParent();
+        Path directory = Paths.get("").toAbsolutePath();
+        while (directory != null && !Files.exists(directory.resolve("settings.gradle"))) {
+            directory = directory.getParent();
         }
-        if (dir == null) throw new IllegalStateException("Cannot find project root");
-        return dir;
+        if (directory == null) throw new IllegalStateException("Cannot find project root");
+        return directory;
     }
 }

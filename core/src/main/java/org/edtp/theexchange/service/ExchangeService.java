@@ -1,7 +1,5 @@
 package org.edtp.theexchange.service;
 
-import org.edtp.theexchange.compat.CompatibilityChecker;
-import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.model.InventoryAccess;
 import org.edtp.theexchange.model.InventoryScope;
@@ -10,6 +8,7 @@ import org.edtp.theexchange.model.OperationType;
 import org.edtp.theexchange.network.Connection;
 import org.edtp.theexchange.network.NetworkManager;
 import org.edtp.theexchange.network.protocol.FrameType;
+import org.edtp.theexchange.network.protocol.MutationHashes;
 import org.edtp.theexchange.network.protocol.messages.*;
 import org.edtp.theexchange.storage.LocalItemStore;
 import org.edtp.theexchange.storage.OperationLogger;
@@ -18,8 +17,8 @@ import java.util.UUID;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -27,9 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * Implements F-31 through F-40 concurrency and consistency requirements.
  */
 public class ExchangeService {
-    private static final long RECENT_OP_TTL_MS = 5 * 60 * 1000L;
-    private static final long RECENT_OP_CLEANUP_INTERVAL_MS = 60 * 1000L;
-
+    public static final String PLAYER_INVENTORIES_DISABLED = "玩家仓库功能已被服务器管理员关闭";
     private final NetworkManager networkManager;
     private final LocalItemStore localItemStore;
     private final OperationLogger operationLogger;
@@ -37,30 +34,35 @@ public class ExchangeService {
 
     private final PlayerInventorySessionManager playerInventorySessionManager;
     private final CacheManager cacheManager;
-    private final CompatibilityChecker compatibilityChecker;
-    private final ItemSerializer itemSerializer;
     private final SyncEngine syncEngine;
     private final RuntimeHooks runtimeHooks;
     private final long requestTimeoutMs;
-    private final ConcurrentHashMap<ScopeSlotKey, ReentrantLock> localSlotLocks = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<ScopedRequestKey, CompletedOp> recentOps = new ConcurrentHashMap<>();
-    private volatile long lastRecentOpCleanup;
+    private final MutationTransactionCoordinator transactionCoordinator;
+    private final ConcurrentHashMap<ScopeSlotKey, LocalSlotLock> localSlotLocks = new ConcurrentHashMap<>();
 
     public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
                            OperationLogger operationLogger, PlayerInventorySessionManager playerInventorySessionManager,
                            CacheManager cacheManager,
-                           CompatibilityChecker compatibilityChecker, ItemSerializer itemSerializer,
-                           SyncEngine syncEngine, RuntimeHooks runtimeHooks, long requestTimeoutMs) {
+                           SyncEngine syncEngine, RuntimeHooks runtimeHooks, long requestTimeoutMs,
+                           MutationTransactionCoordinator transactionCoordinator) {
         this.networkManager = networkManager;
         this.localItemStore = localItemStore;
         this.operationLogger = operationLogger;
         this.playerInventorySessionManager = playerInventorySessionManager;
         this.cacheManager = cacheManager;
-        this.compatibilityChecker = compatibilityChecker;
-        this.itemSerializer = itemSerializer;
         this.syncEngine = syncEngine;
         this.runtimeHooks = runtimeHooks;
         this.requestTimeoutMs = requestTimeoutMs;
+        this.transactionCoordinator = transactionCoordinator;
+    }
+
+    public ExchangeService(NetworkManager networkManager, LocalItemStore localItemStore,
+                           OperationLogger operationLogger, PlayerInventorySessionManager playerInventorySessionManager,
+                           CacheManager cacheManager, SyncEngine syncEngine,
+                           RuntimeHooks runtimeHooks, long requestTimeoutMs) {
+        this(networkManager, localItemStore, operationLogger, playerInventorySessionManager,
+                cacheManager, syncEngine, runtimeHooks, requestTimeoutMs,
+                new MutationTransactionCoordinator(requestTimeoutMs, ignored -> {}));
     }
 
     public interface RuntimeHooks {
@@ -74,19 +76,14 @@ public class ExchangeService {
         void runOnMainThread(Runnable task);
         String localServerName();
         Optional<ExchangeAPI.PlayerIdentity> resolvePlayerIdentity(String playerName);
-    }
 
-    private record CompletedOp(long completedAt, boolean success, String failReason,
-                               NeutralItem currentItem, NeutralItem takenItem, int newVersion,
-                               InventoryScope scope) {}
+        default boolean playerInventoriesEnabled() {
+            return true;
+        }
+    }
 
     private record ScopeSlotKey(InventoryScope scope, int slot) {}
 
-    private record ScopedRequestKey(InventoryScope scope, String requestId) {
-        private static ScopedRequestKey of(InventoryScope scope, String requestId) {
-            return new ScopedRequestKey(scope != null ? scope : InventoryScope.server(), requestId);
-        }
-    }
 
     private record AccessResolution(boolean success, InventoryScope scope, InventoryAccess access, String failReason) {
         static AccessResolution success(InventoryScope scope, InventoryAccess access) {
@@ -101,13 +98,12 @@ public class ExchangeService {
         }
     }
 
-    public int getMaxStackSize(NeutralItem item) {
-        return itemSerializer.getMaxStackSize(item);
-    }
-
     public CompletableFuture<InventoryAccess> authenticatePlayerInventoryAsync(
             String serverName, String ownerName, String password,
             String requesterUuid, String requesterName) {
+        if (!runtimeHooks.playerInventoriesEnabled()) {
+            return CompletableFuture.failedFuture(new IllegalStateException(PLAYER_INVENTORIES_DISABLED));
+        }
         if (ownerName == null || ownerName.isBlank()) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("玩家名称不能为空"));
         }
@@ -128,13 +124,14 @@ public class ExchangeService {
         if (conn == null || !conn.isRunning()) {
             return CompletableFuture.failedFuture(new IllegalStateException("目标服务器离线"));
         }
-        if (!conn.supportsInventoryAccess()) {
-            return CompletableFuture.failedFuture(new IllegalStateException(unsupportedPlayerInventoryMessage()));
-        }
         return conn.<PlayerInventoryAccessResponse>sendAsync(
                         FrameType.PLAYER_INVENTORY_ACCESS, request,
                         FrameType.PLAYER_INVENTORY_ACCESS_RESPONSE, requestTimeoutMs)
-                .thenApply(response -> accessFromResponse(response, requesterUuid, requesterName));
+                .thenApply(response -> accessFromResponse(response, requesterUuid, requesterName))
+                .thenApply(access -> {
+                    transactionCoordinator.refreshAccess(serverName, access);
+                    return access;
+                });
     }
 
     public CompletableFuture<PutResult> putNeutralItemAsync(String serverName, int slot,
@@ -153,6 +150,9 @@ public class ExchangeService {
             return CompletableFuture.completedFuture(PutResult.fail("INVALID_SLOT"));
         }
         InventoryAccess access = normalizeAccess(requestedAccess);
+        if (playerInventoryDisabled(access)) {
+            return CompletableFuture.completedFuture(PutResult.fail(PLAYER_INVENTORIES_DISABLED));
+        }
         boolean localTarget = isLocalTarget(serverName);
         InventoryScope operationScope = access.effectiveScope();
         if (localTarget) {
@@ -174,9 +174,6 @@ public class ExchangeService {
             if (conn == null) {
                 return CompletableFuture.completedFuture(PutResult.fail("目标服务器离线"));
             }
-            if (!supportsRequestedAccess(conn, access)) {
-                return CompletableFuture.completedFuture(PutResult.fail(unsupportedPlayerInventoryMessage()));
-            }
             if (syncEngine == null) {
                 return CompletableFuture.completedFuture(PutResult.fail("同步引擎未初始化"));
             }
@@ -188,21 +185,18 @@ public class ExchangeService {
         int expectedVersion = localTarget
                 ? localSlotVersion(operationScope, slot)
                 : cacheManager.getSlotVersion(serverName, operationScope, slot);
-        String requestId = UUID.randomUUID().toString();
-        PutItemRequest request = new PutItemRequest(slot, item, expectedVersion,
-                requestId, playerUuid, playerName, access);
-        long opGeneration = runtimeHooks.currentGeneration();
+        MutationExecute request = mutation(MutationKind.PUT, slot, item, null,
+                expectedVersion, item.getCount(), false, playerUuid, playerName, access);
         InventoryAccess finalAccess = access;
         if (localTarget) {
-            return runtimeHooks.submitIfGeneration(opGeneration,
-                    () -> finishRemotePut(serverName, slot, playerUuid, playerName, item,
-                            requestId, handleRemotePut(request), null, true, finalAccess));
+            return executeMutationAsync(runtimeHooks.localServerName(), request)
+                    .thenApply(response -> finishRemotePut(serverName, slot, playerUuid, playerName,
+                            item, request.getTransactionId(), response, true, finalAccess, () -> {}));
         }
-        return conn.<PutItemResponse>sendAsync(
-                        FrameType.PUT_ITEM, request, FrameType.PUT_ITEM_RESPONSE, requestTimeoutMs)
-                .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemotePut(serverName, slot, playerUuid,
-                        playerName, item, requestId, response, error, false, finalAccess)))
-                .thenCompose(future -> future);
+        return transactionCoordinator.execute(serverName, request)
+                .thenApply(receipt -> finishRemotePut(serverName, slot, playerUuid, playerName,
+                        item, request.getTransactionId(), receipt.result(), false, finalAccess,
+                        receipt::acknowledgeSettlement));
     }
 
     public CompletableFuture<TakeResult> takeItemAsync(String serverName, int slot, int requestCount,
@@ -214,6 +208,9 @@ public class ExchangeService {
                                                        String playerUuid, String playerName,
                                                        InventoryAccess requestedAccess) {
         InventoryAccess access = normalizeAccess(requestedAccess);
+        if (playerInventoryDisabled(access)) {
+            return CompletableFuture.completedFuture(TakeResult.fail(PLAYER_INVENTORIES_DISABLED));
+        }
         if (!isValidSlot(slot)) {
             return CompletableFuture.completedFuture(TakeResult.fail("INVALID_SLOT"));
         }
@@ -262,6 +259,9 @@ public class ExchangeService {
                                                        String playerUuid, String playerName,
                                                        InventoryAccess requestedAccess) {
         InventoryAccess access = normalizeAccess(requestedAccess);
+        if (playerInventoryDisabled(access)) {
+            return CompletableFuture.completedFuture(TakeResult.fail(PLAYER_INVENTORIES_DISABLED));
+        }
         if (!isValidSlot(slot)) {
             return CompletableFuture.completedFuture(TakeResult.fail("INVALID_SLOT"));
         }
@@ -284,28 +284,21 @@ public class ExchangeService {
             if (conn == null) {
                 return CompletableFuture.completedFuture(TakeResult.fail("目标服务器离线"));
             }
-            if (!supportsRequestedAccess(conn, access)) {
-                return CompletableFuture.completedFuture(TakeResult.fail(unsupportedPlayerInventoryMessage()));
-            }
         }
 
-        String requestId = UUID.randomUUID().toString();
-        TakeItemRequest request = new TakeItemRequest(slot, expectedItemId,
-                expectedVersion, requestCount, requestId, playerUuid, playerName, access);
-
-        long opGeneration = runtimeHooks.currentGeneration();
+        MutationExecute request = mutation(MutationKind.TAKE, slot, null, expectedItemId,
+                expectedVersion, requestCount, false, playerUuid, playerName, access);
         InventoryAccess finalAccess = access;
         if (localTarget) {
-            return runtimeHooks.submitIfGeneration(opGeneration,
-                    () -> finishRemoteTake(serverName, slot, expectedItemId, requestCount,
-                            playerUuid, playerName, requestId, handleRemoteTake(request), null, true, finalAccess));
+            return executeMutationAsync(runtimeHooks.localServerName(), request)
+                    .thenApply(response -> finishRemoteTake(serverName, slot, expectedItemId,
+                            requestCount, playerUuid, playerName, request.getTransactionId(),
+                            response, true, finalAccess, () -> {}));
         }
-        return conn.<TakeItemResponse>sendAsync(
-                        FrameType.TAKE_ITEM, request, FrameType.TAKE_ITEM_RESPONSE, requestTimeoutMs)
-                .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration, () -> finishRemoteTake(serverName, slot,
-                        expectedItemId, requestCount, playerUuid, playerName,
-                        requestId, response, error, false, finalAccess)))
-                .thenCompose(future -> future);
+        return transactionCoordinator.execute(serverName, request)
+                .thenApply(receipt -> finishRemoteTake(serverName, slot, expectedItemId,
+                        requestCount, playerUuid, playerName, request.getTransactionId(),
+                        receipt.result(), false, finalAccess, receipt::acknowledgeSettlement));
     }
 
     public CompletableFuture<SwapResult> swapItemAsync(String serverName, int slot,
@@ -335,6 +328,9 @@ public class ExchangeService {
             return CompletableFuture.completedFuture(SwapResult.fail("不兼容物品禁止操作"));
         }
         InventoryAccess access = normalizeAccess(requestedAccess);
+        if (playerInventoryDisabled(access)) {
+            return CompletableFuture.completedFuture(SwapResult.fail(PLAYER_INVENTORIES_DISABLED));
+        }
         boolean localTarget = isLocalTarget(serverName);
         InventoryScope operationScope = access.effectiveScope();
         if (localTarget) {
@@ -356,9 +352,6 @@ public class ExchangeService {
             if (conn == null) {
                 return CompletableFuture.completedFuture(SwapResult.fail("目标服务器离线"));
             }
-            if (!supportsRequestedAccess(conn, access)) {
-                return CompletableFuture.completedFuture(SwapResult.fail(unsupportedPlayerInventoryMessage()));
-            }
         }
         NeutralItem expected = localTarget
                 ? localSlotItem(operationScope, slot)
@@ -372,449 +365,242 @@ public class ExchangeService {
         int expectedVersion = localTarget
                 ? localSlotVersion(operationScope, slot)
                 : cacheManager.getSlotVersion(serverName, operationScope, slot);
-        String requestId = UUID.randomUUID().toString();
-        SwapItemRequest request = new SwapItemRequest(slot, newItem, expectedVersion,
-                expectedItemId, takeCount, boundedMerge, requestId, playerUuid, playerName, access);
-
-        long opGeneration = runtimeHooks.currentGeneration();
+        MutationExecute request = mutation(MutationKind.SWAP, slot, newItem, expectedItemId,
+                expectedVersion, takeCount, boundedMerge, playerUuid, playerName, access);
         InventoryAccess finalAccess = access;
         if (localTarget) {
-            return runtimeHooks.submitIfGeneration(opGeneration,
-                    () -> finishRemoteSwap(serverName, slot, playerUuid, playerName,
-                            newItem, requestId, handleRemoteSwap(request), null, true, finalAccess));
+            return executeMutationAsync(runtimeHooks.localServerName(), request)
+                    .thenApply(response -> finishRemoteSwap(serverName, slot, playerUuid, playerName,
+                            newItem, request.getTransactionId(), response, true, finalAccess, () -> {}));
         }
-        return conn.<SwapItemResponse>sendAsync(
-                        FrameType.SWAP_ITEM, request, FrameType.SWAP_ITEM_RESPONSE, requestTimeoutMs)
-                .handle((response, error) -> runtimeHooks.submitIfGeneration(opGeneration,
-                        () -> finishRemoteSwap(serverName, slot, playerUuid, playerName,
-                                newItem, requestId, response, error, false, finalAccess)))
-                .thenCompose(future -> future);
+        return transactionCoordinator.execute(serverName, request)
+                .thenApply(receipt -> finishRemoteSwap(serverName, slot, playerUuid, playerName,
+                        newItem, request.getTransactionId(), receipt.result(), false, finalAccess,
+                        receipt::acknowledgeSettlement));
     }
 
     private PutResult finishRemotePut(String serverName, int slot, String playerUuid,
                                       String playerName, NeutralItem item, String requestId,
-                                      PutItemResponse response, Throwable error,
-                                      boolean localLoopback, InventoryAccess access) {
+                                      MutationResultMessage response,
+                                      boolean localLoopback, InventoryAccess access,
+                                      Runnable settlement) {
         InventoryScope scope = response != null ? response.getScope() : scopeFromAccess(access);
-        if (error != null || response == null) {
-            logRequester(localLoopback, scope, requestId, OperationType.PUT, playerUuid, playerName,
-                    serverName, item.getItemId(), item.getCount(), false,
-                    error != null ? error.getMessage() : "TIMEOUT");
-            return PutResult.fail("请求超时，物品已退回");
-        }
-
         if (response.isSuccess()) {
             logRequester(localLoopback, scope, requestId, OperationType.PUT, playerUuid, playerName,
                     serverName, item.getItemId(), item.getCount(), true, null);
             finishSuccessfulMutation(serverName, scope, slot, response.getCurrentItem(),
                     response.getNewVersion(), localLoopback);
-            return PutResult.success(response.getCurrentItem());
+            return PutResult.success(response.getCurrentItem(), settlement);
         }
 
         logRequester(localLoopback, scope, requestId, OperationType.PUT, playerUuid, playerName,
                 serverName, item.getItemId(), item.getCount(), false, response.getFailReason());
         finishFailedMutation(serverName, scope, slot, response.getCurrentItem(),
                 response.getNewVersion(), localLoopback);
-        return PutResult.fail(response.getFailReason());
+        return PutResult.fail(response.getFailReason(), settlement);
     }
 
     private TakeResult finishRemoteTake(String serverName, int slot, String expectedItemId,
                                         int requestCount, String playerUuid, String playerName,
-                                        String requestId, TakeItemResponse response,
-                                        Throwable error, boolean localLoopback, InventoryAccess access) {
+                                        String requestId, MutationResultMessage response,
+                                        boolean localLoopback, InventoryAccess access,
+                                        Runnable settlement) {
         InventoryScope scope = response != null ? response.getScope() : scopeFromAccess(access);
-        if (error != null || response == null) {
-            logRequester(localLoopback, scope, requestId, OperationType.TAKE, playerUuid, playerName,
-                    serverName, expectedItemId, requestCount, false,
-                    error != null ? error.getMessage() : "TIMEOUT");
-            return TakeResult.fail("请求超时");
-        }
-
         if (response.isSuccess()) {
-            if (response.getItemsToGive() == null || response.getItemsToGive().isEmpty()
-                    || response.getItemsToGive().isIncompatible()) {
+            if (response.getTransferredItem() == null || response.getTransferredItem().isEmpty()
+                    || response.getTransferredItem().isIncompatible()) {
                 logRequester(localLoopback, scope, requestId, OperationType.TAKE, playerUuid, playerName,
                         serverName, expectedItemId, requestCount, false, "INCOMPATIBLE");
-                debugTake("rejectResponse", serverName, slot, expectedItemId, requestCount,
-                        requestId, response, null, null);
-                return TakeResult.fail("不兼容物品禁止操作");
+                return TakeResult.fail("不兼容物品禁止操作", settlement);
             }
             logRequester(localLoopback, scope, requestId, OperationType.TAKE, playerUuid, playerName,
                     serverName, expectedItemId, requestCount, true, null);
             finishSuccessfulMutation(serverName, scope, slot, response.getCurrentItem(),
                     response.getNewVersion(), localLoopback);
-            return TakeResult.success(response.getItemsToGive(), response.getNewVersion());
+            return TakeResult.success(response.getTransferredItem(), response.getNewVersion(), settlement);
         }
 
         logRequester(localLoopback, scope, requestId, OperationType.TAKE, playerUuid, playerName,
                 serverName, expectedItemId, requestCount, false, response.getFailReason());
         finishFailedMutation(serverName, scope, slot, response.getCurrentItem(),
                 response.getNewVersion(), localLoopback);
-        return TakeResult.fail(response.getFailReason());
+        return TakeResult.fail(response.getFailReason(), settlement);
     }
 
     private SwapResult finishRemoteSwap(String serverName, int slot, String playerUuid,
                                         String playerName, NeutralItem newItem, String requestId,
-                                        SwapItemResponse response, Throwable error,
-                                        boolean localLoopback, InventoryAccess access) {
+                                        MutationResultMessage response,
+                                        boolean localLoopback, InventoryAccess access,
+                                        Runnable settlement) {
         InventoryScope scope = response != null ? response.getScope() : scopeFromAccess(access);
-        if (error != null || response == null) {
-            logRequester(localLoopback, scope, requestId, OperationType.SWAP, playerUuid, playerName,
-                    serverName, newItem.getItemId(), newItem.getCount(), false,
-                    error != null ? error.getMessage() : "TIMEOUT");
-            return SwapResult.fail("请求超时，物品已退回");
-        }
-
         if (response.isSuccess()) {
-            if (response.getTakenItem() != null && !response.getTakenItem().isEmpty()
-                    && response.getTakenItem().isIncompatible()) {
+            if (response.getTransferredItem() != null && !response.getTransferredItem().isEmpty()
+                    && response.getTransferredItem().isIncompatible()) {
                 logRequester(localLoopback, scope, requestId, OperationType.SWAP, playerUuid, playerName,
                         serverName, newItem.getItemId(), newItem.getCount(), false, "INCOMPATIBLE");
-                debugSwap("rejectResponse", serverName, slot, newItem, requestId, response, null, null);
-                return SwapResult.fail("不兼容物品禁止操作");
+                return SwapResult.fail("不兼容物品禁止操作", settlement);
             }
             logRequester(localLoopback, scope, requestId, OperationType.SWAP, playerUuid, playerName,
                     serverName, newItem.getItemId(), newItem.getCount(), true, null);
             finishSuccessfulMutation(serverName, scope, slot, response.getCurrentItem(),
                     response.getNewVersion(), localLoopback);
-            return SwapResult.success(response.getTakenItem(), response.getNewVersion());
+            return SwapResult.success(response.getTransferredItem(), response.getNewVersion(), settlement);
         }
 
         logRequester(localLoopback, scope, requestId, OperationType.SWAP, playerUuid, playerName,
                 serverName, newItem.getItemId(), newItem.getCount(), false, response.getFailReason());
         finishFailedMutation(serverName, scope, slot, response.getCurrentItem(),
                 response.getNewVersion(), localLoopback);
-        return SwapResult.fail(response.getFailReason());
+        return SwapResult.fail(response.getFailReason(), settlement);
     }
 
-    public PutItemResponse handleRemotePut(PutItemRequest request) {
-        return handleRemotePut(request, runtimeHooks.localServerName());
+
+    private MutationExecute mutation(MutationKind kind, int slot, NeutralItem offeredItem,
+                                     String expectedItemId, int expectedVersion, int count,
+                                     boolean boundedMerge, String playerUuid, String playerName,
+                                     InventoryAccess access) {
+        MutationExecute request = new MutationExecute(UUID.randomUUID().toString(), null, kind,
+                slot, offeredItem, expectedItemId, expectedVersion, count, boundedMerge,
+                playerUuid, playerName, access);
+        request.setIntentHash(MutationHashes.intent(request));
+        return request;
     }
 
-    public PutItemResponse handleRemotePut(PutItemRequest request, String peerId) {
+    private CompletableFuture<MutationResultMessage> executeMutationAsync(
+            String peerId, MutationExecute request) {
+        long generation = runtimeHooks.currentGeneration();
+        return runtimeHooks.submitIfGeneration(generation, () -> executeMutation(peerId, request));
+    }
+
+    MutationResultMessage handleMutation(MutationExecute request, String peerId) {
+        if (request == null || !MutationHashes.validIntent(request)) {
+            throw new IllegalArgumentException("Invalid mutation intent");
+        }
+        return executeMutation(peerId, request);
+    }
+
+    private MutationResultMessage executeMutation(String peerId, MutationExecute request) {
         AccessResolution resolution = resolveAccess(request.getAccess(), peerId);
         if (!resolution.success()) {
-            return rememberPut(request, new PutItemResponse(false, request.getSlot(), null,
-                    resolution.failReason(), 0, 0, request.getRequestId(), resolution.scope()));
+            return mutationResult(request, false, null, null, resolution.failReason(),
+                    0, 0, resolution.scope());
         }
         InventoryScope scope = resolution.scope();
         request.setAccess(resolution.access());
         if (!isValidSlot(request.getSlot())) {
-            return rememberPut(request, new PutItemResponse(false, request.getSlot(), null,
-                    "INVALID_SLOT", 0, 0, request.getRequestId(), scope));
+            return mutationResult(request, false, null, null, "INVALID_SLOT", 0, 0, scope);
         }
-        ReentrantLock slotLock = localSlotLock(scope, request.getSlot());
-        slotLock.lock();
+        LocalSlotLockHandle slotLock = acquireLocalSlotLock(scope, request.getSlot());
         try {
-            return handleRemotePutLocked(scope, request);
+            return switch (request.getKind()) {
+                case PUT -> executePut(scope, request);
+                case TAKE -> executeTake(scope, request);
+                case SWAP -> executeSwap(scope, request);
+            };
+        } catch (Exception error) {
+            NeutralItem offered = request.getOfferedItem();
+            operationLogger.log(scope, request.getTransactionId(), operationType(request.getKind()),
+                    request.getPlayerUuid(), request.getPlayerName(), "local",
+                    offered != null ? offered.getItemId() : request.getExpectedItemId(),
+                    offered != null ? offered.getCount() : request.getCount(), false,
+                    error.getMessage());
+            return mutationResult(request, false, null, null, "INTERNAL_ERROR", 0, 0, scope);
         } finally {
-            slotLock.unlock();
+            releaseLocalSlotLock(slotLock);
         }
     }
 
-    private PutItemResponse handleRemotePutLocked(InventoryScope scope, PutItemRequest request) {
-        cleanupRecentOpsIfDue();
-        PutItemResponse cached = recentPut(scope, request);
-        if (cached != null) return cached;
-
-        try {
-            NeutralItem item = request.getItem();
-            LocalItemStore.ItemRecord existingRecord = localItemStore.getItem(scope, request.getSlot());
-            debugPut("incoming", request, item, existingRecord, null, null);
-            compatibilityChecker.checkAndMark(item);
-            debugPut("afterCompat", request, item, existingRecord, null, null);
-
-            LocalItemStore.PutResult result = localItemStore.putItem(
-                    scope, request.getSlot(), item, request.getExpectedVersion(), request.getPlayerUuid());
-            LocalItemStore.ItemRecord after = localItemStore.getItem(scope, request.getSlot());
-            debugPut("storeResult", request, item, after, result, null);
-
-            if (result.isSuccess()) {
-                operationLogger.log(scope, request.getRequestId(), OperationType.PUT,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", item.getItemId(), item.getCount(), true, null);
-
-                long timestamp = localItemStore.getLastModifiedTimestamp(scope);
-                return rememberPut(request, new PutItemResponse(true, request.getSlot(),
-                        after != null ? after.item() : result.getItem(),
-                        null, timestamp,
-                        after != null ? after.version() : result.getNewVersion(),
-                        request.getRequestId(), scope));
-            }
-
-            operationLogger.log(scope, request.getRequestId(), OperationType.PUT,
-                    request.getPlayerUuid(), request.getPlayerName(),
-                    "local", item.getItemId(), item.getCount(), false, result.getFailReason());
-            LocalItemStore.ItemRecord current = localItemStore.getItem(scope, request.getSlot());
-            return rememberPut(request, new PutItemResponse(false, request.getSlot(),
-                    current != null ? current.item() : null,
-                    result.getFailReason(), localItemStore.getLastModifiedTimestamp(scope),
-                    current != null ? current.version() : 0,
-                    request.getRequestId(), scope));
-        } catch (Exception e) {
-            NeutralItem item = request.getItem();
-            debugPut("exception", request, item, null, null, e);
-            operationLogger.log(scope, request.getRequestId(), OperationType.PUT,
-                    request.getPlayerUuid(), request.getPlayerName(),
-                    "local",
-                    item != null ? item.getItemId() : null,
-                    item != null ? item.getCount() : 0,
-                    false, e.getMessage());
-            return rememberPut(request, new PutItemResponse(false, request.getSlot(), null,
-                    "INTERNAL_ERROR", 0, 0, request.getRequestId(), scope));
+    private MutationResultMessage executePut(InventoryScope scope, MutationExecute request) {
+        NeutralItem item = request.getOfferedItem();
+        if (item == null || item.isEmpty()) {
+            return loggedFailure(scope, request, "ITEM_EMPTY",
+                    localItemStore.getItem(scope, request.getSlot()));
         }
+        LocalItemStore.PutResult stored = localItemStore.putItem(scope, request.getSlot(), item,
+                request.getExpectedVersion(), request.getPlayerUuid());
+        LocalItemStore.ItemRecord current = localItemStore.getItem(scope, request.getSlot());
+        operationLogger.log(scope, request.getTransactionId(), OperationType.PUT,
+                request.getPlayerUuid(), request.getPlayerName(), "local",
+                item.getItemId(), item.getCount(), stored.isSuccess(), stored.getFailReason());
+        return mutationResult(request, stored.isSuccess(), current != null ? current.item() : null, null,
+                stored.getFailReason(), localItemStore.getLastModifiedTimestamp(scope),
+                current != null ? current.version() : Math.max(0, stored.getNewVersion()), scope);
     }
 
-    public TakeItemResponse handleRemoteTake(TakeItemRequest request) {
-        return handleRemoteTake(request, runtimeHooks.localServerName());
-    }
-
-    public TakeItemResponse handleRemoteTake(TakeItemRequest request, String peerId) {
-        AccessResolution resolution = resolveAccess(request.getAccess(), peerId);
-        if (!resolution.success()) {
-            return rememberTake(request, new TakeItemResponse(false, request.getSlot(), null,
-                    resolution.failReason(), 0, 0, null, request.getRequestId(), resolution.scope()));
+    private MutationResultMessage executeTake(InventoryScope scope, MutationExecute request) {
+        LocalItemStore.ItemRecord before = localItemStore.getItem(scope, request.getSlot());
+        if (before == null || before.item() == null || before.item().isEmpty()) {
+            return loggedFailure(scope, request, "ITEM_NOT_FOUND", before);
         }
-        InventoryScope scope = resolution.scope();
-        request.setAccess(resolution.access());
-        if (!isValidSlot(request.getSlot())) {
-            return rememberTake(request, new TakeItemResponse(false, request.getSlot(), null,
-                    "INVALID_SLOT", 0, 0, null, request.getRequestId(), scope));
+        if (before.item().isIncompatible()) {
+            return loggedFailure(scope, request, "INCOMPATIBLE", before);
         }
-        ReentrantLock slotLock = localSlotLock(scope, request.getSlot());
-        slotLock.lock();
-        try {
-            return handleRemoteTakeLocked(scope, request);
-        } finally {
-            slotLock.unlock();
+        LocalItemStore.TakeResult stored = localItemStore.takeItem(scope, request.getSlot(),
+                request.getExpectedItemId(), request.getExpectedVersion(), request.getCount());
+        LocalItemStore.ItemRecord current = localItemStore.getItem(scope, request.getSlot());
+        operationLogger.log(scope, request.getTransactionId(), OperationType.TAKE,
+                request.getPlayerUuid(), request.getPlayerName(), "local",
+                request.getExpectedItemId(), request.getCount(), stored.isSuccess(), stored.getFailReason());
+        return mutationResult(request, stored.isSuccess(), current != null ? current.item() : null,
+                stored.isSuccess() ? stored.getItem() : null, stored.getFailReason(),
+                localItemStore.getLastModifiedTimestamp(scope),
+                current != null ? current.version() : Math.max(0, stored.getNewVersion()), scope);
+    }
+
+    private MutationResultMessage executeSwap(InventoryScope scope, MutationExecute request) {
+        NeutralItem offered = request.getOfferedItem();
+        LocalItemStore.ItemRecord before = localItemStore.getItem(scope, request.getSlot());
+        if (offered == null || offered.isEmpty()) {
+            return loggedFailure(scope, request, "ITEM_EMPTY", before);
         }
-    }
-
-    private TakeItemResponse handleRemoteTakeLocked(InventoryScope scope, TakeItemRequest request) {
-        cleanupRecentOpsIfDue();
-        TakeItemResponse cached = recentTake(scope, request);
-        if (cached != null) return cached;
-
-        try {
-            LocalItemStore.ItemRecord before = localItemStore.getItem(scope, request.getSlot());
-            debugTake("incoming", "local", request.getSlot(), request.getExpectedItemId(),
-                    request.getRequestCount(), request.getRequestId(), null, before, null);
-            if (before == null || before.item() == null || before.item().isEmpty()) {
-                operationLogger.log(scope, request.getRequestId(), OperationType.TAKE,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", request.getExpectedItemId(), request.getRequestCount(),
-                        false, "ITEM_NOT_FOUND");
-                return rememberTake(request, new TakeItemResponse(false, request.getSlot(), null,
-                        "ITEM_NOT_FOUND", localItemStore.getLastModifiedTimestamp(scope),
-                        before != null ? before.version() : 0,
-                        null, request.getRequestId(), scope));
-            }
-            if (before.item().isIncompatible()) {
-                debugTake("rejectIncompatible", "local", request.getSlot(), request.getExpectedItemId(),
-                        request.getRequestCount(), request.getRequestId(), null, before, null);
-                operationLogger.log(scope, request.getRequestId(), OperationType.TAKE,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", request.getExpectedItemId(), request.getRequestCount(),
-                        false, "INCOMPATIBLE");
-                return rememberTake(request, new TakeItemResponse(false, request.getSlot(), before.item(),
-                        "INCOMPATIBLE", localItemStore.getLastModifiedTimestamp(scope), before.version(), null,
-                        request.getRequestId(), scope));
-            }
-            LocalItemStore.TakeResult result = localItemStore.takeItem(
-                    scope, request.getSlot(), request.getExpectedItemId(),
-                    request.getExpectedVersion(), request.getRequestCount());
-            debugTake("storeResult", "local", request.getSlot(), request.getExpectedItemId(),
-                    request.getRequestCount(), request.getRequestId(), null, before, result);
-
-            if (result.isSuccess()) {
-                operationLogger.log(scope, request.getRequestId(), OperationType.TAKE,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", request.getExpectedItemId(), request.getRequestCount(),
-                        true, null);
-
-                long timestamp = localItemStore.getLastModifiedTimestamp(scope);
-                LocalItemStore.ItemRecord updated = localItemStore.getItem(scope, request.getSlot());
-
-                return rememberTake(request, new TakeItemResponse(true, request.getSlot(),
-                        updated != null ? updated.item() : null,
-                        null, timestamp,
-                        updated != null ? updated.version() : result.getNewVersion(),
-                        result.getItem(), request.getRequestId(), scope));
-            } else {
-                operationLogger.log(scope, request.getRequestId(), OperationType.TAKE,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", request.getExpectedItemId(), request.getRequestCount(),
-                        false, result.getFailReason());
-
-                LocalItemStore.ItemRecord r = localItemStore.getItem(scope, request.getSlot());
-                return rememberTake(request, new TakeItemResponse(false, request.getSlot(),
-                        r != null ? r.item() : null,
-                        result.getFailReason(), localItemStore.getLastModifiedTimestamp(scope),
-                        r != null ? r.version() : 0,
-                        null, request.getRequestId(), scope));
-            }
-        } catch (Exception e) {
-            debugTake("exception", "local", request.getSlot(), request.getExpectedItemId(),
-                    request.getRequestCount(), request.getRequestId(), null, null, null, e);
-            operationLogger.log(scope, request.getRequestId(), OperationType.TAKE,
-                    request.getPlayerUuid(), request.getPlayerName(),
-                    "local", request.getExpectedItemId(), request.getRequestCount(),
-                    false, e.getMessage());
-            return rememberTake(request, new TakeItemResponse(false, request.getSlot(), null,
-                    "INTERNAL_ERROR", 0, 0, null, request.getRequestId(), scope));
+        if (before == null || before.item() == null || before.item().isEmpty()) {
+            return loggedFailure(scope, request, "ITEM_NOT_FOUND", before);
         }
-    }
-
-    public SwapItemResponse handleRemoteSwap(SwapItemRequest request) {
-        return handleRemoteSwap(request, runtimeHooks.localServerName());
-    }
-
-    public SwapItemResponse handleRemoteSwap(SwapItemRequest request, String peerId) {
-        AccessResolution resolution = resolveAccess(request.getAccess(), peerId);
-        if (!resolution.success()) {
-            return rememberSwap(request, new SwapItemResponse(false, request.getSlot(), null, null, 0,
-                    resolution.failReason(), request.getRequestId(), resolution.scope()));
+        if (before.item().isIncompatible()) {
+            return loggedFailure(scope, request, "INCOMPATIBLE", before);
         }
-        InventoryScope scope = resolution.scope();
-        request.setAccess(resolution.access());
-        if (!isValidSlot(request.getSlot())) {
-            return rememberSwap(request, new SwapItemResponse(false, request.getSlot(), null, null, 0,
-                    "INVALID_SLOT", request.getRequestId(), scope));
-        }
-        ReentrantLock slotLock = localSlotLock(scope, request.getSlot());
-        slotLock.lock();
-        try {
-            return handleRemoteSwapLocked(scope, request);
-        } finally {
-            slotLock.unlock();
-        }
+        LocalItemStore.SwapResult stored = localItemStore.swapItem(scope, request.getSlot(), offered,
+                request.getExpectedItemId(), request.getExpectedVersion(), request.getCount(),
+                request.isBoundedMerge(), request.getPlayerUuid());
+        LocalItemStore.ItemRecord current = localItemStore.getItem(scope, request.getSlot());
+        operationLogger.log(scope, request.getTransactionId(), OperationType.SWAP,
+                request.getPlayerUuid(), request.getPlayerName(), "local",
+                offered.getItemId(), offered.getCount(), stored.isSuccess(), stored.getFailReason());
+        return mutationResult(request, stored.isSuccess(), current != null ? current.item() : null,
+                stored.isSuccess() ? stored.getTakenItem() : null, stored.getFailReason(),
+                localItemStore.getLastModifiedTimestamp(scope),
+                current != null ? current.version() : Math.max(0, stored.getNewVersion()), scope);
     }
 
-    private SwapItemResponse handleRemoteSwapLocked(InventoryScope scope, SwapItemRequest request) {
-        cleanupRecentOpsIfDue();
-        SwapItemResponse cached = recentSwap(scope, request);
-        if (cached != null) return cached;
-
-        try {
-            NeutralItem newItem = request.getNewItem();
-            LocalItemStore.ItemRecord before = localItemStore.getItem(scope, request.getSlot());
-            debugSwap("incoming", "local", request.getSlot(), newItem,
-                    request.getRequestId(), null, before, null);
-            compatibilityChecker.checkAndMark(newItem);
-            if (newItem == null || newItem.isEmpty() || newItem.isIncompatible()) {
-                operationLogger.log(scope, request.getRequestId(), OperationType.SWAP,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", newItem != null ? newItem.getItemId() : null,
-                        newItem != null ? newItem.getCount() : 0,
-                        false, "INCOMPATIBLE");
-                return rememberSwap(request, new SwapItemResponse(false, request.getSlot(),
-                        before != null ? before.item() : null,
-                        null,
-                        before != null ? before.version() : 0,
-                        "INCOMPATIBLE", request.getRequestId(), scope));
-            }
-            if (before == null || before.item() == null || before.item().isEmpty()) {
-                operationLogger.log(scope, request.getRequestId(), OperationType.SWAP,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", newItem.getItemId(), newItem.getCount(),
-                        false, "ITEM_NOT_FOUND");
-                return rememberSwap(request, new SwapItemResponse(false, request.getSlot(), null, null, 0,
-                        "ITEM_NOT_FOUND", request.getRequestId(), scope));
-            }
-            if (before.item().isIncompatible()) {
-                debugSwap("rejectIncompatible", "local", request.getSlot(), newItem,
-                        request.getRequestId(), null, before, null);
-                operationLogger.log(scope, request.getRequestId(), OperationType.SWAP,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", newItem.getItemId(), newItem.getCount(),
-                        false, "INCOMPATIBLE");
-                return rememberSwap(request, new SwapItemResponse(false, request.getSlot(), before.item(), null,
-                        before.version(), "INCOMPATIBLE", request.getRequestId(), scope));
-            }
-
-            LocalItemStore.SwapResult result = localItemStore.swapItem(scope, request.getSlot(), newItem,
-                    request.getExpectedItemId(), request.getExpectedVersion(),
-                    request.getTakeCount(), request.isBoundedMerge(), request.getPlayerUuid());
-            LocalItemStore.ItemRecord after = localItemStore.getItem(scope, request.getSlot());
-            debugSwap("storeResult", "local", request.getSlot(), newItem,
-                    request.getRequestId(), null, after, result);
-
-            if (result.isSuccess()) {
-                operationLogger.log(scope, request.getRequestId(), OperationType.SWAP,
-                        request.getPlayerUuid(), request.getPlayerName(),
-                        "local", newItem.getItemId(), newItem.getCount(),
-                        true, null);
-                return rememberSwap(request, new SwapItemResponse(true, request.getSlot(),
-                        after != null ? after.item() : newItem,
-                        result.getTakenItem(),
-                        after != null ? after.version() : result.getNewVersion(),
-                        null, request.getRequestId(), scope));
-            }
-
-            operationLogger.log(scope, request.getRequestId(), OperationType.SWAP,
-                    request.getPlayerUuid(), request.getPlayerName(),
-                    "local", newItem.getItemId(), newItem.getCount(),
-                    false, result.getFailReason());
-            LocalItemStore.ItemRecord current = localItemStore.getItem(scope, request.getSlot());
-            return rememberSwap(request, new SwapItemResponse(false, request.getSlot(),
-                    current != null ? current.item() : null,
-                    null,
-                    current != null ? current.version() : 0,
-                    result.getFailReason(), request.getRequestId(), scope));
-        } catch (Exception e) {
-            debugSwap("exception", "local", request.getSlot(), request.getNewItem(),
-                    request.getRequestId(), null, null, null, e);
-            operationLogger.log(scope, request.getRequestId(), OperationType.SWAP,
-                    request.getPlayerUuid(), request.getPlayerName(),
-                    "local",
-                    request.getNewItem() != null ? request.getNewItem().getItemId() : null,
-                    request.getNewItem() != null ? request.getNewItem().getCount() : 0,
-                    false, e.getMessage());
-            return rememberSwap(request, new SwapItemResponse(false, request.getSlot(), null, null, 0,
-                    "INTERNAL_ERROR", request.getRequestId(), scope));
-        }
+    private MutationResultMessage loggedFailure(InventoryScope scope, MutationExecute request,
+                                                String reason, LocalItemStore.ItemRecord current) {
+        NeutralItem offered = request.getOfferedItem();
+        operationLogger.log(scope, request.getTransactionId(), operationType(request.getKind()),
+                request.getPlayerUuid(), request.getPlayerName(), "local",
+                offered != null ? offered.getItemId() : request.getExpectedItemId(),
+                offered != null ? offered.getCount() : request.getCount(), false, reason);
+        return mutationResult(request, false, current != null ? current.item() : null, null, reason,
+                localItemStore.getLastModifiedTimestamp(scope),
+                current != null ? current.version() : 0, scope);
     }
 
-    private PutItemResponse recentPut(InventoryScope scope, PutItemRequest request) {
-        CompletedOp op = recentOps.get(ScopedRequestKey.of(scope, request.getRequestId()));
-        if (op == null) return null;
-        return new PutItemResponse(op.success(), request.getSlot(), op.currentItem(),
-                op.failReason(), op.completedAt(), op.newVersion(), request.getRequestId(),
-                op.scope() != null ? op.scope() : scope);
+    private MutationResultMessage mutationResult(MutationExecute request, boolean success,
+                                                 NeutralItem currentItem, NeutralItem transferredItem,
+                                                 String failReason, long timestamp, int version,
+                                                 InventoryScope scope) {
+        MutationResultMessage result = new MutationResultMessage(request.getTransactionId(),
+                request.getIntentHash(), null, request.getKind(), success, request.getSlot(),
+                currentItem, transferredItem, failReason, timestamp, version, scope);
+        result.setResultHash(MutationHashes.result(result));
+        return result;
     }
 
-    private TakeItemResponse recentTake(InventoryScope scope, TakeItemRequest request) {
-        CompletedOp op = recentOps.get(ScopedRequestKey.of(scope, request.getRequestId()));
-        if (op == null) return null;
-        return new TakeItemResponse(op.success(), request.getSlot(), op.currentItem(),
-                op.failReason(), op.completedAt(), op.newVersion(), op.takenItem(),
-                request.getRequestId(), op.scope() != null ? op.scope() : scope);
-    }
-
-    private SwapItemResponse recentSwap(InventoryScope scope, SwapItemRequest request) {
-        CompletedOp op = recentOps.get(ScopedRequestKey.of(scope, request.getRequestId()));
-        if (op == null) return null;
-        return new SwapItemResponse(op.success(), request.getSlot(), op.currentItem(),
-                op.takenItem(), op.newVersion(), op.failReason(), request.getRequestId(),
-                op.scope() != null ? op.scope() : scope);
-    }
-
-    private PutItemResponse rememberPut(PutItemRequest request, PutItemResponse response) {
-        remember(request.getRequestId(), response.isSuccess(), response.getFailReason(),
-                response.getCurrentItem(), null, response.getNewVersion(), response.getScope());
-        return response;
-    }
-
-    private TakeItemResponse rememberTake(TakeItemRequest request, TakeItemResponse response) {
-        remember(request.getRequestId(), response.isSuccess(), response.getFailReason(),
-                response.getCurrentItem(), response.getItemsToGive(), response.getNewVersion(), response.getScope());
-        return response;
-    }
-
-    private SwapItemResponse rememberSwap(SwapItemRequest request, SwapItemResponse response) {
-        remember(request.getRequestId(), response.isSuccess(), response.getFailReason(),
-                response.getCurrentItem(), response.getTakenItem(), response.getNewVersion(), response.getScope());
-        return response;
+    private OperationType operationType(MutationKind kind) {
+        return switch (kind) {
+            case PUT -> OperationType.PUT;
+            case TAKE -> OperationType.TAKE;
+            case SWAP -> OperationType.SWAP;
+        };
     }
 
     private boolean isLocalTarget(String serverName) {
@@ -829,18 +615,18 @@ public class ExchangeService {
         return access != null ? access : InventoryAccess.server();
     }
 
-    private boolean supportsRequestedAccess(Connection conn, InventoryAccess access) {
-        return access == null || !access.isPlayer() || conn.supportsInventoryAccess();
-    }
-
-    private String unsupportedPlayerInventoryMessage() {
-        return "目标服务器版本不支持玩家仓库，请升级 TheExchange";
+    private boolean playerInventoryDisabled(InventoryAccess access) {
+        return access != null && access.isPlayer() && !runtimeHooks.playerInventoriesEnabled();
     }
 
     public PlayerInventoryAccessResponse handlePlayerInventoryAccess(
             PlayerInventoryAccessRequest request, String peerId) {
         if (request == null) {
             return PlayerInventoryAccessResponse.fail(null, "玩家仓库访问请求为空", 0);
+        }
+        if (!runtimeHooks.playerInventoriesEnabled()) {
+            return PlayerInventoryAccessResponse.fail(
+                    request.getRequestId(), PLAYER_INVENTORIES_DISABLED, 0);
         }
         if (playerInventorySessionManager == null) {
             return PlayerInventoryAccessResponse.fail(request.getRequestId(), "玩家仓库认证未初始化", 0);
@@ -882,6 +668,9 @@ public class ExchangeService {
         InventoryAccess access = normalizeAccess(requestedAccess);
         if (access.isServer()) {
             return AccessResolution.success(InventoryScope.server(), InventoryAccess.server());
+        }
+        if (!runtimeHooks.playerInventoriesEnabled()) {
+            return AccessResolution.fail(null, access, PLAYER_INVENTORIES_DISABLED);
         }
         if (playerInventorySessionManager == null) {
             return AccessResolution.fail(null, access, "玩家仓库认证未初始化");
@@ -967,166 +756,24 @@ public class ExchangeService {
         redrawOpenViews(serverName, scope);
     }
 
-    private void remember(String requestId, boolean success, String failReason,
-                          NeutralItem currentItem, NeutralItem takenItem, int newVersion,
-                          InventoryScope scope) {
-        if (requestId == null || requestId.isBlank()) return;
-        InventoryScope resolvedScope = scope != null ? scope : InventoryScope.server();
-        recentOps.put(ScopedRequestKey.of(resolvedScope, requestId),
-                new CompletedOp(System.currentTimeMillis(), success, failReason,
-                        currentItem, takenItem, newVersion, resolvedScope));
-    }
-
-    private void cleanupRecentOpsIfDue() {
-        long now = System.currentTimeMillis();
-        if (now - lastRecentOpCleanup < RECENT_OP_CLEANUP_INTERVAL_MS) return;
-        lastRecentOpCleanup = now;
-        recentOps.entrySet().removeIf(entry -> now - entry.getValue().completedAt() > RECENT_OP_TTL_MS);
-    }
-
-    private void debugTake(String stage, String serverName, int slot, String expectedItemId,
-                           int requestCount, String requestId, TakeItemResponse response,
-                           LocalItemStore.ItemRecord existing, LocalItemStore.TakeResult result) {
-        debugTake(stage, serverName, slot, expectedItemId, requestCount, requestId, response, existing, result, null);
-    }
-
-    private void debugTake(String stage, String serverName, int slot, String expectedItemId,
-                           int requestCount, String requestId, TakeItemResponse response,
-                           LocalItemStore.ItemRecord existing, LocalItemStore.TakeResult result,
-                           Throwable error) {
-        ExchangeAPI.Logger logger = runtimeHooks.logger();
-        if (logger == null) {
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("[Exchange|Debug][TAKE][").append(stage).append("] ")
-                .append("server=").append(serverName)
-                .append(" slot=").append(slot)
-                .append(" expectedItem=").append(expectedItemId)
-                .append(" count=").append(requestCount)
-                .append(" reqId=").append(requestId);
-        if (existing != null) {
-            sb.append(" existing=").append(describeRecord(existing));
-        }
-        if (response != null) {
-            sb.append(" responseSuccess=").append(response.isSuccess())
-                    .append(" failReason=").append(response.getFailReason())
-                    .append(" current=").append(describeItem(response.getCurrentItem()))
-                    .append(" give=").append(describeItem(response.getItemsToGive()))
-                    .append(" newVersion=").append(response.getNewVersion());
-        }
-        if (result != null) {
-            sb.append(" resultSuccess=").append(result.isSuccess())
-                    .append(" failReason=").append(result.getFailReason())
-                    .append(" taken=").append(describeItem(result.getItem()))
-                    .append(" newVersion=").append(result.getNewVersion());
-        }
-        if (error != null) {
-            sb.append(" error=").append(error.getClass().getSimpleName())
-                    .append(": ").append(error.getMessage());
-        }
-        logger.info(sb.toString());
-    }
-
-    private void debugSwap(String stage, String serverName, int slot, NeutralItem newItem,
-                           String requestId, SwapItemResponse response,
-                           LocalItemStore.ItemRecord existing, LocalItemStore.SwapResult result) {
-        debugSwap(stage, serverName, slot, newItem, requestId, response, existing, result, null);
-    }
-
-    private void debugSwap(String stage, String serverName, int slot, NeutralItem newItem,
-                           String requestId, SwapItemResponse response,
-                           LocalItemStore.ItemRecord existing, LocalItemStore.SwapResult result,
-                           Throwable error) {
-        ExchangeAPI.Logger logger = runtimeHooks.logger();
-        if (logger == null) {
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("[Exchange|Debug][SWAP][").append(stage).append("] ")
-                .append("server=").append(serverName)
-                .append(" slot=").append(slot)
-                .append(" reqId=").append(requestId)
-                .append(" newItem=").append(describeItem(newItem));
-        if (existing != null) {
-            sb.append(" existing=").append(describeRecord(existing));
-        }
-        if (response != null) {
-            sb.append(" responseSuccess=").append(response.isSuccess())
-                    .append(" failReason=").append(response.getFailReason())
-                    .append(" current=").append(describeItem(response.getCurrentItem()))
-                    .append(" taken=").append(describeItem(response.getTakenItem()))
-                    .append(" newVersion=").append(response.getNewVersion());
-        }
-        if (result != null) {
-            sb.append(" resultSuccess=").append(result.isSuccess())
-                    .append(" failReason=").append(result.getFailReason())
-                    .append(" taken=").append(describeItem(result.getTakenItem()))
-                    .append(" newVersion=").append(result.getNewVersion());
-        }
-        if (error != null) {
-            sb.append(" error=").append(error.getClass().getSimpleName())
-                    .append(": ").append(error.getMessage());
-        }
-        logger.info(sb.toString());
-    }
-
-    private void debugPut(String stage, PutItemRequest request, NeutralItem item,
-                          LocalItemStore.ItemRecord existing,
-                          LocalItemStore.PutResult result, Throwable error) {
-        ExchangeAPI.Logger logger = runtimeHooks.logger();
-        if (logger == null) {
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("[Exchange|Debug][PUT][").append(stage).append("] ")
-                .append("slot=").append(request.getSlot())
-                .append(" expectedVersion=").append(request.getExpectedVersion())
-                .append(" reqId=").append(request.getRequestId())
-                .append(" player=").append(request.getPlayerName())
-                .append(" item=").append(describeItem(item));
-        if (existing != null) {
-            sb.append(" existing=").append(describeRecord(existing));
-            sb.append(" sameKind=").append(existing.item() != null && item != null
-                    && existing.item().sameStackKind(item));
-        }
-        if (result != null) {
-            sb.append(" resultSuccess=").append(result.isSuccess())
-                    .append(" failReason=").append(result.getFailReason())
-                    .append(" newVersion=").append(result.getNewVersion());
-        }
-        if (error != null) {
-            sb.append(" error=").append(error.getClass().getSimpleName())
-                    .append(": ").append(error.getMessage());
-        }
-        logger.info(sb.toString());
-    }
-
-    private String describeRecord(LocalItemStore.ItemRecord record) {
-        if (record == null) return "null";
-        return "slot=" + record.slot()
-                + ",version=" + record.version()
-                + ",item=" + describeItem(record.item());
-    }
-
-    private String describeItem(NeutralItem item) {
-        if (item == null) return "null";
-        byte[] extra = item.getExtraData();
-        return "{id=" + item.getItemId()
-                + ",count=" + item.getCount()
-                + ",incompatible=" + item.isIncompatible()
-                + ",extraLen=" + (extra == null ? -1 : extra.length)
-                + ",extraHash=" + java.util.Arrays.hashCode(extra)
-                + ",source=" + item.getSourceVersion()
-                + ",version=" + item.getVersion()
-                + "}";
-    }
 
     // ========== Message routing ==========
 
     public void routeMessage(org.edtp.theexchange.network.Connection conn,
                               FrameType type, Object message) {
         String peerId = sourceServerName(conn);
+        if (type != null && type.isMutationLifecycle()) {
+            transactionCoordinator.route(conn, type, message, (sourcePeer, request) ->
+                    executeMutationAsync(sourcePeer, request).thenApply(result -> {
+                        if (result.isSuccess()) {
+                            broadcastInventoryUpdate(conn, result.getScope(), List.of(result.getSlot()),
+                                    result.getNewTimestamp());
+                            refreshOpenViews(sourcePeer, result.getScope());
+                        }
+                        return result;
+                    }));
+            return;
+        }
         switch (type) {
             case QUERY_TIMESTAMP, QUERY_ITEMS -> {}
             case PLAYER_INVENTORY_ACCESS -> conn.send(
@@ -1226,33 +873,6 @@ public class ExchangeService {
                 }
                 conn.send(FrameType.SLOTS_STATE_RESPONSE, new SlotsStateResponse(req.getRequestId(), slots, access.scope()));
             }
-            case PUT_ITEM -> {
-                PutItemResponse resp = handleRemotePut((PutItemRequest) message, peerId);
-                conn.send(FrameType.PUT_ITEM_RESPONSE, resp);
-                if (resp.isSuccess()) {
-                    broadcastInventoryUpdate(conn, resp.getScope(), List.of(((PutItemRequest) message).getSlot()),
-                            localItemStore.getLastModifiedTimestamp(resp.getScope()));
-                    refreshOpenViews(sourceServerName(conn), resp.getScope());
-                }
-            }
-            case TAKE_ITEM -> {
-                TakeItemResponse resp = handleRemoteTake((TakeItemRequest) message, peerId);
-                conn.send(FrameType.TAKE_ITEM_RESPONSE, resp);
-                if (resp.isSuccess()) {
-                    broadcastInventoryUpdate(conn, resp.getScope(), List.of(((TakeItemRequest) message).getSlot()),
-                            localItemStore.getLastModifiedTimestamp(resp.getScope()));
-                    refreshOpenViews(sourceServerName(conn), resp.getScope());
-                }
-            }
-            case SWAP_ITEM -> {
-                SwapItemResponse resp = handleRemoteSwap((SwapItemRequest) message, peerId);
-                conn.send(FrameType.SWAP_ITEM_RESPONSE, resp);
-                if (resp.isSuccess()) {
-                    broadcastInventoryUpdate(conn, resp.getScope(), List.of(((SwapItemRequest) message).getSlot()),
-                            localItemStore.getLastModifiedTimestamp(resp.getScope()));
-                    refreshOpenViews(sourceServerName(conn), resp.getScope());
-                }
-            }
             case PUSH_UPDATE -> {
                 PushUpdate update = (PushUpdate) message;
                 if (update == null) return;
@@ -1285,10 +905,34 @@ public class ExchangeService {
         return conn.getPeerServerName() != null ? conn.getPeerServerName() : conn.getRemoteName();
     }
 
-    private ReentrantLock localSlotLock(InventoryScope scope, int slot) {
-        return localSlotLocks.computeIfAbsent(
-                new ScopeSlotKey(scope != null ? scope : InventoryScope.server(), slot),
-                ignored -> new ReentrantLock());
+    private LocalSlotLockHandle acquireLocalSlotLock(InventoryScope scope, int slot) {
+        ScopeSlotKey key = new ScopeSlotKey(scope != null ? scope : InventoryScope.server(), slot);
+        LocalSlotLock slotLock = localSlotLocks.compute(key, (ignored, current) -> {
+            LocalSlotLock retained = current != null ? current : new LocalSlotLock();
+            retained.users++;
+            return retained;
+        });
+        slotLock.lock.lock();
+        return new LocalSlotLockHandle(key, slotLock);
+    }
+
+    private void releaseLocalSlotLock(LocalSlotLockHandle handle) {
+        handle.slotLock().lock.unlock();
+        localSlotLocks.compute(handle.key(), (ignored, current) -> {
+            if (current != handle.slotLock()) {
+                throw new IllegalStateException("Local slot lock lifecycle mismatch");
+            }
+            current.users--;
+            return current.users == 0 ? null : current;
+        });
+    }
+
+    private static final class LocalSlotLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private int users;
+    }
+
+    private record LocalSlotLockHandle(ScopeSlotKey key, LocalSlotLock slotLock) {
     }
 
     private java.util.List<Integer> localSlotVersions(InventoryScope scope) {
@@ -1312,7 +956,8 @@ public class ExchangeService {
         if (scope == null || scope.isServer()) {
             return true;
         }
-        return playerInventorySessionManager != null
+        return runtimeHooks.playerInventoriesEnabled()
+                && playerInventorySessionManager != null
                 && playerInventorySessionManager.hasActiveSession(peerId, scope);
     }
 
@@ -1333,24 +978,35 @@ public class ExchangeService {
         private final boolean success;
         private final String failReason;
         private final NeutralItem currentItem;
+        private final Runnable settlement;
 
-        private PutResult(boolean success, String failReason, NeutralItem currentItem) {
+        private PutResult(boolean success, String failReason, NeutralItem currentItem, Runnable settlement) {
             this.success = success;
             this.failReason = failReason;
             this.currentItem = currentItem;
+            this.settlement = settlement != null ? settlement : () -> {};
         }
 
         public static PutResult success(NeutralItem currentItem) {
-            return new PutResult(true, null, currentItem);
+            return success(currentItem, () -> {});
+        }
+
+        public static PutResult success(NeutralItem currentItem, Runnable settlement) {
+            return new PutResult(true, null, currentItem, settlement);
         }
 
         public static PutResult fail(String reason) {
-            return new PutResult(false, reason, null);
+            return fail(reason, () -> {});
+        }
+
+        public static PutResult fail(String reason, Runnable settlement) {
+            return new PutResult(false, reason, null, settlement);
         }
 
         public boolean isSuccess() { return success; }
         public String getFailReason() { return failReason; }
         public NeutralItem getCurrentItem() { return currentItem; }
+        public void acknowledgeSettlement() { settlement.run(); }
     }
 
     public static class TakeResult {
@@ -1358,26 +1014,38 @@ public class ExchangeService {
         private final String failReason;
         private final NeutralItem itemsToGive;
         private final int newVersion;
+        private final Runnable settlement;
 
-        private TakeResult(boolean success, String failReason, NeutralItem itemsToGive, int newVersion) {
+        private TakeResult(boolean success, String failReason, NeutralItem itemsToGive, int newVersion,
+                           Runnable settlement) {
             this.success = success;
             this.failReason = failReason;
             this.itemsToGive = itemsToGive;
             this.newVersion = newVersion;
+            this.settlement = settlement != null ? settlement : () -> {};
         }
 
         public static TakeResult success(NeutralItem itemsToGive, int newVersion) {
-            return new TakeResult(true, null, itemsToGive, newVersion);
+            return success(itemsToGive, newVersion, () -> {});
+        }
+
+        public static TakeResult success(NeutralItem itemsToGive, int newVersion, Runnable settlement) {
+            return new TakeResult(true, null, itemsToGive, newVersion, settlement);
         }
 
         public static TakeResult fail(String reason) {
-            return new TakeResult(false, reason, null, -1);
+            return fail(reason, () -> {});
+        }
+
+        public static TakeResult fail(String reason, Runnable settlement) {
+            return new TakeResult(false, reason, null, -1, settlement);
         }
 
         public boolean isSuccess() { return success; }
         public String getFailReason() { return failReason; }
         public NeutralItem getItemsToGive() { return itemsToGive; }
         public int getNewVersion() { return newVersion; }
+        public void acknowledgeSettlement() { settlement.run(); }
     }
 
     public static class SwapResult {
@@ -1385,25 +1053,37 @@ public class ExchangeService {
         private final String failReason;
         private final NeutralItem takenItem;
         private final int newVersion;
+        private final Runnable settlement;
 
-        private SwapResult(boolean success, String failReason, NeutralItem takenItem, int newVersion) {
+        private SwapResult(boolean success, String failReason, NeutralItem takenItem, int newVersion,
+                           Runnable settlement) {
             this.success = success;
             this.failReason = failReason;
             this.takenItem = takenItem;
             this.newVersion = newVersion;
+            this.settlement = settlement != null ? settlement : () -> {};
         }
 
         public static SwapResult success(NeutralItem takenItem, int newVersion) {
-            return new SwapResult(true, null, takenItem, newVersion);
+            return success(takenItem, newVersion, () -> {});
+        }
+
+        public static SwapResult success(NeutralItem takenItem, int newVersion, Runnable settlement) {
+            return new SwapResult(true, null, takenItem, newVersion, settlement);
         }
 
         public static SwapResult fail(String reason) {
-            return new SwapResult(false, reason, null, -1);
+            return fail(reason, () -> {});
+        }
+
+        public static SwapResult fail(String reason, Runnable settlement) {
+            return new SwapResult(false, reason, null, -1, settlement);
         }
 
         public boolean isSuccess() { return success; }
         public String getFailReason() { return failReason; }
         public NeutralItem getTakenItem() { return takenItem; }
         public int getNewVersion() { return newVersion; }
+        public void acknowledgeSettlement() { settlement.run(); }
     }
 }

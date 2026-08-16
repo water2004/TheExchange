@@ -8,6 +8,7 @@ import org.edtp.theexchange.api.ExchangeAPI;
 import org.edtp.theexchange.storage.RemoteCacheStore;
 
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +26,7 @@ public class CacheManager {
     private final int capacity;
     private final ReentrantLock lock = new ReentrantLock();
     private final LinkedHashMap<RemoteScopeKey, CachedInventory> caches = new LinkedHashMap<>(16, 0.75f, true);
+    private final IdentityHashMap<CachedInventory, Integer> activeUpdates = new IdentityHashMap<>();
     private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "exchange-remote-cache-writer");
         thread.setDaemon(true);
@@ -97,25 +99,12 @@ public class CacheManager {
 
     public void updateCacheSlot(String serverName, InventoryScope scope, int slot, NeutralItem item, int version) {
         RemoteScopeKey key = RemoteScopeKey.of(serverName, scope);
-        CachedInventory cache = getOrLoad(key);
-        if (cache == null) {
-            List<Map.Entry<RemoteScopeKey, CachedInventory>> evicted = List.of();
-            lock.lock();
-            try {
-                cache = caches.get(key);
-                if (cache == null) {
-                    cache = new CachedInventory(key.scope());
-                    caches.put(key, cache);
-                    evicted = evictIfNeededLocked();
-                }
-            } finally {
-                lock.unlock();
-            }
-            for (Map.Entry<RemoteScopeKey, CachedInventory> entry : evicted) {
-                flush(entry.getKey(), entry.getValue());
-            }
+        CachedInventory cache = acquireUpdateCache(key);
+        try {
+            cache.replaceSlot(slot, item, version);
+        } finally {
+            releaseUpdateCache(cache);
         }
-        cache.replaceSlot(slot, item, version);
     }
 
     public void flushAll() {
@@ -155,9 +144,8 @@ public class CacheManager {
         if (snapshots == null) {
             return null;
         }
-        CachedInventory loaded = new CachedInventory(key.scope());
+        CachedInventory loaded = new CachedInventory();
         loaded.markLoaded(convertSnapshots(snapshots), System.currentTimeMillis());
-        List<Map.Entry<RemoteScopeKey, CachedInventory>> evicted;
         lock.lock();
         try {
             CachedInventory existing = caches.get(key);
@@ -165,14 +153,61 @@ public class CacheManager {
                 return existing;
             }
             caches.put(key, loaded);
-            evicted = evictIfNeededLocked();
+            evictIfNeededLocked();
         } finally {
             lock.unlock();
         }
-        for (Map.Entry<RemoteScopeKey, CachedInventory> entry : evicted) {
-            flush(entry.getKey(), entry.getValue());
-        }
         return loaded;
+    }
+
+    private CachedInventory acquireUpdateCache(RemoteScopeKey key) {
+        while (true) {
+            lock.lock();
+            try {
+                CachedInventory cache = caches.get(key);
+                if (cache != null) {
+                    activeUpdates.merge(cache, 1, Integer::sum);
+                    return cache;
+                }
+            } finally {
+                lock.unlock();
+            }
+
+            CachedInventory loaded = getOrLoad(key);
+            if (loaded == null) {
+                lock.lock();
+                try {
+                    CachedInventory cache = caches.get(key);
+                    if (cache == null) {
+                        cache = new CachedInventory();
+                        caches.put(key, cache);
+                    }
+                    activeUpdates.merge(cache, 1, Integer::sum);
+                    evictIfNeededLocked();
+                    return cache;
+                } finally {
+                    lock.unlock();
+                }
+            }
+        }
+    }
+
+    private void releaseUpdateCache(CachedInventory cache) {
+        lock.lock();
+        try {
+            Integer users = activeUpdates.get(cache);
+            if (users == null || users <= 0) {
+                throw new IllegalStateException("Remote cache update lifecycle mismatch");
+            }
+            if (users == 1) {
+                activeUpdates.remove(cache);
+            } else {
+                activeUpdates.put(cache, users - 1);
+            }
+            evictIfNeededLocked();
+        } finally {
+            lock.unlock();
+        }
     }
 
     private CachedInventory getCached(RemoteScopeKey key) {
@@ -283,16 +318,21 @@ public class CacheManager {
         return converted;
     }
 
-    private List<Map.Entry<RemoteScopeKey, CachedInventory>> evictIfNeededLocked() {
-        List<Map.Entry<RemoteScopeKey, CachedInventory>> evicted = new ArrayList<>();
+    private void evictIfNeededLocked() {
         while (caches.size() > capacity) {
             RemoteScopeKey eldest = caches.keySet().iterator().next();
-            CachedInventory removed = caches.remove(eldest);
-            if (removed != null) {
-                evicted.add(Map.entry(eldest, removed));
+            CachedInventory cache = caches.get(eldest);
+            if (cache == null) {
+                caches.remove(eldest);
+                continue;
             }
+            if (activeUpdates.containsKey(cache)) {
+                return;
+            }
+            // Do not expose a cache miss for this key until its last snapshot is durable.
+            flush(eldest, cache);
+            caches.remove(eldest, cache);
         }
-        return evicted;
     }
 
     private record RemoteScopeKey(String serverName, InventoryScope scope) {

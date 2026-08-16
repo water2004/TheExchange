@@ -6,6 +6,7 @@ import org.edtp.theexchange.model.InventoryScope;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
@@ -16,8 +17,11 @@ import java.util.function.LongSupplier;
  * databases, logs, or remote inventory caches.
  */
 public final class PlayerInventoryClientSessionStore {
+    private static final long CLEANUP_INTERVAL_MILLIS = 60_000L;
+
     private final ConcurrentHashMap<SessionKey, InventoryAccess> sessions = new ConcurrentHashMap<>();
     private final LongSupplier clock;
+    private final AtomicLong lastCleanupAt = new AtomicLong();
 
     public PlayerInventoryClientSessionStore() {
         this(System::currentTimeMillis);
@@ -29,7 +33,9 @@ public final class PlayerInventoryClientSessionStore {
 
     public InventoryAccess remember(String serverName, InventoryAccess access) {
         requireSession(access);
-        if (access.isLocallyExpired(clock.getAsLong())) {
+        long now = clock.getAsLong();
+        cleanupExpiredIfDue(now);
+        if (access.isLocallyExpired(now)) {
             throw new IllegalArgumentException("玩家仓库访问令牌已过期");
         }
         sessions.put(SessionKey.of(serverName, access.ownerName(), access.requesterUuid()), access);
@@ -37,6 +43,7 @@ public final class PlayerInventoryClientSessionStore {
     }
 
     public Optional<InventoryAccess> findValid(String serverName, String ownerName, String requesterUuid) {
+        cleanupExpiredIfDue(clock.getAsLong());
         SessionKey key = SessionKey.of(serverName, ownerName, requesterUuid);
         InventoryAccess access = sessions.get(key);
         if (access == null) {
@@ -91,6 +98,18 @@ public final class PlayerInventoryClientSessionStore {
 
     public void clear() {
         sessions.clear();
+        lastCleanupAt.set(0L);
+    }
+
+    private void cleanupExpiredIfDue(long now) {
+        long previous = lastCleanupAt.get();
+        if (previous != 0L && now >= previous
+                && now < saturatedAdd(previous, CLEANUP_INTERVAL_MILLIS)) {
+            return;
+        }
+        if (lastCleanupAt.compareAndSet(previous, now)) {
+            sessions.entrySet().removeIf(entry -> entry.getValue().isLocallyExpired(now));
+        }
     }
 
     private static void requireSession(InventoryAccess access) {

@@ -41,6 +41,8 @@ public final class ExchangeConfigManager {
             "container",
             "container.rows",
             "container.title_template",
+            "player_inventory",
+            "player_inventory.enabled",
             "remoteServers"
     );
     private static final List<String> WRITABLE_PATHS = List.of(
@@ -60,7 +62,8 @@ public final class ExchangeConfigManager {
             "logging.retention_days",
             "logging.cleanup_interval_hours",
             "container.rows",
-            "container.title_template"
+            "container.title_template",
+            "player_inventory.enabled"
     );
 
     private final ExchangeAPI.ConfigLoader loader;
@@ -153,6 +156,7 @@ public final class ExchangeConfigManager {
                 new ExchangeAPI.PerformanceConfig(data.performance.coreThreads),
                 new ExchangeAPI.LoggingConfig(data.logging.retentionDays, data.logging.cleanupIntervalHours),
                 new ExchangeAPI.ContainerConfig(data.container.rows, data.container.titleTemplate),
+                new ExchangeAPI.PlayerInventoryConfig(data.playerInventory.enabled),
                 remoteConfigs(data.remoteServers));
     }
 
@@ -173,6 +177,8 @@ public final class ExchangeConfigManager {
         if (data.performance == null) throw new IllegalArgumentException("Missing config section: performance");
         if (data.logging == null) throw new IllegalArgumentException("Missing config section: logging");
         if (data.container == null) throw new IllegalArgumentException("Missing config section: container");
+        if (data.playerInventory == null) data.playerInventory = new PlayerInventoryData();
+        if (data.playerInventory.enabled == null) data.playerInventory.enabled = Boolean.TRUE;
         if (data.remoteServers == null) throw new IllegalArgumentException("Missing config section: remoteServers");
         return data;
     }
@@ -299,6 +305,7 @@ public final class ExchangeConfigManager {
             case "logging.cleanup_interval_hours" -> data.logging.cleanupIntervalHours = parsePositive(path, rawValue);
             case "container.rows" -> data.container.rows = parsePositive(path, rawValue);
             case "container.title_template" -> data.container.titleTemplate = rawValue;
+            case "player_inventory.enabled" -> data.playerInventory.enabled = parseBoolean(path, rawValue);
             default -> throw new IllegalArgumentException("Unknown or read-only config path: " + path);
         }
     }
@@ -353,6 +360,8 @@ public final class ExchangeConfigManager {
         PerformanceData performance;
         LoggingData logging;
         ContainerData container;
+        @com.google.gson.annotations.SerializedName("player_inventory")
+        PlayerInventoryData playerInventory;
         List<RemoteServerData> remoteServers;
     }
 
@@ -403,6 +412,10 @@ public final class ExchangeConfigManager {
         int rows;
         @com.google.gson.annotations.SerializedName("title_template")
         String titleTemplate;
+    }
+
+    private static final class PlayerInventoryData {
+        Boolean enabled = Boolean.TRUE;
     }
 
     private static final class RemoteServerData {

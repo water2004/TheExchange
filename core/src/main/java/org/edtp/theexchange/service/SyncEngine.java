@@ -17,20 +17,32 @@ import org.edtp.theexchange.network.protocol.messages.SlotsStateResponse;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 
 public class SyncEngine {
-
-    private static final long SYNC_TIMEOUT_MS = 5000;
 
     private final NetworkManager networkManager;
     private final CacheManager cacheManager;
     private final CompatibilityChecker compatibilityChecker;
+    private final long requestTimeoutMs;
+    private final BooleanSupplier playerInventoriesEnabled;
 
     public SyncEngine(NetworkManager networkManager, CacheManager cacheManager,
-                      CompatibilityChecker compatibilityChecker) {
+                      CompatibilityChecker compatibilityChecker, long requestTimeoutMs) {
+        this(networkManager, cacheManager, compatibilityChecker, requestTimeoutMs, () -> true);
+    }
+
+    public SyncEngine(NetworkManager networkManager, CacheManager cacheManager,
+                      CompatibilityChecker compatibilityChecker, long requestTimeoutMs,
+                      BooleanSupplier playerInventoriesEnabled) {
         this.networkManager = networkManager;
         this.cacheManager = cacheManager;
         this.compatibilityChecker = compatibilityChecker;
+        this.requestTimeoutMs = requestTimeoutMs;
+        this.playerInventoriesEnabled = playerInventoriesEnabled != null
+                ? playerInventoriesEnabled : () -> true;
     }
 
     public CompletableFuture<Void> refreshChangedSlotsAsync(String serverName) {
@@ -39,16 +51,16 @@ public class SyncEngine {
 
     public CompletableFuture<InventoryScope> refreshChangedSlotsAsync(String serverName, InventoryAccess access) {
         InventoryAccess requestAccess = access != null ? access : InventoryAccess.server();
+        if (playerInventoryDisabled(requestAccess)) {
+            return disabledFuture();
+        }
         Connection conn = getConnection(serverName);
         if (conn == null) {
             return CompletableFuture.completedFuture(scopeOrServer(requestAccess));
         }
-        if (!supportsRequestedAccess(conn, requestAccess)) {
-            return CompletableFuture.failedFuture(new IllegalStateException(unsupportedPlayerInventoryMessage()));
-        }
-        return conn.<SlotVersionsResponse>sendAsync(
+        return timeoutAsNull(conn.<SlotVersionsResponse>sendAsync(
                         FrameType.QUERY_SLOT_VERSIONS, new QuerySlotVersionsRequest(null, requestAccess),
-                        FrameType.SLOT_VERSIONS_RESPONSE, SYNC_TIMEOUT_MS)
+                        FrameType.SLOT_VERSIONS_RESPONSE, requestTimeoutMs))
                 .thenCompose(response -> {
                     if (response == null) {
                         return CompletableFuture.completedFuture(scopeOrServer(requestAccess));
@@ -71,20 +83,20 @@ public class SyncEngine {
     }
 
     public CompletableFuture<Void> querySlotsAsync(String serverName, List<Integer> slots, InventoryAccess access) {
+        InventoryAccess requestAccess = access != null ? access : InventoryAccess.server();
+        if (playerInventoryDisabled(requestAccess)) {
+            return disabledFuture();
+        }
         if (slots == null || slots.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        InventoryAccess requestAccess = access != null ? access : InventoryAccess.server();
         Connection conn = getConnection(serverName);
         if (conn == null) {
             return CompletableFuture.completedFuture(null);
         }
-        if (!supportsRequestedAccess(conn, requestAccess)) {
-            return CompletableFuture.failedFuture(new IllegalStateException(unsupportedPlayerInventoryMessage()));
-        }
-        return conn.<SlotsStateResponse>sendAsync(
+        return timeoutAsNull(conn.<SlotsStateResponse>sendAsync(
                 FrameType.QUERY_SLOTS, new QuerySlotsRequest(null, slots, requestAccess),
-                FrameType.SLOTS_STATE_RESPONSE, SYNC_TIMEOUT_MS).thenAccept(response -> {
+                FrameType.SLOTS_STATE_RESPONSE, requestTimeoutMs)).thenAccept(response -> {
             if (response == null) {
                 return;
             }
@@ -101,17 +113,17 @@ public class SyncEngine {
 
     public CompletableFuture<Integer> querySlotVersionAsync(String serverName, int slot, InventoryAccess access) {
         InventoryAccess requestAccess = access != null ? access : InventoryAccess.server();
+        if (playerInventoryDisabled(requestAccess)) {
+            return disabledFuture();
+        }
         InventoryScope cachedScope = scopeOrServer(requestAccess);
         Connection conn = getConnection(serverName);
         if (conn == null) {
             return CompletableFuture.completedFuture(cacheManager.getSlotVersion(serverName, cachedScope, slot));
         }
-        if (!supportsRequestedAccess(conn, requestAccess)) {
-            return CompletableFuture.failedFuture(new IllegalStateException(unsupportedPlayerInventoryMessage()));
-        }
-        return conn.<QuerySlotVersionResponse>sendAsync(
+        return timeoutAsNull(conn.<QuerySlotVersionResponse>sendAsync(
                 FrameType.QUERY_SLOT_VERSION, new QuerySlotVersionRequest(null, slot, requestAccess),
-                FrameType.SLOT_VERSION_RESPONSE, SYNC_TIMEOUT_MS).thenApply(response -> {
+                FrameType.SLOT_VERSION_RESPONSE, requestTimeoutMs)).thenApply(response -> {
             if (response == null) {
                 return cacheManager.getSlotVersion(serverName, cachedScope, slot);
             }
@@ -128,16 +140,16 @@ public class SyncEngine {
 
     public CompletableFuture<Void> querySlotStateAsync(String serverName, int slot, InventoryAccess access) {
         InventoryAccess requestAccess = access != null ? access : InventoryAccess.server();
+        if (playerInventoryDisabled(requestAccess)) {
+            return disabledFuture();
+        }
         Connection conn = getConnection(serverName);
         if (conn == null) {
             return CompletableFuture.completedFuture(null);
         }
-        if (!supportsRequestedAccess(conn, requestAccess)) {
-            return CompletableFuture.failedFuture(new IllegalStateException(unsupportedPlayerInventoryMessage()));
-        }
-        return conn.<SlotStateResponse>sendAsync(
+        return timeoutAsNull(conn.<SlotStateResponse>sendAsync(
                 FrameType.QUERY_SLOT_STATE, new QuerySlotStateRequest(null, slot, requestAccess),
-                FrameType.SLOT_STATE_RESPONSE, SYNC_TIMEOUT_MS).thenAccept(response -> {
+                FrameType.SLOT_STATE_RESPONSE, requestTimeoutMs)).thenAccept(response -> {
             if (response != null) {
                 if (!response.isSuccess()) {
                     throw new IllegalStateException(response.getFailReason());
@@ -159,6 +171,26 @@ public class SyncEngine {
         cacheManager.updateCacheSlots(serverName, scope != null ? scope : InventoryScope.server(), slots);
     }
 
+    private static <T> CompletableFuture<T> timeoutAsNull(CompletableFuture<T> future) {
+        return future.exceptionally(error -> {
+            if (isTimeout(error)) {
+                return null;
+            }
+            if (error instanceof CompletionException completionException) {
+                throw completionException;
+            }
+            throw new CompletionException(error);
+        });
+    }
+
+    private static boolean isTimeout(Throwable error) {
+        Throwable cause = error;
+        while (cause instanceof CompletionException && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause instanceof TimeoutException;
+    }
+
     private InventoryScope scopeOrServer(InventoryAccess access) {
         InventoryScope scope = access != null ? access.effectiveScope() : null;
         return scope != null ? scope : InventoryScope.server();
@@ -171,11 +203,13 @@ public class SyncEngine {
         return networkManager.getConnection(serverName);
     }
 
-    private boolean supportsRequestedAccess(Connection conn, InventoryAccess access) {
-        return access == null || !access.isPlayer() || conn.supportsInventoryAccess();
+    private boolean playerInventoryDisabled(InventoryAccess access) {
+        return access != null && access.isPlayer() && !playerInventoriesEnabled.getAsBoolean();
     }
 
-    private String unsupportedPlayerInventoryMessage() {
-        return "目标服务器版本不支持玩家仓库，请升级 TheExchange";
+    private static <T> CompletableFuture<T> disabledFuture() {
+        return CompletableFuture.failedFuture(
+                new IllegalStateException(ExchangeService.PLAYER_INVENTORIES_DISABLED));
     }
+
 }

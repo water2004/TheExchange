@@ -71,6 +71,25 @@ public class DatabaseManager {
                     "password_hash TEXT NOT NULL," +
                     "created_at    INTEGER NOT NULL," +
                     "updated_at    INTEGER NOT NULL)");
+
+            // Only unresolved end-to-end mutations are stored. Closed transactions are deleted immediately.
+            stmt.execute("CREATE TABLE IF NOT EXISTS mutation_recovery (" +
+                    "direction    TEXT NOT NULL," +
+                    "peer_id      TEXT NOT NULL," +
+                    "transaction_id TEXT NOT NULL," +
+                    "state        TEXT NOT NULL," +
+                    "request_blob BLOB NOT NULL," +
+                    "result_blob  BLOB," +
+                    "updated_at   INTEGER NOT NULL," +
+                    "PRIMARY KEY (direction, peer_id, transaction_id))");
+
+            stmt.execute("CREATE TABLE IF NOT EXISTS settlement_vault (" +
+                    "transaction_id TEXT PRIMARY KEY," +
+                    "owner_uuid    TEXT," +
+                    "owner_name    TEXT," +
+                    "item_blob     BLOB NOT NULL," +
+                    "reason        TEXT," +
+                    "created_at    INTEGER NOT NULL)");
         }
         migratePlayerInventoryAuthToUuidOnly();
     }

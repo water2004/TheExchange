@@ -8,7 +8,7 @@ package org.edtp.theexchange.network.protocol;
 public class Frame {
 
     public static final int MAGIC = 0x45584348; // "EXCH"
-    public static final short VERSION = 1;
+    public static final short VERSION = 2;
     public static final int HEADER_SIZE = 28;
 
     private FrameType type;

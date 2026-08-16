@@ -1,47 +1,60 @@
-"""Read bench_data.csv and write bench_report.png."""
+"""Read saturation benchmark CSV and write bench_report.png."""
 import csv
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
-data = {"dedicated": ([], [], []), "random": ([], [], []), "sameSlot": ([], [], [])}
+scenarios = ["partitioned", "random", "sameSlot"]
+data = {scenario: {"in_flight": [], "rate": [], "success": [], "p99": []}
+        for scenario in scenarios}
 
-with open("bench_data.csv") as f:
-    for row in csv.DictReader(f):
-        s = row["scenario"]
-        data[s][0].append(int(row["core_threads"]))
-        data[s][1].append(float(row["rate_s"]))
-        data[s][2].append(float(row["successRate"]))
+with open("bench_data.csv") as file:
+    for row in csv.DictReader(file):
+        values = data[row["scenario"]]
+        values["in_flight"].append(int(row["in_flight"]))
+        values["rate"].append(float(row["rate_s"]))
+        values["success"].append(float(row["successRate"]))
+        values["p99"].append(float(row["result_p99_us"]) / 1000.0)
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+concurrency_levels = sorted({value for scenario in scenarios
+                             for value in data[scenario]["in_flight"]})
+colors = {"partitioned": "#2ecc71", "random": "#3498db", "sameSlot": "#e74c3c"}
+labels = {
+    "partitioned": "independent player warehouses",
+    "random": "random slots (one warehouse)",
+    "sameSlot": "same slot (worst contention)",
+}
+markers = {"partitioned": "s", "random": "o", "sameSlot": "^"}
 
-colors = {"dedicated": "#2ecc71", "random": "#3498db", "sameSlot": "#e74c3c"}
-labels = {"dedicated": "no contention (dedicated slots)", "random": "random slots (54 shared)", "sameSlot": "full contention (same slot)"}
-markers = {"dedicated": "s", "random": "o", "sameSlot": "^"}
+for scenario in scenarios:
+    values = data[scenario]
+    axes[0].plot(values["in_flight"], values["rate"], color=colors[scenario],
+                 marker=markers[scenario], label=labels[scenario], linewidth=2, markersize=7)
+    axes[1].plot(values["in_flight"], values["p99"], color=colors[scenario],
+                 marker=markers[scenario], label=labels[scenario], linewidth=2, markersize=7)
+    axes[2].plot(values["in_flight"], values["success"], color=colors[scenario],
+                 marker=markers[scenario], label=labels[scenario], linewidth=2, markersize=7)
 
-for s in ["dedicated", "random", "sameSlot"]:
-    t, r, _ = data[s]
-    ax1.plot(t, r, color=colors[s], marker=markers[s], label=labels[s], linewidth=2, markersize=8)
+for axis in axes:
+    axis.set_xscale("log", base=2)
+    axis.set_xticks(concurrency_levels)
+    axis.set_xticklabels([str(value) for value in concurrency_levels])
+    axis.set_xlabel("transactions in flight", fontsize=11)
+    axis.grid(True, alpha=0.3)
 
-ax1.set_xlabel("core_threads", fontsize=12)
-ax1.set_ylabel("throughput (ops/s)", fontsize=12)
-ax1.set_title("Realistic Throughput (submit → coreExecutor)", fontsize=14)
-ax1.legend(fontsize=9, loc="upper left")
-ax1.grid(True, alpha=0.3)
-ax1.set_xlim(left=0)
-ax1.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{y/1000:.0f}K' if y < 1_000_000 else f'{y/1_000_000:.1f}M'))
+axes[0].set_ylabel("throughput (transactions/s)", fontsize=11)
+axes[0].set_title("V2 Saturation Throughput", fontsize=14)
+axes[0].yaxis.set_major_formatter(ticker.FuncFormatter(
+    lambda value, _: f"{value / 1000:.0f}K" if value < 1_000_000 else f"{value / 1_000_000:.1f}M"))
+axes[0].legend(fontsize=8, loc="best")
 
-for s in ["dedicated", "random", "sameSlot"]:
-    t, _, sr = data[s]
-    ax2.plot(t, sr, color=colors[s], marker=markers[s], label=labels[s], linewidth=2, markersize=8)
+axes[1].set_ylabel("RESULT latency P99 (ms)", fontsize=11)
+axes[1].set_title("Tail Latency", fontsize=14)
 
-ax2.set_xlabel("core_threads", fontsize=12)
-ax2.set_ylabel("success rate (%)", fontsize=12)
-ax2.set_title("Success Rate vs core_threads", fontsize=14)
-ax2.legend(fontsize=9, loc="lower left")
-ax2.grid(True, alpha=0.3)
-ax2.set_xlim(left=0)
-ax2.set_ylim(-5, 105)
-ax2.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{y:.0f}%'))
+axes[2].set_ylabel("optimistic commit success (%)", fontsize=11)
+axes[2].set_title("Commit Success Rate", fontsize=14)
+axes[2].set_ylim(-5, 105)
+axes[2].yaxis.set_major_formatter(ticker.FuncFormatter(lambda value, _: f"{value:.0f}%"))
 
 plt.tight_layout()
 plt.savefig("bench_report.png", dpi=150, bbox_inches="tight")

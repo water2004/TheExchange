@@ -48,7 +48,12 @@ public class FrameDecoder {
                 throw new IOException("Protocol version mismatch: expected " + Frame.VERSION + ", got " + version);
             }
             expectedLength = bb.getInt();
-            expectedType = FrameType.fromCode(bb.getShort());
+            short typeCode = bb.getShort();
+            expectedType = FrameType.fromCode(typeCode);
+            if (expectedType == null) {
+                throw new IOException("Unknown frame type: 0x"
+                        + Integer.toHexString(Short.toUnsignedInt(typeCode)));
+            }
             sequence = bb.getLong();
             timestamp = bb.getLong();
 

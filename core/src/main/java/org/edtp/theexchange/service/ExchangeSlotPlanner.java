@@ -4,21 +4,18 @@ import org.edtp.theexchange.model.NeutralItem;
 
 import java.util.List;
 import java.util.OptionalInt;
-import java.util.function.ToIntFunction;
 import java.util.function.Predicate;
 
-/** Loader-independent slot selection policy for automated warehouse transfers. */
-public final class WarehouseAutomationPlanner {
-    private WarehouseAutomationPlanner() {
+/** Loader-independent slot selection policy for remote exchange operations. */
+public final class ExchangeSlotPlanner {
+    private ExchangeSlotPlanner() {
+    }
+
+    public static OptionalInt findPutSlot(List<NeutralItem> slots, NeutralItem incoming) {
+        return findPutSlot(slots, incoming, 0);
     }
 
     public static OptionalInt findPutSlot(List<NeutralItem> slots, NeutralItem incoming,
-                                          ToIntFunction<NeutralItem> maxStackSizeProvider) {
-        return findPutSlot(slots, incoming, maxStackSizeProvider, 0);
-    }
-
-    public static OptionalInt findPutSlot(List<NeutralItem> slots, NeutralItem incoming,
-                                          ToIntFunction<NeutralItem> maxStackSizeProvider,
                                           int startSlot) {
         if (slots == null || slots.isEmpty() || incoming == null
                 || incoming.isEmpty() || incoming.isIncompatible()) {
@@ -33,13 +30,8 @@ public final class WarehouseAutomationPlanner {
                     || !current.sameStackKind(incoming)) {
                 continue;
             }
-            int maxStack;
-            try {
-                maxStack = maxStackSizeProvider != null
-                        ? Math.max(1, maxStackSizeProvider.applyAsInt(current.copy())) : 64;
-            } catch (RuntimeException ignored) {
-                continue;
-            }
+            int maxStack = current.getMaxStackSize();
+            if (maxStack <= 0) continue;
             if ((long) current.getCount() + incoming.getCount() <= maxStack) {
                 return OptionalInt.of(slot);
             }

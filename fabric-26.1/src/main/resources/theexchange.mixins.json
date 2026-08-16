@@ -2,8 +2,10 @@
   "required": true,
   "package": "org.edtp.theexchange.fabric.mixin",
   "mixins": [
+    "BlockEntityMixin",
     "EnderChestBlockMixin",
-    "HopperBlockEntityMixin"
+    "HopperBlockEntityMixin",
+    "SignBlockEntityMixin"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -1,20 +1,17 @@
 package org.edtp.theexchange.service;
 
 import org.edtp.theexchange.api.ExchangeAPI;
-import org.edtp.theexchange.compat.CompatibilityChecker;
 import org.edtp.theexchange.compat.ItemSerializer;
 import org.edtp.theexchange.model.InventoryAccess;
 import org.edtp.theexchange.model.InventoryScope;
 import org.edtp.theexchange.model.NeutralItem;
 import org.edtp.theexchange.model.OperationType;
-import org.edtp.theexchange.network.protocol.messages.PutItemRequest;
-import org.edtp.theexchange.network.protocol.messages.PutItemResponse;
+import org.edtp.theexchange.network.protocol.MutationHashes;
+import org.edtp.theexchange.network.protocol.messages.MutationExecute;
+import org.edtp.theexchange.network.protocol.messages.MutationKind;
+import org.edtp.theexchange.network.protocol.messages.MutationResultMessage;
 import org.edtp.theexchange.network.protocol.messages.PlayerInventoryAccessRequest;
 import org.edtp.theexchange.network.protocol.messages.PlayerInventoryAccessResponse;
-import org.edtp.theexchange.network.protocol.messages.SwapItemRequest;
-import org.edtp.theexchange.network.protocol.messages.SwapItemResponse;
-import org.edtp.theexchange.network.protocol.messages.TakeItemRequest;
-import org.edtp.theexchange.network.protocol.messages.TakeItemResponse;
 import org.edtp.theexchange.storage.DatabaseManager;
 import org.edtp.theexchange.storage.LocalInventoryCacheManager;
 import org.edtp.theexchange.storage.LocalItemStore;
@@ -27,6 +24,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
@@ -67,15 +65,73 @@ class PlayerInventoryAccessServiceTest {
         assertNull(context.localItemStore.getItem(scope, 0).item());
 
         InventoryAccess access = authenticate(context, "Steve", "secret");
-        PutItemResponse ok = context.service.handleRemotePut(new PutItemRequest(
-                0, item("minecraft:stone", 3), 0, "correct-password", "actor", "Viewer",
-                access));
+        MutationResultMessage ok = put(context, 0, item("minecraft:stone", 3),
+                0, "correct-password", access);
 
         assertTrue(ok.isSuccess());
         assertEquals(scope, ok.getScope());
         assertEquals("minecraft:stone", context.localItemStore.getItem(scope, 0).item().getItemId());
         assertNull(context.localItemStore.getItem(InventoryScope.server(), 0).item(),
                 "player inventory writes must not fall through to the shared warehouse");
+    }
+
+    @Test
+    void disabledPlayerInventoriesRejectAuthenticationAndExistingSessionAccess() {
+        TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        InventoryScope playerScope = InventoryScope.player("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        context.authStore.setPassword(playerScope, "secret");
+        InventoryAccess access = authenticate(context, "Steve", "secret");
+        MutationResultMessage initial = put(context, 0, item("minecraft:diamond", 3),
+                0, "before-disable", access);
+        assertTrue(initial.isSuccess());
+
+        context.hooks.setPlayerInventoriesEnabled(false);
+
+        PlayerInventoryAccessResponse authentication = authenticateResponse(context, "Steve", "secret");
+        assertFalse(authentication.isSuccess());
+        assertEquals("玩家仓库功能已被服务器管理员关闭", authentication.getFailReason());
+
+        MutationResultMessage take = take(context, 0, "minecraft:diamond",
+                initial.getNewVersion(), 1, "after-disable", access);
+        assertFalse(take.isSuccess());
+        assertEquals("玩家仓库功能已被服务器管理员关闭", take.getFailReason());
+        assertEquals(3, context.localItemStore.getItem(playerScope, 0).item().getCount(),
+                "a rejected request must not mutate the player warehouse");
+        assertFalse(context.service.canReceiveInventoryUpdate("local", playerScope));
+
+        ExchangeService.PutResult outbound = context.service.putNeutralItemAsync(
+                "remote", 0, "actor", "Viewer", item("minecraft:stone", 1), access).join();
+        assertFalse(outbound.isSuccess());
+        assertEquals("玩家仓库功能已被服务器管理员关闭", outbound.getFailReason(),
+                "the local feature switch must reject outbound remote access too");
+
+        MutationResultMessage sharedWarehouse = put(context, 1, item("minecraft:stone", 1),
+                0, "shared-after-disable", InventoryAccess.server());
+        assertTrue(sharedWarehouse.isSuccess(), "disabling player warehouses must not disable shared warehouses");
+    }
+
+    @Test
+    void warehouseRecomputesStackLimitInsteadOfTrustingRequesterHint() {
+        TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        NeutralItem understated = item("minecraft:stone", 32);
+        understated.setMaxStackSize(1);
+        understated.setIncompatible(true);
+
+        MutationResultMessage accepted = put(context, 0, understated, 0,
+                "remote-limit-accepted", InventoryAccess.server());
+
+        assertTrue(accepted.isSuccess());
+        assertNotNull(accepted.getCurrentItem());
+        assertEquals(64, accepted.getCurrentItem().getMaxStackSize());
+        assertFalse(accepted.getCurrentItem().isIncompatible());
+
+        NeutralItem overstated = item("minecraft:stone", 65);
+        overstated.setMaxStackSize(999);
+        MutationResultMessage rejected = put(context, 1, overstated, 0,
+                "remote-limit-rejected", InventoryAccess.server());
+
+        assertFalse(rejected.isSuccess());
+        assertEquals("STACK_OVERFLOW", rejected.getFailReason());
     }
 
     @Test
@@ -87,14 +143,12 @@ class PlayerInventoryAccessServiceTest {
         context.authStore.setPassword(secondScope, "secret");
 
         InventoryAccess firstAccess = authenticate(context, "Alex", "secret");
-        PutItemResponse first = context.service.handleRemotePut(new PutItemRequest(
-                0, item("minecraft:diamond", 1), 0, "same-request-id", "actor", "Viewer",
-                firstAccess));
+        MutationResultMessage first = put(context, 0, item("minecraft:diamond", 1),
+                0, "same-request-id", firstAccess);
         context.hooks.setResolvedUuid("22222222-2222-2222-2222-222222222222");
         InventoryAccess secondAccess = authenticate(context, "Alex", "secret");
-        PutItemResponse second = context.service.handleRemotePut(new PutItemRequest(
-                0, item("minecraft:emerald", 2), 0, "same-request-id", "actor", "Viewer",
-                secondAccess));
+        MutationResultMessage second = put(context, 0, item("minecraft:emerald", 2),
+                0, "same-request-id", secondAccess);
 
         assertTrue(first.isSuccess());
         assertTrue(second.isSuccess());
@@ -162,15 +216,13 @@ class PlayerInventoryAccessServiceTest {
         TestContext context = newContext("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
         for (int slot : new int[]{-1, ExchangeService.INVENTORY_SLOT_COUNT}) {
-            PutItemResponse put = context.service.handleRemotePut(new PutItemRequest(
-                    slot, item("minecraft:stone", 1), 0, "invalid-put-" + slot,
-                    "actor", "Viewer", InventoryAccess.server()));
-            TakeItemResponse take = context.service.handleRemoteTake(new TakeItemRequest(
-                    slot, "minecraft:stone", 0, 1, "invalid-take-" + slot,
-                    "actor", "Viewer", InventoryAccess.server()));
-            SwapItemResponse swap = context.service.handleRemoteSwap(new SwapItemRequest(
-                    slot, item("minecraft:dirt", 1), 0, "minecraft:stone", 1,
-                    false, "invalid-swap-" + slot, "actor", "Viewer", InventoryAccess.server()));
+            MutationResultMessage put = put(context, slot, item("minecraft:stone", 1),
+                    0, "invalid-put-" + slot, InventoryAccess.server());
+            MutationResultMessage take = take(context, slot, "minecraft:stone", 0,
+                    1, "invalid-take-" + slot, InventoryAccess.server());
+            MutationResultMessage swap = swap(context, slot, item("minecraft:dirt", 1),
+                    "minecraft:stone", 0, 1, false,
+                    "invalid-swap-" + slot, InventoryAccess.server());
 
             assertFalse(put.isSuccess());
             assertEquals("INVALID_SLOT", put.getFailReason());
@@ -208,33 +260,29 @@ class PlayerInventoryAccessServiceTest {
         context.authStore.setPassword(scope, "secret");
         InventoryAccess access = authenticate(context, "Steve", "secret");
 
-        PutItemResponse putForTake = context.service.handleRemotePut(new PutItemRequest(
-                0, item("minecraft:stone", 3), 0, "put-for-take", "actor", "Viewer",
-                access));
+        MutationResultMessage putForTake = put(context, 0, item("minecraft:stone", 3),
+                0, "put-for-take", access);
         assertTrue(putForTake.isSuccess());
 
-        TakeItemResponse take = context.service.handleRemoteTake(new TakeItemRequest(
-                0, "minecraft:stone", putForTake.getNewVersion(), 2, "take-player",
-                "actor", "Viewer", access));
+        MutationResultMessage take = take(context, 0, "minecraft:stone",
+                putForTake.getNewVersion(), 2, "take-player", access);
         assertTrue(take.isSuccess());
         assertEquals(scope, take.getScope());
-        assertNotNull(take.getItemsToGive());
-        assertEquals(2, take.getItemsToGive().getCount());
+        assertNotNull(take.getTransferredItem());
+        assertEquals(2, take.getTransferredItem().getCount());
         assertEquals(1, context.localItemStore.getItem(scope, 0).item().getCount());
 
-        PutItemResponse putForSwap = context.service.handleRemotePut(new PutItemRequest(
-                1, item("minecraft:dirt", 4), 0, "put-for-swap", "actor", "Viewer",
-                access));
+        MutationResultMessage putForSwap = put(context, 1, item("minecraft:dirt", 4),
+                0, "put-for-swap", access);
         assertTrue(putForSwap.isSuccess());
 
-        SwapItemResponse swap = context.service.handleRemoteSwap(new SwapItemRequest(
-                1, item("minecraft:emerald", 1), putForSwap.getNewVersion(),
-                "minecraft:dirt", 4, false, "swap-player", "actor", "Viewer",
-                access));
+        MutationResultMessage swap = swap(context, 1, item("minecraft:emerald", 1),
+                "minecraft:dirt", putForSwap.getNewVersion(), 4, false,
+                "swap-player", access);
         assertTrue(swap.isSuccess());
         assertEquals(scope, swap.getScope());
-        assertNotNull(swap.getTakenItem());
-        assertEquals("minecraft:dirt", swap.getTakenItem().getItemId());
+        assertNotNull(swap.getTransferredItem());
+        assertEquals("minecraft:dirt", swap.getTransferredItem().getItemId());
         assertEquals("minecraft:emerald", context.localItemStore.getItem(scope, 1).item().getItemId());
         assertNull(context.localItemStore.getItem(InventoryScope.server(), 1).item());
     }
@@ -250,7 +298,7 @@ class PlayerInventoryAccessServiceTest {
         CountDownLatch start = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(threads);
         ExecutorService pool = Executors.newFixedThreadPool(threads);
-        ConcurrentLinkedQueue<PutItemResponse> responses = new ConcurrentLinkedQueue<>();
+        ConcurrentLinkedQueue<MutationResultMessage> responses = new ConcurrentLinkedQueue<>();
 
         try {
             for (int i = 0; i < threads; i++) {
@@ -259,9 +307,8 @@ class PlayerInventoryAccessServiceTest {
                     ready.countDown();
                     try {
                         start.await();
-                        responses.add(context.service.handleRemotePut(new PutItemRequest(
-                                0, item("minecraft:stone", 1), 0, "concurrent-" + index,
-                                "actor-" + index, "Viewer", access)));
+                        responses.add(put(context, 0, item("minecraft:stone", 1),
+                                0, "concurrent-" + index, "actor-" + index, access));
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     } finally {
@@ -277,7 +324,7 @@ class PlayerInventoryAccessServiceTest {
             pool.shutdownNow();
         }
 
-        long successes = responses.stream().filter(PutItemResponse::isSuccess).count();
+        long successes = responses.stream().filter(MutationResultMessage::isSuccess).count();
         long versionMismatches = responses.stream()
                 .filter(response -> !response.isSuccess())
                 .filter(response -> "VERSION_MISMATCH".equals(response.getFailReason()))
@@ -301,22 +348,20 @@ class PlayerInventoryAccessServiceTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
 
         try {
-            CompletableFuture<PutItemResponse> serverFuture = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<MutationResultMessage> serverFuture = CompletableFuture.supplyAsync(() -> {
                 await(start);
-                return context.service.handleRemotePut(new PutItemRequest(
-                        0, item("minecraft:iron_ingot", 1), 0, "same-request",
-                        "actor", "Viewer", InventoryAccess.server()));
+                return put(context, 0, item("minecraft:iron_ingot", 1), 0,
+                        "same-request", InventoryAccess.server());
             }, pool);
-            CompletableFuture<PutItemResponse> playerFuture = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<MutationResultMessage> playerFuture = CompletableFuture.supplyAsync(() -> {
                 await(start);
-                return context.service.handleRemotePut(new PutItemRequest(
-                        0, item("minecraft:gold_ingot", 1), 0, "same-request",
-                        "actor", "Viewer", access));
+                return put(context, 0, item("minecraft:gold_ingot", 1), 0,
+                        "same-request", access);
             }, pool);
 
             start.countDown();
-            PutItemResponse server = serverFuture.get(30, TimeUnit.SECONDS);
-            PutItemResponse player = playerFuture.get(30, TimeUnit.SECONDS);
+            MutationResultMessage server = serverFuture.get(30, TimeUnit.SECONDS);
+            MutationResultMessage player = playerFuture.get(30, TimeUnit.SECONDS);
 
             assertTrue(server.isSuccess());
             assertTrue(player.isSuccess());
@@ -329,6 +374,32 @@ class PlayerInventoryAccessServiceTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void completedMutationsDoNotRetainOneLockPerPlayerSlotForever() throws Exception {
+        TestContext context = newContext("11111111-1111-1111-1111-111111111111");
+        String[] ownerUuids = {
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222",
+                "33333333-3333-3333-3333-333333333333"
+        };
+
+        for (int index = 0; index < ownerUuids.length; index++) {
+            String ownerUuid = ownerUuids[index];
+            InventoryScope scope = InventoryScope.player(ownerUuid);
+            context.hooks.setResolvedUuid(ownerUuid);
+            context.authStore.setPassword(scope, "secret");
+            InventoryAccess access = authenticate(context, "Owner" + index, "secret");
+            assertTrue(put(context, 0, item("minecraft:stone", 1), 0,
+                    "lock-lifecycle-" + index, access).isSuccess());
+        }
+
+        var field = ExchangeService.class.getDeclaredField("localSlotLocks");
+        field.setAccessible(true);
+        Map<?, ?> retainedLocks = (Map<?, ?>) field.get(context.service);
+        assertTrue(retainedLocks.isEmpty(),
+                "completed operations must not retain an unbounded lock entry per player scope and slot");
     }
 
     private TestContext newContext(String resolvedUuid) {
@@ -348,7 +419,7 @@ class PlayerInventoryAccessServiceTest {
                 ? new PlayerInventorySessionManager(authStore) : null;
         TestHooks hooks = new TestHooks(resolvedUuid);
         ExchangeService service = new ExchangeService(null, localItemStore, operationLogger, sessionManager,
-                null, new CompatibilityChecker(serializer), serializer, null, hooks, 1000);
+                null, null, hooks, 1000);
         TestContext context = new TestContext(service, localItemStore, authStore, hooks,
                 cacheManager, operationLogger, db);
         contexts.add(context);
@@ -376,6 +447,42 @@ class PlayerInventoryAccessServiceTest {
             Thread.currentThread().interrupt();
             throw new AssertionError(e);
         }
+    }
+
+    private static MutationResultMessage put(TestContext context, int slot, NeutralItem item,
+                                             int expectedVersion, String transactionId,
+                                             InventoryAccess access) {
+        return put(context, slot, item, expectedVersion, transactionId, "actor", access);
+    }
+
+    private static MutationResultMessage put(TestContext context, int slot, NeutralItem item,
+                                             int expectedVersion, String transactionId,
+                                             String actorUuid, InventoryAccess access) {
+        return mutate(context, new MutationExecute(transactionId, null, MutationKind.PUT,
+                slot, item, null, expectedVersion, item != null ? item.getCount() : 0,
+                false, actorUuid, "Viewer", access));
+    }
+
+    private static MutationResultMessage take(TestContext context, int slot, String expectedItemId,
+                                              int expectedVersion, int count, String transactionId,
+                                              InventoryAccess access) {
+        return mutate(context, new MutationExecute(transactionId, null, MutationKind.TAKE,
+                slot, null, expectedItemId, expectedVersion, count,
+                false, "actor", "Viewer", access));
+    }
+
+    private static MutationResultMessage swap(TestContext context, int slot, NeutralItem offered,
+                                              String expectedItemId, int expectedVersion, int count,
+                                              boolean boundedMerge, String transactionId,
+                                              InventoryAccess access) {
+        return mutate(context, new MutationExecute(transactionId, null, MutationKind.SWAP,
+                slot, offered, expectedItemId, expectedVersion, count,
+                boundedMerge, "actor", "Viewer", access));
+    }
+
+    private static MutationResultMessage mutate(TestContext context, MutationExecute request) {
+        request.setIntentHash(MutationHashes.intent(request));
+        return context.service.handleMutation(request, "local");
     }
 
     private static NeutralItem item(String id, int count) {
@@ -429,6 +536,7 @@ class PlayerInventoryAccessServiceTest {
     private static final class TestHooks implements ExchangeService.RuntimeHooks {
         private final AtomicReference<String> resolvedUuid;
         private volatile boolean resolutionFailure;
+        private volatile boolean playerInventoriesEnabled = true;
 
         private TestHooks(String resolvedUuid) {
             this.resolvedUuid = new AtomicReference<>(resolvedUuid);
@@ -446,6 +554,10 @@ class PlayerInventoryAccessServiceTest {
 
         private void setResolutionFailure() {
             this.resolutionFailure = true;
+        }
+
+        private void setPlayerInventoriesEnabled(boolean enabled) {
+            this.playerInventoriesEnabled = enabled;
         }
 
         @Override
@@ -500,6 +612,11 @@ class PlayerInventoryAccessServiceTest {
             }
             String uuid = resolvedUuid.get();
             return uuid != null ? Optional.of(new ExchangeAPI.PlayerIdentity(uuid, playerName)) : Optional.empty();
+        }
+
+        @Override
+        public boolean playerInventoriesEnabled() {
+            return playerInventoriesEnabled;
         }
     }
 

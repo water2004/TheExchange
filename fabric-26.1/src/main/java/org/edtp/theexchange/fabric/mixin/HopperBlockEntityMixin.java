@@ -16,12 +16,20 @@ abstract class HopperBlockEntityMixin {
     private static void theexchange$pushIntoPlayerWarehouse(
             Level level, BlockPos pos, HopperBlockEntity hopper,
             CallbackInfoReturnable<Boolean> cir) {
-        PlayerWarehouseHopperBridge.push(level, pos, hopper).ifPresent(cir::setReturnValue);
+        PlayerWarehouseHopperBridge.Decision decision =
+                PlayerWarehouseHopperBridge.push(level, pos, hopper);
+        if (decision != PlayerWarehouseHopperBridge.Decision.PASS) {
+            cir.setReturnValue(decision == PlayerWarehouseHopperBridge.Decision.SUCCESS);
+        }
     }
 
     @Inject(method = "suckInItems", at = @At("HEAD"), cancellable = true)
     private static void theexchange$pullFromPlayerWarehouse(
             Level level, Hopper hopper, CallbackInfoReturnable<Boolean> cir) {
-        PlayerWarehouseHopperBridge.pull(level, hopper).ifPresent(cir::setReturnValue);
+        PlayerWarehouseHopperBridge.Decision decision =
+                PlayerWarehouseHopperBridge.pull(level, hopper);
+        if (decision != PlayerWarehouseHopperBridge.Decision.PASS) {
+            cir.setReturnValue(decision == PlayerWarehouseHopperBridge.Decision.SUCCESS);
+        }
     }
 }

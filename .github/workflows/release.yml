@@ -1,0 +1,101 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_BRANCH: master
+
+jobs:
+  release:
+    name: Build and publish tagged version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag is on the release branch
+        shell: bash
+        run: |
+          git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_commit" "refs/remotes/origin/${RELEASE_BRANCH}"; then
+            echo "::error title=Invalid release tag::Tag ${GITHUB_REF_NAME} does not point to a commit on ${RELEASE_BRANCH}."
+            exit 1
+          fi
+
+      - name: Verify version and release notes
+        shell: bash
+        run: |
+          version="$(sed -n 's/^mod_version=//p' gradle.properties)"
+          if [[ -z "$version" ]]; then
+            echo "::error title=Missing version::mod_version is not defined in gradle.properties."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "$version" && "$GITHUB_REF_NAME" != "v${version}" ]]; then
+            echo "::error title=Version mismatch::Tag ${GITHUB_REF_NAME} must be ${version} or v${version}."
+            exit 1
+          fi
+          if [[ ! -s RELEASE_NOTES.md ]]; then
+            echo "::error title=Missing release notes::RELEASE_NOTES.md is missing or empty."
+            exit 1
+          fi
+          echo "MOD_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Build and test all versions
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew clean build --no-daemon
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(
+            "fabric-1.21.11/build/libs/TheExchange-${MOD_VERSION}-fabric-1.21.11.jar"
+            "fabric-26.1/build/libs/TheExchange-${MOD_VERSION}-fabric-26.1.2.jar"
+            "fabric-26.2/build/libs/TheExchange-${MOD_VERSION}-fabric-26.2.jar"
+          )
+
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "::error title=Missing release asset::$asset was not produced by the build."
+              exit 1
+            fi
+          done
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "TheExchange ${MOD_VERSION}" \
+              --notes-file RELEASE_NOTES.md
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag \
+              --title "TheExchange ${MOD_VERSION}" \
+              --notes-file RELEASE_NOTES.md
+          fi

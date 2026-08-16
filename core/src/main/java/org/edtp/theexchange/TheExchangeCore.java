@@ -15,6 +15,7 @@ import org.edtp.theexchange.service.CacheManager;
 import org.edtp.theexchange.service.ExchangeService;
 import org.edtp.theexchange.service.HeartbeatManager;
 import org.edtp.theexchange.service.MenuInteractionService;
+import org.edtp.theexchange.service.MutationTransactionCoordinator;
 import org.edtp.theexchange.service.PlayerInventoryClientSessionStore;
 import org.edtp.theexchange.service.PlayerInventorySessionManager;
 import org.edtp.theexchange.service.ServerRegistry;
@@ -22,9 +23,11 @@ import org.edtp.theexchange.service.SyncEngine;
 import org.edtp.theexchange.storage.DatabaseManager;
 import org.edtp.theexchange.storage.LocalInventoryCacheManager;
 import org.edtp.theexchange.storage.LocalItemStore;
+import org.edtp.theexchange.storage.MutationRecoveryJournal;
 import org.edtp.theexchange.storage.OperationLogger;
 import org.edtp.theexchange.storage.PlayerInventoryAuthStore;
 import org.edtp.theexchange.storage.RemoteCacheStore;
+import org.edtp.theexchange.storage.SettlementVault;
 
 import java.nio.file.Path;
 import java.io.IOException;
@@ -59,13 +62,15 @@ public class TheExchangeCore {
     private volatile boolean shuttingDown;
     private CompletableFuture<Void> startupFuture;
     private ExchangeConfigManager configManager;
-    private ExchangeAPI.RuntimeConfig runtimeConfig;
+    private volatile ExchangeAPI.RuntimeConfig runtimeConfig;
     private PinnedPeerKeyStore pinnedPeerKeyStore;
 
     private DatabaseManager databaseManager;
     private LocalItemStore localItemStore;
     private RemoteCacheStore remoteCacheStore;
     private OperationLogger operationLogger;
+    private MutationRecoveryJournal mutationRecoveryJournal;
+    private SettlementVault settlementVault;
     private PlayerInventoryAuthStore playerInventoryAuthStore;
     private PlayerInventorySessionManager playerInventorySessionManager;
     private final PlayerInventoryClientSessionStore playerInventoryClientSessionStore =
@@ -79,6 +84,7 @@ public class TheExchangeCore {
     private MenuInteractionService menuInteractionService;
     private HeartbeatManager heartbeatManager;
     private ExchangeService exchangeService;
+    private MutationTransactionCoordinator mutationTransactionCoordinator;
 
     public TheExchangeCore(ExchangeAPI api) {
         this.api = api;
@@ -106,6 +112,16 @@ public class TheExchangeCore {
     public LocalItemStore getLocalItemStore() { return localItemStore; }
     public RemoteCacheStore getRemoteCacheStore() { return remoteCacheStore; }
     public OperationLogger getOperationLogger() { return operationLogger; }
+    public SettlementVault getSettlementVault() { return settlementVault; }
+
+    public CompletableFuture<List<SettlementVault.Entry>> listSettlementVaultAsync(String ownerUuid) {
+        return submit(() -> settlementVault.list(ownerUuid));
+    }
+
+    public CompletableFuture<NeutralItem> claimSettlementVaultAsync(
+            String transactionId, String ownerUuid) {
+        return submit(() -> settlementVault.claim(transactionId, ownerUuid));
+    }
     public PlayerInventoryAuthStore getPlayerInventoryAuthStore() { return playerInventoryAuthStore; }
     public PlayerInventorySessionManager getPlayerInventorySessionManager() { return playerInventorySessionManager; }
     public PlayerInventoryClientSessionStore getPlayerInventoryClientSessionStore() {
@@ -119,6 +135,10 @@ public class TheExchangeCore {
     public MenuInteractionService getMenuInteractionService() { return menuInteractionService; }
     public ExchangeService getExchangeService() { return exchangeService; }
     public boolean isInitialized() { return initialized; }
+    public boolean isPlayerInventoriesEnabled() {
+        ExchangeAPI.RuntimeConfig config = runtimeConfig;
+        return config != null && config.getPlayerInventory().isEnabled();
+    }
 
     public CompletableFuture<Void> startAsync() {
         CompletableFuture<Void> future;
@@ -282,7 +302,6 @@ public class TheExchangeCore {
                                                                     NeutralItem item,
                                                                     PlayerExchangeContext player,
                                                                     InventoryAccess access) {
-        long opGeneration = generation.get();
         return submit(() -> {
                     InventoryAccess requestAccess = resolveClientAccess(serverName, access);
                     return exchangeService.putNeutralItemAsync(
@@ -294,10 +313,9 @@ public class TheExchangeCore {
                             });
                 })
                 .thenCompose(future -> future)
-                .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
-                        ? ExchangeMutationResult.success()
-                        : ExchangeMutationResult.fail(result.getFailReason()));
+                        ? ExchangeMutationResult.success(null, result::acknowledgeSettlement)
+                        : ExchangeMutationResult.fail(result.getFailReason(), result::acknowledgeSettlement));
     }
 
     public CompletableFuture<ExchangeMutationResult> takeRemoteAsync(String serverName, int slot,
@@ -310,7 +328,6 @@ public class TheExchangeCore {
                                                                      int count,
                                                                      PlayerExchangeContext player,
                                                                      InventoryAccess access) {
-        long opGeneration = generation.get();
         return submit(() -> {
                     InventoryAccess requestAccess = resolveClientAccess(serverName, access);
                     return exchangeService.takeItemAsync(
@@ -322,10 +339,9 @@ public class TheExchangeCore {
                             });
                 })
                 .thenCompose(future -> future)
-                .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
-                        ? ExchangeMutationResult.success(result.getItemsToGive())
-                        : ExchangeMutationResult.fail(result.getFailReason()));
+                        ? ExchangeMutationResult.success(result.getItemsToGive(), result::acknowledgeSettlement)
+                        : ExchangeMutationResult.fail(result.getFailReason(), result::acknowledgeSettlement));
     }
 
     public CompletableFuture<ExchangeMutationResult> swapRemoteAsync(String serverName, int slot,
@@ -345,7 +361,6 @@ public class TheExchangeCore {
                                                                      boolean boundedMerge,
                                                                      PlayerExchangeContext player,
                                                                      InventoryAccess access) {
-        long opGeneration = generation.get();
         return submit(() -> {
                     InventoryAccess requestAccess = resolveClientAccess(serverName, access);
                     return exchangeService.swapItemAsync(
@@ -358,15 +373,15 @@ public class TheExchangeCore {
                             });
                 })
                 .thenCompose(future -> future)
-                .thenCompose(result -> ensureCurrent(opGeneration).thenApply(ignored -> result))
                 .thenApply(result -> result.isSuccess()
-                        ? ExchangeMutationResult.success(result.getTakenItem())
-                        : ExchangeMutationResult.fail(result.getFailReason()));
+                        ? ExchangeMutationResult.success(result.getTakenItem(), result::acknowledgeSettlement)
+                        : ExchangeMutationResult.fail(result.getFailReason(), result::acknowledgeSettlement));
     }
 
     public CompletableFuture<InventoryScope> setPlayerInventoryPasswordAsync(
             PlayerExchangeContext player, String password) {
         return submit(() -> {
+            requirePlayerInventoriesEnabled();
             if (player == null || player.uuid() == null || player.uuid().isBlank()) {
                 throw new IllegalArgumentException("玩家身份无效");
             }
@@ -384,12 +399,18 @@ public class TheExchangeCore {
         return submit(() -> exchangeService.authenticatePlayerInventoryAsync(
                         targetServer, ownerName, password, requester.uuid(), requester.name()))
                 .thenCompose(future -> future)
-                .thenApply(access -> playerInventoryClientSessionStore.remember(targetServer, access));
+                .thenApply(access -> {
+                    requirePlayerInventoriesEnabled();
+                    return playerInventoryClientSessionStore.remember(targetServer, access);
+                });
     }
 
     public Optional<InventoryAccess> findPlayerInventorySession(
             String serverName, String ownerName, PlayerExchangeContext requester) {
         if (requester == null) {
+            return Optional.empty();
+        }
+        if (!isPlayerInventoriesEnabled()) {
             return Optional.empty();
         }
         return playerInventoryClientSessionStore.findValid(
@@ -471,6 +492,9 @@ public class TheExchangeCore {
 
     private InventoryAccess resolveClientAccess(String serverName, InventoryAccess access) {
         InventoryAccess value = access != null ? access : InventoryAccess.server();
+        if (value.isPlayer()) {
+            requirePlayerInventoriesEnabled();
+        }
         return value.isPlayer()
                 ? playerInventoryClientSessionStore.resolve(canonicalTargetServerName(serverName), value)
                 : InventoryAccess.server();
@@ -501,6 +525,12 @@ public class TheExchangeCore {
         return scope != null ? scope : InventoryScope.server();
     }
 
+    private void requirePlayerInventoriesEnabled() {
+        if (!isPlayerInventoriesEnabled()) {
+            throw new IllegalStateException(ExchangeService.PLAYER_INVENTORIES_DISABLED);
+        }
+    }
+
     private String canonicalTargetServerName(String serverName) {
         String localName = runtimeConfig != null ? runtimeConfig.getDisplayName() : "local";
         return serverName == null || serverName.isBlank() || "local".equalsIgnoreCase(serverName)
@@ -524,6 +554,11 @@ public class TheExchangeCore {
         localItemStore = new LocalItemStore(databaseManager);
         remoteCacheStore = new RemoteCacheStore(databaseManager);
         operationLogger = new OperationLogger(Path.of(api.getConfigLoader().getConfigDir(), "logs"));
+        mutationRecoveryJournal = new MutationRecoveryJournal(databaseManager);
+        settlementVault = new SettlementVault(databaseManager);
+        mutationTransactionCoordinator = new MutationTransactionCoordinator(
+                requestTimeoutMs(runtimeConfig), message -> api.getLogger().warn(message),
+                mutationRecoveryJournal, settlementVault);
         playerInventoryAuthStore = new PlayerInventoryAuthStore(databaseManager);
         playerInventorySessionManager = new PlayerInventorySessionManager(playerInventoryAuthStore);
         playerInventoryClientSessionStore.clear();
@@ -579,6 +614,10 @@ public class TheExchangeCore {
         } catch (Throwable t) {
             runtimeConfig = oldConfig;
             restoreNetworkConfig(oldRuntime.networkManager, oldConfig);
+            if (mutationTransactionCoordinator != null && oldConfig != null) {
+                mutationTransactionCoordinator.bind(
+                        oldRuntime.networkManager, requestTimeoutMs(oldConfig));
+            }
             RuntimeBundle restored = withRestartedHeartbeat(oldRuntime, oldConfig);
             synchronized (executorLock) {
                 coreExecutor = oldExecutor;
@@ -628,18 +667,32 @@ public class TheExchangeCore {
 
         ServerRegistry nextServerRegistry = new ServerRegistry(nextNetworkManager, config.getRemoteServers());
         CompatibilityChecker compatibilityChecker = new CompatibilityChecker(api.getItemSerializer());
+        long requestTimeoutMs = requestTimeoutMs(config);
         SyncEngine nextSyncEngine = nextNetworkManager != null
-                ? new SyncEngine(nextNetworkManager, nextCacheManager, compatibilityChecker)
+                ? new SyncEngine(nextNetworkManager, nextCacheManager, compatibilityChecker,
+                        requestTimeoutMs, this::isPlayerInventoriesEnabled)
                 : null;
         ExchangeService nextExchangeService = new ExchangeService(nextNetworkManager, localItemStore,
-                operationLogger, playerInventorySessionManager, nextCacheManager, compatibilityChecker, api.getItemSerializer(), nextSyncEngine,
-                exchangeServiceHooks(), requestTimeoutMs(config));
-        MenuInteractionService nextMenuInteractionService = new MenuInteractionService(nextExchangeService);
+                operationLogger, playerInventorySessionManager, nextCacheManager, nextSyncEngine,
+                exchangeServiceHooks(), requestTimeoutMs, mutationTransactionCoordinator);
+        mutationTransactionCoordinator.bind(nextNetworkManager, requestTimeoutMs);
+        MenuInteractionService nextMenuInteractionService = new MenuInteractionService();
 
         HeartbeatManager nextHeartbeatManager = null;
         if (nextNetworkManager != null) {
-            nextNetworkManager.setMessageRouter((conn, type, msg) ->
-                    submit(() -> {
+            nextNetworkManager.setOnlineHandler(serverName -> {
+                mutationTransactionCoordinator.onPeerOnline(serverName);
+                api.runOnMainThread(() -> api.refreshRemoteInventoryView(serverName));
+            });
+            nextNetworkManager.setMessageRouter((conn, type, msg) -> {
+                if (type != null && type.isMutationLifecycle()) {
+                    ExchangeService service = exchangeService;
+                    if (service != null) {
+                        service.routeMessage(conn, type, msg);
+                    }
+                    return;
+                }
+                submit(() -> {
                         ExchangeService service = exchangeService;
                         if (service != null) {
                             service.routeMessage(conn, type, msg);
@@ -649,7 +702,8 @@ public class TheExchangeCore {
                         if (error != null) {
                             api.getLogger().warn("Dropped inbound exchange message during reload: " + error.getMessage());
                         }
-            }));
+                });
+            });
             nextHeartbeatManager = new HeartbeatManager(nextNetworkManager, nextServerRegistry, config.getNetwork());
         }
         return new RuntimeBundle(nextLocalInventoryCacheManager, nextNetworkManager, nextServerRegistry,
@@ -708,6 +762,11 @@ public class TheExchangeCore {
             public Optional<ExchangeAPI.PlayerIdentity> resolvePlayerIdentity(String playerName) {
                 return api.resolvePlayerIdentity(playerName);
             }
+
+            @Override
+            public boolean playerInventoriesEnabled() {
+                return isPlayerInventoriesEnabled();
+            }
         };
     }
 
@@ -742,18 +801,26 @@ public class TheExchangeCore {
 
     private void stopRuntimeServices(boolean flush) {
         RuntimeBundle current = currentRuntimeBundle();
+        if (mutationTransactionCoordinator != null) {
+            mutationTransactionCoordinator.beginDraining();
+        }
         if (flush) {
             shutdownRuntimeCaches(current);
         }
         stopHeartbeat(current.heartbeatManager);
         shutdownNetwork(current.networkManager);
+        if (mutationTransactionCoordinator != null) {
+            mutationTransactionCoordinator.checkpointOutstanding();
+        }
         publishRuntime(new RuntimeBundle(null, null, null, null, null, null, null, null));
         stopCoreExecutor();
     }
 
     private void publishRuntime(RuntimeBundle runtime) {
         localInventoryCacheManager = runtime.localInventoryCacheManager;
-        localItemStore.setCacheManager(runtime.localInventoryCacheManager);
+        if (localItemStore != null) {
+            localItemStore.setCacheManager(runtime.localInventoryCacheManager);
+        }
         networkManager = runtime.networkManager;
         serverRegistry = runtime.serverRegistry;
         cacheManager = runtime.cacheManager;
@@ -802,10 +869,21 @@ public class TheExchangeCore {
         }
         manager.setLocalServerName(config.getDisplayName());
         manager.setLocalPassword(config.getPassword());
-        manager.setOnlineHandler(serverName ->
-                api.runOnMainThread(() -> api.refreshRemoteInventoryView(serverName)));
-        manager.setMessageRouter((conn, type, msg) ->
-                submit(() -> {
+        manager.setOnlineHandler(serverName -> {
+            if (mutationTransactionCoordinator != null) {
+                mutationTransactionCoordinator.onPeerOnline(serverName);
+            }
+            api.runOnMainThread(() -> api.refreshRemoteInventoryView(serverName));
+        });
+        manager.setMessageRouter((conn, type, msg) -> {
+            if (type != null && type.isMutationLifecycle()) {
+                ExchangeService service = exchangeService;
+                if (service != null) {
+                    service.routeMessage(conn, type, msg);
+                }
+                return;
+            }
+            submit(() -> {
                     ExchangeService service = exchangeService;
                     if (service != null) {
                         service.routeMessage(conn, type, msg);
@@ -815,7 +893,8 @@ public class TheExchangeCore {
                     if (error != null) {
                         api.getLogger().warn("Dropped inbound exchange message during reload: " + error.getMessage());
                     }
-                }));
+            });
+        });
         applyInboundConfig(manager, config);
         manager.disconnectOutboundNotIn(config.getRemoteServers().stream()
                 .map(ExchangeAPI.RemoteServerConfig::getName)
@@ -876,10 +955,19 @@ public class TheExchangeCore {
         lifecycleExecutor.execute(() -> {
             try {
                 api.getLogger().info("Shutting down TheExchange core...");
+                synchronized (taskMonitor) {
+                    acceptingTasks = false;
+                }
+                waitForTasksToDrain();
+                if (mutationTransactionCoordinator != null) {
+                    mutationTransactionCoordinator.beginDraining();
+                    mutationTransactionCoordinator.checkpointOutstanding();
+                }
                 stopRuntimeServices(true);
                 if (playerInventorySessionManager != null) playerInventorySessionManager.clear();
                 playerInventoryClientSessionStore.clear();
                 if (operationLogger != null) operationLogger.shutdown();
+                if (mutationTransactionCoordinator != null) mutationTransactionCoordinator.close();
                 if (databaseManager != null) databaseManager.close();
                 instance = null;
                 initialized = false;

@@ -6,13 +6,6 @@ import org.edtp.theexchange.model.MenuClickType;
 import org.edtp.theexchange.model.NeutralItem;
 
 public class MenuInteractionService {
-    private static final int EXCHANGE_SLOTS = 54;
-    private final ExchangeService exchangeService;
-
-    public MenuInteractionService(ExchangeService exchangeService) {
-        this.exchangeService = exchangeService;
-    }
-
     public ExchangeInteractionResult decide(ExchangeInteraction input) {
         if (touchesIncompatibleItem(input)) {
             return ExchangeInteractionResult.reject("不兼容物品禁止操作");
@@ -43,11 +36,11 @@ public class MenuInteractionService {
         NeutralItem item = input.getSlotItem();
         if (isEmpty(item)) return ExchangeInteractionResult.refresh(null);
         if (item.isIncompatible()) return ExchangeInteractionResult.reject("不兼容物品禁止操作");
-        int targetSlot = findTargetSlot(input);
-        if (targetSlot < 0) {
+        var targetSlot = ExchangeSlotPlanner.findPutSlot(input.getExchangeItems(), item);
+        if (targetSlot.isEmpty()) {
             return ExchangeInteractionResult.reject("共享空间已满");
         }
-        return ExchangeInteractionResult.putRemote(targetSlot, item, item.getCount());
+        return ExchangeInteractionResult.putRemote(targetSlot.getAsInt(), item, item.getCount());
     }
 
     private ExchangeInteractionResult decidePickup(ExchangeInteraction input) {
@@ -77,7 +70,7 @@ public class MenuInteractionService {
         }
         if (remote.sameStackKind(input.getCarriedItem())) {
             int count = input.getButton() == 1 ? 1 : input.getCarriedItem().getCount();
-            int maxStack = maxStackSize(input.getCarriedItem());
+            int maxStack = remote.getMaxStackSize();
             int capacity = Math.max(0, maxStack - remote.getCount());
             if (count <= capacity) {
                 return ExchangeInteractionResult.putRemote(input.getSlotIndex(), input.getCarriedItem(), count);
@@ -93,18 +86,8 @@ public class MenuInteractionService {
             }
             return ExchangeInteractionResult.refresh(null);
         }
-        if (input.getCarriedItem().getCount() <= maxStackSize(input.getCarriedItem())) {
-            return ExchangeInteractionResult.swapRemote(input.getSlotIndex(), input.getCarriedItem(),
-                    remote.getCount(), remote.getItemId());
-        }
-        return ExchangeInteractionResult.refresh(null);
-    }
-
-    private int maxStackSize(NeutralItem item) {
-        if (exchangeService == null) {
-            return 64;
-        }
-        return Math.max(1, exchangeService.getMaxStackSize(item));
+        return ExchangeInteractionResult.swapRemote(input.getSlotIndex(), input.getCarriedItem(),
+                remote.getCount(), remote.getItemId());
     }
 
     private ExchangeInteractionResult decideSwap(ExchangeInteraction input) {
@@ -121,44 +104,28 @@ public class MenuInteractionService {
             }
             if (!isEmpty(remote)) {
                 if (remote.sameStackKind(input.getHotbarItem())) {
-                    int maxStack = maxStackSize(input.getHotbarItem());
+                    int maxStack = remote.getMaxStackSize();
                     if (remote.getCount() + input.getHotbarItem().getCount() <= maxStack) {
                         return ExchangeInteractionResult.putRemote(input.getSlotIndex(),
                                 input.getHotbarItem(), input.getHotbarItem().getCount());
+                    }
+                    if (input.getHotbarItem().getCount() > maxStack) {
+                        return ExchangeInteractionResult.refresh(null);
                     }
                 }
                 return ExchangeInteractionResult.swapRemote(input.getSlotIndex(),
                         input.getHotbarItem(), remote.getCount(), remote.getItemId());
             }
-            int targetSlot = findTargetSlot(input);
-            if (targetSlot < 0) {
+            var targetSlot = ExchangeSlotPlanner.findPutSlot(
+                    input.getExchangeItems(), input.getHotbarItem());
+            if (targetSlot.isEmpty()) {
                 return ExchangeInteractionResult.reject("共享空间已满");
             }
-            return ExchangeInteractionResult.putRemote(targetSlot, input.getHotbarItem(), input.getHotbarItem().getCount());
+            return ExchangeInteractionResult.putRemote(targetSlot.getAsInt(),
+                    input.getHotbarItem(), input.getHotbarItem().getCount());
         }
         if (isEmpty(remote)) return ExchangeInteractionResult.refresh(null);
         return ExchangeInteractionResult.takeRemote(input.getSlotIndex(), remote.getCount());
-    }
-
-    private int findTargetSlot(ExchangeInteraction input) {
-        NeutralItem stack = !isEmpty(input.getHotbarItem()) ? input.getHotbarItem() : input.getSlotItem();
-        if (isEmpty(stack)) return -1;
-        for (int i = 0; i < EXCHANGE_SLOTS; i++) {
-            NeutralItem current = itemAt(input, i);
-            if (!isEmpty(current) && current.sameStackKind(stack)
-                    && current.getCount() + stack.getCount() <= exchangeService.getMaxStackSize(current)) {
-                return i;
-            }
-        }
-        for (int i = 0; i < EXCHANGE_SLOTS; i++) {
-            if (isEmpty(itemAt(input, i))) return i;
-        }
-        return -1;
-    }
-
-    private NeutralItem itemAt(ExchangeInteraction input, int slot) {
-        if (slot < 0 || slot >= input.getExchangeItems().size()) return null;
-        return input.getExchangeItems().get(slot);
     }
 
     private boolean touchesIncompatibleItem(ExchangeInteraction input) {
@@ -172,7 +139,8 @@ public class MenuInteractionService {
 
     private boolean touchesExchangeSpace(ExchangeInteraction input) {
         if (isExchangeSlot(input.getSlotIndex())) return true;
-        if (input.getClickType() == MenuClickType.QUICK_MOVE && input.getSlotIndex() >= EXCHANGE_SLOTS) return true;
+        if (input.getClickType() == MenuClickType.QUICK_MOVE
+                && input.getSlotIndex() >= ExchangeService.INVENTORY_SLOT_COUNT) return true;
         if (input.getClickType() == MenuClickType.SWAP
                 && isExchangeSlot(input.getSlotIndex())
                 && input.getButton() >= 0 && input.getButton() < 9) return true;
@@ -181,7 +149,7 @@ public class MenuInteractionService {
     }
 
     private boolean isExchangeSlot(int slot) {
-        return slot >= 0 && slot < EXCHANGE_SLOTS;
+        return slot >= 0 && slot < ExchangeService.INVENTORY_SLOT_COUNT;
     }
 
     private boolean isEmpty(NeutralItem item) {

@@ -22,12 +22,13 @@ public enum FrameType {
     SLOT_VERSIONS_RESPONSE((short) 0x0019),
     QUERY_SLOTS((short) 0x001A),
     SLOTS_STATE_RESPONSE((short) 0x001B),
-    PUT_ITEM((short) 0x0020),
-    PUT_ITEM_RESPONSE((short) 0x0021),
-    TAKE_ITEM((short) 0x0022),
-    TAKE_ITEM_RESPONSE((short) 0x0023),
-    SWAP_ITEM((short) 0x0024),
-    SWAP_ITEM_RESPONSE((short) 0x0025),
+    MUTATION_EXECUTE((short) 0x0020),
+    MUTATION_RECOVER((short) 0x0021),
+    MUTATION_RESULT((short) 0x0022),
+    TRANSACTION_QUERY((short) 0x0023),
+    TRANSACTION_STATUS((short) 0x0024),
+    TRANSACTION_SETTLED((short) 0x0025),
+    TRANSACTION_CLOSED((short) 0x0026),
     PUSH_UPDATE((short) 0x0030),
     ERROR((short) 0xFFFF);
 
@@ -45,6 +46,15 @@ public enum FrameType {
     }
 
     public static FrameType fromCode(short code) {
-        return BY_CODE.getOrDefault(code, ERROR);
+        return BY_CODE.get(code);
+    }
+
+    public boolean isMutationLifecycle() {
+        return switch (this) {
+            case MUTATION_EXECUTE, MUTATION_RECOVER, MUTATION_RESULT,
+                    TRANSACTION_QUERY, TRANSACTION_STATUS,
+                    TRANSACTION_SETTLED, TRANSACTION_CLOSED -> true;
+            default -> false;
+        };
     }
 }

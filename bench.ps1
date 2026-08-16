@@ -1,19 +1,43 @@
-# One-shot: run concurrency benchmark and generate report chart.
-# Usage: .\bench.ps1 [-Python <path>]
-#   -Python  path to Python 3 with matplotlib (default: python)
+# Run the real TLS/TCP saturation benchmark and generate its chart.
+# Usage: .\bench.ps1 [-Python <path>] [-Operations <count>]
+#                    [-AuthorityThreads <count>] [-InFlight <csv>] [-Profile]
 param(
-    [string]$Python = "python"
+    [string]$Python = "python",
+    [ValidateRange(1, 10000000)]
+    [int]$Operations = 100000,
+    [ValidateRange(1, 1024)]
+    [int]$AuthorityThreads = 8,
+    [string]$InFlight = "1,8,32,128,512,2048,4096",
+    [switch]$Profile
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-Write-Host "=== Concurrency Benchmark ==="
-./gradlew :core:cleanTest :core:test -Pbench --tests "org.edtp.theexchange.concurrency.ConcurrencyBenchmark" --rerun-tasks
+$gradleArgs = @(
+    ":core:cleanTest",
+    ":core:test",
+    "-Pbench",
+    "-PbenchOperations=$Operations",
+    "-PbenchAuthorityThreads=$AuthorityThreads",
+    "-PbenchInFlight=$InFlight",
+    "--tests", "org.edtp.theexchange.concurrency.ConcurrencyBenchmark",
+    "--rerun-tasks"
+)
+if ($Profile) {
+    $gradleArgs += "-PbenchJfr=core/build/reports/bench/benchmark.jfr"
+}
+
+Write-Host "=== TLS/TCP Saturation Benchmark ==="
+& ./gradlew @gradleArgs
 
 Write-Host ""
 Write-Host "=== Generating chart ==="
 & $Python bench_plot.py bench_data.csv
 
 Write-Host ""
-Write-Host "=== Done: bench_report.png ==="
+if ($Profile) {
+    Write-Host "=== Done: bench_report.png + core/build/reports/bench/benchmark.jfr ==="
+} else {
+    Write-Host "=== Done: bench_report.png ==="
+}

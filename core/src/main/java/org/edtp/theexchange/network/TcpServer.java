@@ -1,6 +1,8 @@
 package org.edtp.theexchange.network;
 
 import org.edtp.theexchange.network.tls.TlsContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
@@ -10,6 +12,7 @@ import java.util.function.Consumer;
 
 public class TcpServer {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(TcpServer.class);
     private final int port;
     private final TlsContext tlsContext;
     private final CopyOnWriteArrayList<Connection> connections = new CopyOnWriteArrayList<>();
@@ -34,7 +37,7 @@ public class TcpServer {
             serverSocket.setEnabledProtocols(new String[]{"TLSv1.3"});
             serverSocket.setNeedClientAuth(false);
             serverSocket.setReuseAddress(true);
-            System.out.println("[Exchange|Srv] Listening on port " + port);
+            LOGGER.info("Listening for Exchange TLS connections on port {}", serverSocket.getLocalPort());
         } catch (IOException e) {
             throw new RuntimeException("Failed to start Exchange server on port " + port, e);
         }
@@ -51,7 +54,7 @@ public class TcpServer {
                 SSLSocket socket = (SSLSocket) serverSocket.accept();
                 TlsContext.configureSocket(socket);
                 String remote = socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
-                System.out.println("[Exchange|Srv] Accepted TLS from " + remote);
+                LOGGER.debug("Accepted TLS connection from {}", remote);
                 Connection conn = new Connection(remote, socket);
                 connections.add(conn);
                 if (connectionHandler != null) {
@@ -59,7 +62,7 @@ public class TcpServer {
                 }
             } catch (IOException e) {
                 if (running) {
-                    System.err.println("[Exchange|Srv] Accept error: " + e.getMessage());
+                    LOGGER.warn("TLS accept failed: {}", e.getMessage());
                 }
             }
         }

@@ -38,6 +38,10 @@ public final class PlayerWarehouseAutomationSessions {
         return current;
     }
 
+    public static void clear() {
+        SESSIONS.clear();
+    }
+
     private static String normalize(String value) {
         return value != null ? value.trim().toLowerCase(Locale.ROOT) : "";
     }
